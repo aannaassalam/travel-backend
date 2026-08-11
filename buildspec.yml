@@ -1,0 +1,33 @@
+### CodeBuild: compile TypeScript, then ship build/ + production deps to
+### Elastic Beanstalk.
+###
+### The compile happens here rather than on the EB instance because `tsc` lives
+### in devDependencies, and EB installs with NODE_ENV=production — the build
+### would fail on the box with "tsc: not found".
+###
+### Use the Amazon Linux 2023 CodeBuild image so the native module (argon2)
+### compiles against the same libc the EB platform runs.
+version: 0.2
+
+phases:
+   install:
+      runtime-versions:
+         nodejs: 22
+   build:
+      commands:
+         - npm ci
+         - npm run build
+   post_build:
+      commands:
+         # Drop devDependencies from the bundle. Re-running ci is cheaper and
+         # more predictable than pruning.
+         - npm ci --omit=dev
+
+artifacts:
+   files:
+      - build/**/*
+      - node_modules/**/*
+      - package.json
+      - package-lock.json
+      - Procfile
+      - .platform/**/*
