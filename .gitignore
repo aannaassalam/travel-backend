@@ -135,8 +135,10 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-build/
+# Leading slash matters: bare `storage/` also matched src/services/storage,
+# which silently kept the storage adapters out of every clone.
+/build/
 
 .env
 # Uploaded files (STORAGE_DRIVER=local)
-storage/
+/storage/
