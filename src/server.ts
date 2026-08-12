@@ -27,20 +27,6 @@ async function bootstrap() {
    const dbConnection = await connectDb()
    
 
-   app.use(
-      express.json({
-         limit: '100mb',
-      })
-   )
-
- 
-   // app.use(errorHandler)
-
-
-   app.get('/health', (_req: Request, res: Response) =>
-      res.status(200).json({ status: 'ok' })
-   )
-
    // §6.1/§14.5/§5.1: cash release, passport purge, scheduled publishing.
    startScheduledJobs()
 

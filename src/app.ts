@@ -163,6 +163,15 @@ app.use(
    adminV1Routes
 )
 
+/**
+ * Load balancer health check. Must be registered here, before the catch-all —
+ * anything added to `app` after bootstrap runs lands behind the 404 handler and
+ * is unreachable.
+ */
+app.get('/health', (_req: Request, res: Response) =>
+   res.status(200).json({ status: 'ok' })
+)
+
 app.all('*', (req: Request, res: Response, next: NextFunction) => {
    next(new AppError(`Can't find ${req.originalUrl} on the Server!`, 404))
 })
