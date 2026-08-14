@@ -4,6 +4,7 @@ import slugify from 'slugify'
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LISTING_STATUS, LOCALES, VERTICALS } from '../../constants/domain.constants'
 import { IListing, Listing } from '../../model/listingModel'
+import { Location } from '../../model/locationModel'
 import {
    availableCurrencies,
    baseAmount,
@@ -103,6 +104,47 @@ export const getListing = catchAsync(
    }
 )
 
+/**
+ * §12: a listing may only name a place the office has said it services.
+ *
+ * `city` used to be free text, so one typo ("Kinshsa") invented a city that
+ * then appeared in the public filter facets forever, and the search box offered
+ * a hardcoded list that had nothing to do with either. Validating on write is
+ * what stops the two drifting apart again — the location list is the single
+ * source of truth, and this is the gate onto it.
+ */
+const checkCity = async (city: unknown, vertical?: string) => {
+   const name = typeof city === 'string' ? city.trim() : ''
+   if (!name) return new AppError('A city is required', 400)
+
+   const known = await Location.findOne({ name, isActive: true })
+   if (!known) {
+      const exists = await Location.findOne({ name })
+      return new AppError(
+         exists
+            ? `${name} is switched off in Locations. Re-activate it before selling there.`
+            : `${name} is not in your serviced locations. Add it under Locations first.`,
+         400,
+         'UNKNOWN_LOCATION'
+      )
+   }
+
+   /**
+    * Serving a city for one product does not mean serving it for all of them.
+    * A town the coach passes through is not somewhere we can hire out a car,
+    * and letting inventory be filed there anyway is how `servesVerticals` stops
+    * describing reality — which is the whole point of the list.
+    */
+   if (vertical && !known.servesVerticals.includes(vertical as never)) {
+      return new AppError(
+         `${name} is not set up to sell ${vertical}. Tick ${vertical} for ${name} under Locations first.`,
+         400,
+         'VERTICAL_NOT_SERVICED'
+      )
+   }
+   return null
+}
+
 export const createListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const { vertical, city } = req.body
@@ -116,6 +158,8 @@ export const createListing = catchAsync(
             new AppError('Use /hotels for hotel inventory', 400)
          )
       }
+      const cityProblem = await checkCity(city, vertical)
+      if (cityProblem) return next(cityProblem)
       const listing = await createDoc<IListing>(
          req,
          Listing,
@@ -136,6 +180,13 @@ export const createListing = catchAsync(
 
 export const updateListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
+      // Only when the city is actually being changed — an edit to the price of
+      // a listing in a city that was later deactivated must still be possible.
+      if (req.body.city !== undefined) {
+         const current = await Listing.findById(req.params.id).select('vertical')
+         const problem = await checkCity(req.body.city, current?.vertical)
+         if (problem) return next(problem)
+      }
       /**
        * §5.1 price-change guard, applied to single listings the same way the
        * hotel calendar applies it to a night range. A mis-keyed price that gets

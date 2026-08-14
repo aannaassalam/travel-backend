@@ -1,5 +1,6 @@
 import cors from 'cors'
 import express, { NextFunction, Request, Response } from 'express'
+import cookieParser from 'cookie-parser'
 import mongoSanitize from 'express-mongo-sanitize'
 import rateLimit from 'express-rate-limit'
 import helmet from 'helmet'
@@ -78,6 +79,10 @@ app.use(
 app.set('trust proxy', true)
 
 // Body parser, reading data from body into req.body
+// Sessions travel in an httpOnly cookie as well as the Authorization header,
+// so the cookie has to be parsed before any guard looks for it.
+app.use(cookieParser())
+
 app.use(express.json({ limit: '100mb' }))
 app.use(express.urlencoded({ extended: true, limit: '100mb' }))
 

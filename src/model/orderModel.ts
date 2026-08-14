@@ -96,6 +96,10 @@ const timelineSchema = new Schema(
 export interface IOrder extends Document {
    _id: Types.ObjectId
    reference: string
+   /** §4.6: set by the public checkout so a retried POST replays, never duplicates. */
+   idempotencyKey?: string
+   /** Rate-plan documents holding stock for this order, so payment commits exactly what was held. */
+   heldRatePlanIds?: Types.ObjectId[]
    status: OrderStatus
    paymentStatus: PaymentStatus
    fulfilmentStatus: FulfilmentStatus
@@ -129,6 +133,12 @@ const orderSchema = new Schema<IOrder>(
    {
       // §3: the reference read out over the phone is the primary navigation key.
       reference: { type: String, required: true, unique: true, index: true },
+      /**
+       * §4.6. Sparse because admin-created orders have no key — a plain unique
+       * index would let exactly one of them exist and reject every one after.
+       */
+      idempotencyKey: { type: String, unique: true, sparse: true, index: true },
+      heldRatePlanIds: { type: [Schema.Types.ObjectId], default: undefined },
       status: {
          type: String,
          enum: Object.values(ORDER_STATUS),

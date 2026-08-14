@@ -17,6 +17,13 @@ export interface ICustomer extends Document {
    locale: string
    city?: string
    isBlocked: boolean
+   /**
+    * §7.2: an ACCOUNT exists only once the phone has been proved. A guest
+    * checkout still files a customer record here — the office needs to know who
+    * booked — but that record is a contact, not a login.
+    */
+   hasAccount: boolean
+   phoneVerifiedAt?: Date
    /** §8: unpaid cash orders that never got collected. */
    noShowCount: number
    internalNotes: string
@@ -40,6 +47,13 @@ const customerSchema = new Schema<ICustomer>(
       locale: { type: String, default: DEFAULT_LOCALE },
       city: { type: String, trim: true },
       isBlocked: { type: Boolean, default: false },
+      /**
+       * An ACCOUNT, as opposed to a contact. False for every guest checkout;
+       * only verifying a one-time code sets it. Outstanding codes live in
+       * `phone_verifications`, not here — see that model for why.
+       */
+      hasAccount: { type: Boolean, default: false, index: true },
+      phoneVerifiedAt: Date,
       noShowCount: { type: Number, default: 0 },
       internalNotes: { type: String, default: '' },
    },

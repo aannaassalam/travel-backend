@@ -42,46 +42,61 @@ const systemAudit = async (action: string, detail: Record<string, any>) => {
    })
 }
 
-/** §6.1: cash orders past their deadline release stock and cancel. */
+/**
+ * §6.1: unpaid orders past their deadline release their stock and cancel.
+ *
+ * Covers BOTH rails: a cash order the customer never came in to settle, and an
+ * online checkout abandoned at the payment step. Both hold stock the moment the
+ * order is created, so both have to give it back.
+ *
+ * Releases `quantityHeld` / `held` — not `quantitySold`. Checkout takes a HOLD
+ * and only payment converts it to a sale, so decrementing sold here would drive
+ * it negative on every abandoned basket while leaving the hold stuck forever,
+ * quietly removing the unit from sale for good.
+ */
 export const releaseExpiredCashHolds = async () => {
    const expired = await Order.find({
-      paymentMethod: 'CASH',
       paymentStatus: { $in: [PAYMENT_STATUS.UNPAID, PAYMENT_STATUS.PENDING] },
       status: { $in: [ORDER_STATUS.DRAFT, ORDER_STATUS.SUBMITTED] },
       cashDeadline: { $lt: new Date() },
-   })
+   }).limit(500)
    if (!expired.length) return 0
 
    for (const order of expired) {
+      const heldIds = order.heldRatePlanIds ?? []
       for (const item of order.items) {
-         if (item.roomTypeId && item.startDate) {
+         if (item.roomTypeId && heldIds.length) {
             await RatePlan.updateMany(
-               {
-                  roomType: item.roomTypeId,
-                  date: { $gte: item.startDate, $lt: item.endDate || item.startDate },
-               },
-               { $inc: { sold: -item.quantity } }
+               { _id: { $in: heldIds }, held: { $gte: item.quantity } },
+               { $inc: { held: -item.quantity } }
             )
          } else if (item.listingId) {
             await Listing.updateOne(
-               { _id: item.listingId },
-               { $inc: { quantitySold: -item.quantity } }
+               { _id: item.listingId, quantityHeld: { $gte: item.quantity } },
+               { $inc: { quantityHeld: -item.quantity } }
             )
          }
       }
+      const wasCash = order.paymentMethod === 'CASH'
       order.status = ORDER_STATUS.CANCELLED
       order.cancellationReason = 'CASH_DEADLINE_EXPIRED'
       order.cancelledAt = new Date()
+      order.heldRatePlanIds = undefined
       order.timeline.push({
          at: new Date(),
          event: 'AUTO_CANCELLED',
-         detail: 'Cash collection deadline passed — inventory released',
+         detail: wasCash
+            ? 'Cash collection deadline passed — inventory released'
+            : 'Payment not completed — inventory released',
          actorEmail: 'system',
       })
       await order.save()
 
-      // §8: unpaid cash orders that never got collected.
-      await Customer.updateOne({ _id: order.customer }, { $inc: { noShowCount: 1 } })
+      // §8: only a cash no-show is the customer's fault. An abandoned online
+      // basket is not, and must not count against them.
+      if (wasCash) {
+         await Customer.updateOne({ _id: order.customer }, { $inc: { noShowCount: 1 } })
+      }
    }
 
    await systemAudit('CASH_HOLDS_RELEASED', { count: expired.length })

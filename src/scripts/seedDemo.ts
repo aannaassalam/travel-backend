@@ -20,8 +20,8 @@ import {
    VERTICALS,
 } from '../constants/domain.constants'
 import { Customer } from '../model/customerModel.admin'
-import { Enquiry, PaymentException } from '../model/enquiryModel'
-import SettingsModel, { FxRate, PolicyVersion } from '../model/settingsModel'
+import { Enquiry } from '../model/enquiryModel'
+import SettingsModel, { PolicyVersion } from '../model/settingsModel'
 import { Hotel, RatePlan, RoomType } from '../model/hotelModel'
 import { Order } from '../model/orderModel'
 
@@ -37,6 +37,24 @@ const run = async () => {
    if (process.env.NODE_ENV === 'production') {
       throw new Error('seed:demo refuses to run with NODE_ENV=production')
    }
+
+   /**
+    * SAFETY: this deletes hotels, room types, rate plans, orders, customers and
+    * enquiries, and replaces them with a handful of fixtures. That is fine on a
+    * throwaway database and destructive on any other — it has already cost one
+    * real catalogue, which had to be rebuilt from seed:catalogue.
+    *
+    * Same guard seed:catalogue carries: a non-local database needs SEED_CONFIRM=1.
+    */
+   const uri = buildMongoUri()
+   const isLocal = /localhost|127\.0\.0\.1/.test(uri)
+   if (!isLocal && process.env.SEED_CONFIRM !== '1') {
+      throw new Error(
+         'seed:demo DELETES the catalogue and is pointed at a non-local database.\n' +
+            'It replaces 16 hotels with 3 fixtures. If that is genuinely what you want,\n' +
+            're-run with SEED_CONFIRM=1. To restore a real catalogue use seed:catalogue.'
+      )
+   }
    await mongoose.connect(buildMongoUri())
 
    await Promise.all([
@@ -46,9 +64,7 @@ const run = async () => {
       Order.deleteMany({}),
       Customer.deleteMany({}),
       Enquiry.deleteMany({}),
-      PaymentException.deleteMany({}),
       PolicyVersion.deleteMany({}),
-      FxRate.deleteMany({}),
       SettingsModel.deleteMany({}),
    ])
 
@@ -265,14 +281,9 @@ const run = async () => {
       },
    ])
 
-   // §9.1: one approved rate and one awaiting human approval.
-   await FxRate.create([
-      { currency: 'CDF', rate: 2800, spreadPercent: 2, status: 'APPROVED', effectiveFrom: new Date(), approvedAt: new Date() },
-      { currency: 'EUR', rate: 0.92, spreadPercent: 1, status: 'PENDING', source: 'REFERENCE_FEED' },
-   ])
 
    console.log(
-      `Seeded ${hotels.length} hotels · ${rooms.length} room types · ${cells.length} nights · ${customers.length} customers · 4 orders · 3 enquiries · 2 policies · 2 FX rates`
+      `Seeded ${hotels.length} hotels · ${rooms.length} room types · ${cells.length} nights · ${customers.length} customers · 4 orders · 3 enquiries · 2 policies`
    )
    await mongoose.disconnect()
 }

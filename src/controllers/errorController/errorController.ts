@@ -25,6 +25,7 @@ const sentErrorDev = (err: AppError, res: Response) => {
   res.status(err.statusCode).json({
     status: err.status,
     error: err,
+    code: err.code,
     message: err.message,
     stack: err.stack
   });
@@ -34,6 +35,7 @@ const sentErrorProd = (err: AppError, res: Response) => {
   if (err.isOperational) {
     res.status(err.statusCode).json({
       status: err.status,
+      code: err.code,
       message: err.message
     });
   } else {

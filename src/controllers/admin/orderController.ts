@@ -10,6 +10,7 @@ import {
 } from '../../constants/domain.constants'
 import { presentOrder, presentOrderList } from '../../dto/admin/order.dto'
 import { RatePlan } from '../../model/hotelModel'
+import { Listing } from '../../model/listingModel'
 import { Order } from '../../model/orderModel'
 import { paginate } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
@@ -229,8 +230,33 @@ export const markCashReceived = catchAsync(
          return next(new AppError('This is not a cash order', 400))
       }
       const before = order.toObject()
+
+      /**
+       * Convert the hold into a sale. Checkout holds stock; only payment sells
+       * it. Marking a cash order paid without this leaves `quantityHeld`
+       * incremented forever — the unit is neither on sale nor counted as sold,
+       * so it silently disappears from the catalogue.
+       */
+      const heldIds = order.heldRatePlanIds ?? []
+      for (const item of order.items) {
+         if (item.roomTypeId && heldIds.length) {
+            await RatePlan.updateMany(
+               { _id: { $in: heldIds }, held: { $gte: item.quantity } },
+               { $inc: { held: -item.quantity, sold: item.quantity } }
+            )
+         } else if (item.listingId) {
+            await Listing.updateOne(
+               { _id: item.listingId, quantityHeld: { $gte: item.quantity } },
+               { $inc: { quantityHeld: -item.quantity, quantitySold: item.quantity } }
+            )
+         }
+      }
+      order.heldRatePlanIds = undefined
+
+      order.status = ORDER_STATUS.CONFIRMED
       order.paymentStatus = PAYMENT_STATUS.PAID
       order.paidAt = new Date()
+      order.cashDeadline = undefined
       order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_PENDING
       addTimeline(order, req, 'CASH_RECEIVED', undefined, req.body.reason)
       await order.save()

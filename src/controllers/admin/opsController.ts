@@ -9,17 +9,12 @@ import {
    NOTIFICATION_EVENTS,
    NotificationLog,
    NotificationTemplate,
-   PaymentException,
    TEMPLATE_VARIABLES,
 } from '../../model/enquiryModel'
 import { Order } from '../../model/orderModel'
-import SettingsModel, {
-   FxRate,
-   getSettings,
-   PolicyVersion,
-} from '../../model/settingsModel'
+import SettingsModel, { getSettings, PolicyVersion } from '../../model/settingsModel'
 import { paginate } from '../../services/adminCrud.service'
-import { recordAudit, sendOutOfBandAlert } from '../../services/auditLog.service'
+import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { FieldMap, present, presentList } from '../../utils/present'
@@ -128,10 +123,10 @@ export const updateEnquiryStage = catchAsync(
 )
 
 // ===========================================================================
-// Finance (§9)
+// Payments (§9.1)
 // ===========================================================================
 
-/** §9.1 payments ledger, derived from orders until a gateway is wired. */
+/** Payments ledger, derived from orders until a gateway is wired. */
 export const listPayments = catchAsync(async (req: Request, res: Response) => {
    const filter: Record<string, any> = {
       paymentStatus: { $ne: PAYMENT_STATUS.UNPAID },
@@ -160,177 +155,6 @@ export const listPayments = catchAsync(async (req: Request, res: Response) => {
       nextCursor,
    })
 })
-
-const exceptionFields: FieldMap<any> = {
-   id: (e) => e._id.toString(),
-   type: (e) => e.type,
-   amount: (e) => e.amount,
-   currency: (e) => e.currency,
-   reason: (e) => e.reason,
-   status: (e) => e.status,
-   responseDeadline: (e) => e.responseDeadline,
-   outcome: (e) => e.outcome,
-   recordedByEmail: (e) => e.recordedByEmail,
-   orderReference: (e) => e.order?.reference,
-   createdAt: (e) => e.createdAt,
-}
-
-export const listPaymentExceptions = catchAsync(
-   async (req: Request, res: Response) => {
-      const { items, nextCursor } = await paginate(PaymentException, {}, req, {
-         populate: 'order',
-      })
-
-      /**
-       * §9.2: alert when exceptions exceed a share of orders over 30 days. A
-       * rising rate signals a delivery or fraud problem — and payment providers
-       * monitor dispute ratios and terminate merchant accounts over them. The
-       * client should see this before his provider does.
-       */
-      const settings = await getSettings()
-      const since = new Date(Date.now() - 30 * 86400000)
-      const [orders30, exceptions30] = await Promise.all([
-         Order.countDocuments({ createdAt: { $gte: since } }),
-         PaymentException.countDocuments({ createdAt: { $gte: since } }),
-      ])
-      const rate = orders30 ? (exceptions30 / orders30) * 100 : 0
-
-      return sendResponse(res, 200, 'OK', {
-         items: presentList(items as any[], exceptionFields),
-         nextCursor,
-         exceptionRate: rate,
-         exceptionRateThreshold: settings.exceptionRateAlertPercent,
-         exceptionRateBreached: rate > settings.exceptionRateAlertPercent,
-      })
-   }
-)
-
-/** §9.2: step-up gated at the route; type and reason are both mandatory. */
-export const recordPaymentException = catchAsync(
-   async (req: Request, res: Response, next: NextFunction) => {
-      const { orderId, type, amount, reason, responseDeadline } = req.body
-      if (!orderId || !type || !reason) {
-         return next(
-            new AppError('Order, type and a reason note are all required', 400)
-         )
-      }
-      const order = await Order.findById(orderId)
-      if (!order) return next(new AppError('Order not found', 404))
-
-      const exception = await PaymentException.create({
-         order: order._id,
-         type,
-         amount: amount ?? order.total,
-         currency: order.currency,
-         reason,
-         responseDeadline: responseDeadline ? new Date(responseDeadline) : undefined,
-         recordedBy: (req as any).admin._id,
-         recordedByEmail: (req as any).admin.email,
-      })
-
-      // §9.2 CHARGEBACK: payment reversed, inventory released, order cancelled.
-      if (type === 'CHARGEBACK') {
-         order.paymentStatus = PAYMENT_STATUS.REVERSED
-         order.timeline.push({
-            at: new Date(),
-            event: 'CHARGEBACK_RECORDED',
-            reason,
-            actorEmail: (req as any).admin.email,
-         })
-         await order.save()
-      }
-
-      await recordAudit(req, {
-         action: AUDIT_ACTIONS.CREATE,
-         entityType: 'PaymentException',
-         entityId: exception._id.toString(),
-         after: exception.toObject(),
-         reason,
-      })
-      await sendOutOfBandAlert(
-         `PAYMENT_EXCEPTION_${type}`,
-         (req as any).admin.email,
-         req.ip || ''
-      )
-
-      return sendResponse(res, 201, 'Payment exception recorded', {
-         exception: present(exception, exceptionFields),
-      })
-   }
-)
-
-const fxFields: FieldMap<any> = {
-   id: (f) => f._id.toString(),
-   currency: (f) => f.currency,
-   rate: (f) => f.rate,
-   spreadPercent: (f) => f.spreadPercent,
-   status: (f) => f.status,
-   effectiveFrom: (f) => f.effectiveFrom,
-   source: (f) => f.source,
-   approvedAt: (f) => f.approvedAt,
-   createdAt: (f) => f.createdAt,
-}
-
-export const listFxRates = catchAsync(async (_req: Request, res: Response) => {
-   const rates = await FxRate.find().sort({ _id: -1 }).limit(50)
-   return sendResponse(res, 200, 'OK', { items: presentList(rates, fxFields) })
-})
-
-export const createFxRate = catchAsync(async (req: Request, res: Response) => {
-   // Always lands as PENDING — approval is a separate, deliberate act.
-   const rate = await FxRate.create({
-      currency: req.body.currency,
-      rate: req.body.rate,
-      spreadPercent: req.body.spreadPercent ?? 0,
-      source: req.body.source || 'MANUAL',
-      status: 'PENDING',
-   })
-   await recordAudit(req, {
-      action: AUDIT_ACTIONS.CREATE,
-      entityType: 'FxRate',
-      entityId: rate._id.toString(),
-      after: rate.toObject(),
-   })
-   return sendResponse(res, 201, 'FX rate proposed — awaiting approval', {
-      rate: present(rate, fxFields),
-   })
-})
-
-/**
- * §9.1: never auto-applied. A bad automated rate mis-prices the entire
- * catalogue instantly, and with no refunds those orders are hard to unwind —
- * so a human approves, and the approval alerts out-of-band (§14.2).
- */
-export const approveFxRate = catchAsync(
-   async (req: Request, res: Response, next: NextFunction) => {
-      const rate = await FxRate.findById(req.params.id)
-      if (!rate) return next(new AppError('FX rate not found', 404))
-      if (rate.status === 'APPROVED') {
-         return next(new AppError('This rate is already approved', 400))
-      }
-
-      const before = rate.toObject()
-      rate.status = 'APPROVED'
-      rate.effectiveFrom = new Date()
-      rate.approvedBy = (req as any).admin._id
-      rate.approvedAt = new Date()
-      await rate.save()
-
-      await recordAudit(req, {
-         action: AUDIT_ACTIONS.UPDATE,
-         entityType: 'FxRate',
-         entityId: rate._id.toString(),
-         before,
-         after: rate.toObject(),
-         reason: req.body.reason,
-      })
-      await sendOutOfBandAlert('FX_RATE_CHANGED', (req as any).admin.email, req.ip || '')
-
-      return sendResponse(res, 200, `${rate.currency} rate approved`, {
-         rate: present(rate, fxFields),
-      })
-   }
-)
 
 // ===========================================================================
 // Content — versioned policies (§10)
@@ -433,7 +257,6 @@ const settingsFields: FieldMap<any> = {
    holdTtlCashHours: (s) => s.holdTtlCashHours,
    maxConcurrentCashHolds: (s) => s.maxConcurrentCashHolds,
    customerExportRowCap: (s) => s.customerExportRowCap,
-   exceptionRateAlertPercent: (s) => s.exceptionRateAlertPercent,
    atRiskWindowDays: (s) => s.atRiskWindowDays,
    enquirySlaHours: (s) => s.enquirySlaHours,
    passportRetentionDays: (s) => s.passportRetentionDays,

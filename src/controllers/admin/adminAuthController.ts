@@ -6,7 +6,7 @@ import {
    SESSION_POLICY,
 } from '../../constants/admin.constants'
 import { presentAdminUser, presentSessions } from '../../dto/admin/adminUser.dto'
-import { hashTokenId, signAdminToken } from '../../middleware/adminAuth'
+import { hashTokenId, signAdminToken, ADMIN_COOKIE } from '../../middleware/adminAuth'
 import AdminUser from '../../model/adminUserModel'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
@@ -27,6 +27,29 @@ import { sendResponse } from '../../utils/response'
  * Still true regardless: no self-registration, and no password reset by email
  * alone (§1.3). The seed script is the only way an admin identity is created.
  */
+
+/**
+ * The session token also rides in an httpOnly cookie.
+ *
+ * `httpOnly` so no script can read it, `sameSite: 'lax'` so it survives a
+ * normal navigation but is not attached to cross-site POSTs, and an explicit
+ * `maxAge` so it is a persistent cookie — without one the browser discards it
+ * when the window closes, which reads to the user as "it logged me out again".
+ * The body token stays for the Authorization header the client already sends.
+ */
+export const setSessionCookie = (res: Response, token: string) => {
+   res.cookie(ADMIN_COOKIE, token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: SESSION_POLICY.MAX_AGE_MS,
+      path: '/',
+   })
+}
+
+export const clearSessionCookie = (res: Response) => {
+   res.clearCookie(ADMIN_COOKIE, { path: '/' })
+}
 
 const deviceLabel = (req: Request) => {
    const ua = req.get('user-agent') || ''
@@ -100,6 +123,7 @@ export const login = catchAsync(
       ;(req as any).admin = admin
       await recordAudit(req, { action: AUDIT_ACTIONS.LOGIN_SUCCESS })
 
+      setSessionCookie(res, token)
       return sendResponse(res, 200, 'Signed in', {
          token,
          expiresIn: SESSION_POLICY.MAX_AGE_MS / 1000,
@@ -127,7 +151,12 @@ export const stepUp = catchAsync(
 
       if (!ok) {
          await recordAudit(req, { action: AUDIT_ACTIONS.STEP_UP_FAILED })
-         return next(new AppError('Incorrect password', 401))
+         /**
+          * 403, not 401. This is "the password you just typed is wrong", not
+          * "your session is over" — and the admin client signs out on a 401.
+          * A single typo in this dialog used to end the whole session.
+          */
+         return next(new AppError('Incorrect password', 403, 'BAD_PASSWORD'))
       }
 
       const session = (req as any).adminSession
@@ -184,6 +213,7 @@ export const logout = catchAsync(async (req: Request, res: Response) => {
    session.revokedAt = new Date()
    await (req as any).admin.save({ validateBeforeSave: false })
    await recordAudit(req, { action: AUDIT_ACTIONS.LOGOUT })
+   clearSessionCookie(res)
    return sendResponse(res, 200, 'Signed out', {})
 })
 
@@ -194,7 +224,8 @@ export const changePassword = catchAsync(
          '+password +sessions'
       )
       if (!admin || !(await admin.verifyPassword(currentPassword))) {
-         return next(new AppError('Current password is incorrect', 401))
+         // Same reasoning as stepUp: a typo here must not sign the admin out.
+         return next(new AppError('Current password is incorrect', 403, 'BAD_PASSWORD'))
       }
 
       const problem = await validateAdminPassword(newPassword)

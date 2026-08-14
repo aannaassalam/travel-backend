@@ -4,6 +4,13 @@
  *
  *   npm run seed:images -- HOTEL  hotel-a.png hotel-b.png
  *   npm run seed:images -- FLIGHT flight-a.png flight-b.png
+ *   npm run seed:images -- HOTEL  --relink        (re-point at what is already
+ *                                                  stored, uploading nothing)
+ *
+ * `--relink` exists because the records and the files have separate lifetimes:
+ * a catalogue re-seed clears the image URLs on every document while the
+ * uploaded files sit untouched on disk. Without it the only way back is to
+ * find the originals again, which may be long gone.
  *
  * Goes through the storage adapter rather than writing to disk directly, so it
  * behaves identically under STORAGE_DRIVER=s3.
@@ -46,9 +53,12 @@ const run = async () => {
          `First argument must be a vertical: ${Object.values(VERTICALS).join(', ')}`
       )
    }
-   if (!files.length) throw new Error('Pass at least one image path')
-   for (const f of files) {
-      if (!fs.existsSync(f)) throw new Error(`No such file: ${f}`)
+   const relink = process.argv.includes('--relink')
+   if (!relink) {
+      if (!files.length) throw new Error('Pass at least one image path, or --relink')
+      for (const f of files) {
+         if (!fs.existsSync(f)) throw new Error(`No such file: ${f}`)
+      }
    }
 
    // Matches the folder the admin uploader uses, so hand-uploaded and seeded
@@ -58,7 +68,7 @@ const run = async () => {
    await mongoose.connect(buildMongoUri())
    const adapter = storage()
 
-   if (adapter.name === 'local') {
+   if (!relink && adapter.name === 'local') {
       const dir = path.join(
          path.resolve(process.env.STORAGE_ROOT || 'storage'),
          'public',
@@ -69,14 +79,61 @@ const run = async () => {
          fs.rmSync(dir, { recursive: true, force: true })
          console.log(`Cleared ${n} previous upload(s) from ${folder}/`)
       }
-   } else {
+   } else if (!relink) {
       console.warn(
          `Storage driver is "${adapter.name}" — previous objects under ${folder}/ were NOT deleted. Clear them in the bucket.`
       )
    }
 
    const urls: string[] = []
-   for (const file of files) {
+
+   if (relink) {
+      /**
+       * The local directory is the source of filenames even under the S3
+       * driver: migrate:s3 preserves the key (public/<folder>/<uuid>), so the
+       * on-disk mirror still names every object correctly.
+       */
+      const dir = path.join(
+         path.resolve(process.env.STORAGE_ROOT || 'storage'),
+         'public',
+         folder
+      )
+      const existing = fs.existsSync(dir)
+         ? fs.readdirSync(dir).filter((f) => !f.startsWith('.')).sort()
+         : []
+      if (!existing.length) {
+         throw new Error(`Nothing already stored under ${folder}/ to relink`)
+      }
+
+      const base = process.env.STORAGE_PUBLIC_URL || '/uploads'
+      const isS3 = adapter.name === 's3'
+      for (const f of existing) {
+         // S3 keys carry the visibility prefix; the local route does not.
+         const url = isS3
+            ? `${base}/public/${folder}/${f}`
+            : `${base}/${folder}/${f}`
+
+         /**
+          * Verify before writing. Relinking is guesswork about what the storage
+          * layer holds, and a URL that 404s would replace a visible placeholder
+          * with a broken image — strictly worse, and harder to notice.
+          */
+         if (/^https?:\/\//.test(url)) {
+            const res = await fetch(url, { method: 'HEAD' })
+            if (!res.ok) {
+               throw new Error(
+                  `${url} returned ${res.status} — refusing to link a file that is not there`
+               )
+            }
+         }
+         urls.push(url)
+      }
+      console.log(
+         `Relinking ${existing.length} verified file(s) in ${folder}/ (${adapter.name})`
+      )
+   }
+
+   for (const file of relink ? [] : files) {
       const buffer = await fs.promises.readFile(file)
       const stored = await adapter.save(
          {

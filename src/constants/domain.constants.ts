@@ -90,14 +90,6 @@ export const CANCELLATION_REASONS = {
    OTHER: 'OTHER',
 } as const
 
-/** §9.2 — the narrow replacement for refunds. */
-export const PAYMENT_EXCEPTION_TYPES = {
-   CHARGEBACK: 'CHARGEBACK',
-   DUPLICATE_CORRECTION: 'DUPLICATE_CORRECTION',
-   SERVICE_FAILURE: 'SERVICE_FAILURE',
-   PROVIDER_REVERSAL: 'PROVIDER_REVERSAL',
-} as const
-
 export const MEAL_PLANS = {
    ROOM_ONLY: 'ROOM_ONLY',
    BREAKFAST: 'BREAKFAST',

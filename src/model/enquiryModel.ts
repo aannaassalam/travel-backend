@@ -109,67 +109,6 @@ export const Enquiry = mongoose.model<IEnquiry>('Enquiry', enquirySchema)
 // ---------------------------------------------------------------------------
 
 /**
- * §9.2: the narrow replacement for refunds. The client does not offer refunds,
- * but the system must still record money leaving — chargebacks and duplicate
- * charges happen regardless of policy, and §15 lists "building the system so
- * money can never be recorded as leaving" as a thing to avoid.
- *
- * There is deliberately no customer-facing path to any of these.
- */
-export interface IPaymentException extends Document {
-   _id: Types.ObjectId
-   order: Types.ObjectId
-   type: string
-   amount: number
-   currency: string
-   reason: string
-   status: string
-   /** §9.3: card schemes impose short response deadlines. */
-   responseDeadline?: Date
-   evidenceSubmittedAt?: Date
-   outcome?: string
-   recordedBy?: Types.ObjectId
-   recordedByEmail?: string
-   createdAt: Date
-}
-
-const paymentExceptionSchema = new Schema<IPaymentException>(
-   {
-      order: { type: Schema.Types.ObjectId, ref: 'Order', required: true, index: true },
-      type: {
-         type: String,
-         enum: ['CHARGEBACK', 'DUPLICATE_CORRECTION', 'SERVICE_FAILURE', 'PROVIDER_REVERSAL'],
-         required: true,
-         index: true,
-      },
-      amount: { type: Number, required: true },
-      currency: { type: String, default: 'USD' },
-      // §9.2: a mandatory reason note on every one.
-      reason: { type: String, required: true },
-      status: {
-         type: String,
-         enum: ['OPEN', 'EVIDENCE_SUBMITTED', 'WON', 'LOST', 'CLOSED'],
-         default: 'OPEN',
-         index: true,
-      },
-      responseDeadline: Date,
-      evidenceSubmittedAt: Date,
-      outcome: String,
-      recordedBy: { type: Schema.Types.ObjectId, ref: 'AdminUser' },
-      recordedByEmail: String,
-      createdAt: { type: Date, default: Date.now },
-   },
-   { versionKey: false }
-)
-
-export const PaymentException = mongoose.model<IPaymentException>(
-   'PaymentException',
-   paymentExceptionSchema
-)
-
-// ---------------------------------------------------------------------------
-
-/**
  * §11 notification templates. One per event per locale.
  *
  * §11 is explicit that notification content must NOT contain sensitive data —

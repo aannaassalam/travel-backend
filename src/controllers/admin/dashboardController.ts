@@ -122,7 +122,10 @@ export const getDashboard = catchAsync(async (req: Request, res: Response) => {
             paymentStatus: PAYMENT_STATUS.FAILED,
             updatedAt: { $gte: new Date(now.getTime() - 86400000) },
          }),
-         paymentExceptions: await Order.countDocuments({
+         // A payment the provider reversed. The exceptions register is gone,
+         // but REVERSED is still a payment state a gateway can hand us, and it
+         // means money left — so it stays visible rather than going unnoticed.
+         reversedPayments: await Order.countDocuments({
             paymentStatus: PAYMENT_STATUS.REVERSED,
          }),
       },

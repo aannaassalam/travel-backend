@@ -29,8 +29,6 @@ export interface ISettings extends Document {
    maxConcurrentCashHolds: number
    /** §14.4: PII exports capped per period; raising the cap itself alerts. */
    customerExportRowCap: number
-   /** §9.2: alert when exceptions exceed this share of orders over 30 days. */
-   exceptionRateAlertPercent: number
    /** §4.2: at-risk window in days. */
    atRiskWindowDays: number
    /** §7: first contact within this many working hours. */
@@ -55,7 +53,6 @@ const settingsSchema = new Schema<ISettings>(
       holdTtlCashHours: { type: Number, default: 48 },
       maxConcurrentCashHolds: { type: Number, default: 3 },
       customerExportRowCap: { type: Number, default: 5000 },
-      exceptionRateAlertPercent: { type: Number, default: 1 },
       atRiskWindowDays: { type: Number, default: 7 },
       enquirySlaHours: { type: Number, default: 4 },
       passportRetentionDays: { type: Number, default: 90 },
@@ -135,46 +132,3 @@ export const PolicyVersion = mongoose.model<IPolicyVersion>(
    'PolicyVersion',
    policyVersionSchema
 )
-
-// ---------------------------------------------------------------------------
-
-/**
- * §9.1: FX rates are never auto-applied. A bad automated rate mis-prices the
- * entire catalogue instantly, and with no refunds those orders are hard to
- * unwind — so a fetched reference rate is stored as PENDING and requires human
- * approval before it becomes effective.
- */
-export interface IFxRate extends Document {
-   currency: string
-   /** Units of `currency` per 1 USD. */
-   rate: number
-   spreadPercent: number
-   status: 'PENDING' | 'APPROVED'
-   effectiveFrom?: Date
-   source: string
-   approvedBy?: Types.ObjectId
-   approvedAt?: Date
-   createdAt: Date
-}
-
-const fxRateSchema = new Schema<IFxRate>(
-   {
-      currency: { type: String, enum: CURRENCIES, required: true, index: true },
-      rate: { type: Number, required: true, min: 0 },
-      spreadPercent: { type: Number, default: 0 },
-      status: {
-         type: String,
-         enum: ['PENDING', 'APPROVED'],
-         default: 'PENDING',
-         index: true,
-      },
-      effectiveFrom: Date,
-      source: { type: String, default: 'MANUAL' },
-      approvedBy: { type: Schema.Types.ObjectId, ref: 'AdminUser' },
-      approvedAt: Date,
-      createdAt: { type: Date, default: Date.now },
-   },
-   { versionKey: false }
-)
-
-export const FxRate = mongoose.model<IFxRate>('FxRate', fxRateSchema)

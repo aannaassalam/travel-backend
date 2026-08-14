@@ -5,6 +5,7 @@ import * as customers from '../../../controllers/admin/customerController'
 import { getDashboard } from '../../../controllers/admin/dashboardController'
 import * as hotels from '../../../controllers/admin/hotelController'
 import * as listings from '../../../controllers/admin/listingController'
+import * as locations from '../../../controllers/admin/locationController'
 import * as ops from '../../../controllers/admin/opsController'
 import * as orders from '../../../controllers/admin/orderController'
 import {
@@ -121,15 +122,10 @@ router.post(
 router.get('/enquiries', requirePermission('enquiries:read'), boundPagination, ops.listEnquiries)
 router.post('/enquiries/:id/stage', requirePermission('enquiries:write'), ops.updateEnquiryStage)
 
-// --- Finance (§9) -----------------------------------------------------------
-router.get('/finance/payments', requirePermission('finance:read'), boundPagination, ops.listPayments)
-router.get('/finance/exceptions', requirePermission('finance:read'), boundPagination, ops.listPaymentExceptions)
-// §9.2: each exception needs step-up re-auth, a mandatory type and a reason.
-router.post('/finance/exceptions', requirePermission('finance:write'), requireStepUp, ops.recordPaymentException)
-router.get('/finance/fx-rates', requirePermission('finance:read'), ops.listFxRates)
-router.post('/finance/fx-rates', requirePermission('finance:write'), ops.createFxRate)
-// §9.1: never auto-applied — approval is step-up gated and alerts out-of-band.
-router.post('/finance/fx-rates/:id/approve', requirePermission('finance:write'), requireStepUp, ops.approveFxRate)
+// --- Payments (§9.1) --------------------------------------------------------
+// Payment exceptions and FX rates were removed: prices are typed per currency,
+// so nothing converts, and the client does not want an exceptions register.
+router.get('/payments', requirePermission('payments:read'), boundPagination, ops.listPayments)
 
 // --- Content: versioned policies (§10) --------------------------------------
 router.get('/policies', requirePermission('content:read'), ops.listPolicies)
@@ -151,6 +147,14 @@ router.patch('/settings', requirePermission('settings:write'), requireStepUp, op
 router.get('/security', requirePermission('security:read'), ops.getSecurityOverview)
 
 // --- Audit log (§14.6) ------------------------------------------------------
+// --- Locations & serviced routes (§12) --------------------------------------
+router.get('/locations', requirePermission('inventory:read'), locations.listLocations)
+router.post('/locations', requirePermission('inventory:write'), locations.createLocation)
+router.patch('/locations/:id', requirePermission('inventory:write'), locations.updateLocation)
+router.get('/routes', requirePermission('inventory:read'), locations.listRoutes)
+router.post('/routes', requirePermission('inventory:write'), locations.createRoute)
+router.patch('/routes/:id', requirePermission('inventory:write'), locations.updateRoute)
+
 router.get('/audit-logs', requirePermission('audit:read'), boundPagination, listAuditLogs)
 
 export default router
