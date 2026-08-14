@@ -66,6 +66,16 @@ const timelineFields: FieldMap<any> = {
    // `detail` and `reason` are internal: they carry operator notes.
 }
 
+/**
+ * Last four digits only. The holder of the reference booked this order, so
+ * confirming which handset the SMS went to is useful — but the full number is
+ * PII and has no business travelling to a client that already knows it.
+ */
+const maskPhone = (p?: string) => {
+   if (typeof p !== 'string' || p.length < 4) return undefined
+   return `${'•'.repeat(Math.max(p.length - 4, 3))}${p.slice(-4)}`
+}
+
 export const presentOrder = (o: any) => {
    const currency = o.chargedCurrency ?? 'USD'
    const items = (o.items ?? []).map((i: any) =>
@@ -73,6 +83,8 @@ export const presentOrder = (o: any) => {
    )
    return {
       reference: o.reference,
+      // Populated only when the caller asked for it; absent otherwise.
+      contactPhoneMasked: maskPhone(o.customer?.phone),
       status: o.status,
       paymentStatus: o.paymentStatus,
       fulfilmentStatus: o.fulfilmentStatus,

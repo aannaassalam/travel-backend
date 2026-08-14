@@ -24,6 +24,7 @@ export interface ICustomer extends Document {
     */
    hasAccount: boolean
    phoneVerifiedAt?: Date
+   deletedAt?: Date
    /** §8: unpaid cash orders that never got collected. */
    noShowCount: number
    internalNotes: string
@@ -54,6 +55,8 @@ const customerSchema = new Schema<ICustomer>(
        */
       hasAccount: { type: Boolean, default: false, index: true },
       phoneVerifiedAt: Date,
+      /** §12.4: set when the customer deletes their own account. */
+      deletedAt: Date,
       noShowCount: { type: Number, default: 0 },
       internalNotes: { type: String, default: '' },
    },

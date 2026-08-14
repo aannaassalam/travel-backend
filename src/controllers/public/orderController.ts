@@ -300,7 +300,10 @@ export const getOrder = catchAsync(
        */
       const order = await Order.findOne({
          reference: String(req.params.reference).toUpperCase(),
-      }).select('+travellers.documentNumber')
+      })
+         .select('+travellers.documentNumber')
+         // Only for the masked confirmation line; the DTO emits nothing else.
+         .populate('customer', 'phone')
       if (!order) return next(new AppError('Order not found', 404))
       return sendResponse(res, 200, 'OK', { order: presentOrder(order) })
    }

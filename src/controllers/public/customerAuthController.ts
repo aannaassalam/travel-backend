@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
 import { presentOrder } from '../../dto/public/order.dto'
 import { Customer } from '../../model/customerModel.admin'
@@ -120,9 +121,6 @@ export const verifyOtp = catchAsync(
          return invalid()
       }
 
-      // Spent. One code, one use.
-      await PhoneVerification.deleteOne({ _id: record._id })
-
       /**
        * The account. An existing contact — someone who checked out as a guest
        * before — is upgraded in place rather than duplicated, so their booking
@@ -132,11 +130,25 @@ export const verifyOtp = catchAsync(
       const lastName = String(req.body?.lastName ?? '').trim().slice(0, 80)
       const existing = await Customer.findOne({ phone })
 
+      /**
+       * A brand-new number needs a name, and the client cannot know that in
+       * advance — asking everyone would mean asking returning customers to
+       * retype their name at every sign-in, and telling the client up front
+       * whether the number is known would leak exactly what §7.4 forbids.
+       *
+       * So: answer NAME_REQUIRED and let them submit the SAME code again with a
+       * name. The code must therefore still be alive — it is only spent below,
+       * once the sign-in can actually complete. Burning it here stranded every
+       * new customer with a dead code and no way to finish.
+       */
       if (!existing && !firstName) {
          return next(
             new AppError('A first name is required to create an account', 400, 'NAME_REQUIRED')
          )
       }
+
+      // Spent. One code, one use — from here the sign-in cannot fail.
+      await PhoneVerification.deleteOne({ _id: record._id })
 
       const customer =
          existing ??
@@ -189,6 +201,83 @@ export const me = catchAsync(async (req: Request, res: Response) => {
    })
 })
 
+/**
+ * PATCH /auth/me — the customer editing their own details.
+ *
+ * Phone is deliberately NOT editable here: it is the account identity and the
+ * thing the one-time code proved. Changing it would have to re-verify the new
+ * number, which is a different flow.
+ */
+export const updateMe = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const c = (req as any).customer
+      const patch: Record<string, unknown> = {}
+
+      if (req.body?.firstName !== undefined) {
+         const v = String(req.body.firstName).trim().slice(0, 80)
+         if (!v) return next(new AppError('First name cannot be empty', 400))
+         patch.firstName = v
+      }
+      if (req.body?.lastName !== undefined) {
+         patch.lastName = String(req.body.lastName).trim().slice(0, 80)
+      }
+      if (req.body?.email !== undefined) {
+         const v = String(req.body.email).trim().toLowerCase()
+         if (v && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) {
+            return next(new AppError('That email address is not valid', 400))
+         }
+         patch.email = v
+      }
+
+      await Customer.updateOne({ _id: c._id }, { $set: patch })
+      const fresh = await Customer.findById(c._id)
+      return sendResponse(res, 200, 'Profile saved', {
+         customer: {
+            firstName: fresh?.firstName ?? '',
+            lastName: fresh?.lastName ?? '',
+            phone: fresh?.phone,
+            email: fresh?.email,
+            hasAccount: fresh?.hasAccount,
+         },
+      })
+   }
+)
+
+/**
+ * DELETE /auth/me — §12.4 (Apple 5.1.1(v)) in-app account deletion.
+ *
+ * Anonymised, not erased. The privacy page states that paid bookings stay on
+ * record for accounting and legal reasons, and hard-deleting the customer would
+ * orphan every order that points at them — the office would be left with
+ * revenue it cannot attribute. So the personal data goes and the row stays:
+ * name blanked, email dropped, phone replaced with an irreversible digest so
+ * the same person signing up again cannot be re-linked to their old history.
+ */
+export const deleteMe = catchAsync(async (req: Request, res: Response) => {
+   const c = (req as any).customer
+   const tombstone = `deleted-${crypto
+      .createHash('sha256')
+      .update(String(c.phone))
+      .digest('hex')
+      .slice(0, 24)}`
+
+   await Customer.updateOne(
+      { _id: c._id },
+      {
+         $set: {
+            firstName: 'Deleted',
+            lastName: '',
+            phone: tombstone,
+            hasAccount: false,
+            deletedAt: new Date(),
+         },
+         $unset: { email: 1, phoneVerifiedAt: 1 },
+      }
+   )
+   clearCustomerCookie(res)
+   return sendResponse(res, 200, 'Account deleted', {})
+})
+
 export const logout = catchAsync(async (_req: Request, res: Response) => {
    clearCustomerCookie(res)
    return sendResponse(res, 200, 'Signed out', {})
@@ -206,5 +295,6 @@ export const myOrders = catchAsync(async (req: Request, res: Response) => {
       .sort({ _id: -1 })
       .limit(100)
       .select('+travellers.documentNumber')
+      .populate('customer', 'phone')
    return sendResponse(res, 200, 'OK', { items: orders.map(presentOrder) })
 })

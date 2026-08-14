@@ -14,10 +14,12 @@ import { getPolicy } from '../../controllers/public/policyController'
 import { listLocations, listRoutes } from '../../controllers/public/locationController'
 import { createOrder, getOrder, payOrder } from '../../controllers/public/orderController'
 import {
+   deleteMe,
    logout,
    me,
    myOrders,
    requestOtp,
+   updateMe,
    verifyOtp,
 } from '../../controllers/public/customerAuthController'
 import { protectCustomer } from '../../middleware/customerAuth'
@@ -122,6 +124,8 @@ router.post('/auth/otp/request', otpLimiter, requestOtp)
 router.post('/auth/otp/verify', otpLimiter, verifyOtp)
 router.post('/auth/logout', logout)
 router.get('/auth/me', protectCustomer, me)
+router.patch('/auth/me', protectCustomer, updateMe)
+router.delete('/auth/me', protectCustomer, deleteMe)
 
 // §8: never cache an authenticated response.
 const privateOnly: express.RequestHandler = (_req, res, next) => {
