@@ -39,19 +39,38 @@ export const signCustomerToken = (customerId: string) =>
  * localStorage. An explicit maxAge makes it persistent; without one the browser
  * drops it when the window closes, which the user experiences as being signed
  * out constantly.
+ *
+ * SameSite has to be 'none' whenever the site and the API are different
+ * registrable domains (the frontend on Vercel, this API on flexiairbnb.com).
+ * Under 'lax' the browser stores the cookie and then withholds it from every
+ * cross-site fetch, so login appears to succeed and the next request is
+ * anonymous. 'none' requires Secure, which is why it is tied to HTTPS.
+ *
+ * The CSRF protection 'lax' was providing is replaced by the CORS allow-list in
+ * app.ts: a JSON POST from an unlisted origin is refused at preflight. Host the
+ * frontend on a flexiairbnb.com subdomain and this can go back to 'lax'.
  */
+const cookieOptions = () => {
+   const crossSite = process.env.NODE_ENV === 'production'
+   return {
+      httpOnly: true,
+      sameSite: crossSite ? ('none' as const) : ('lax' as const),
+      secure: crossSite,
+      path: '/',
+   }
+}
+
 export const setCustomerCookie = (res: Response, token: string) => {
    res.cookie(CUSTOMER_COOKIE, token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      ...cookieOptions(),
       maxAge: CUSTOMER_SESSION_MS,
-      path: '/',
    })
 }
 
+// Same attributes as when it was set, or the browser treats it as a different
+// cookie and the old one survives the logout.
 export const clearCustomerCookie = (res: Response) =>
-   res.clearCookie(CUSTOMER_COOKIE, { path: '/' })
+   res.clearCookie(CUSTOMER_COOKIE, cookieOptions())
 
 const readToken = (req: Request) => {
    const header = req.headers.authorization
