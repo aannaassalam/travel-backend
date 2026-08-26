@@ -11,6 +11,8 @@ import {
 import { presentOrder, presentOrderList } from '../../dto/admin/order.dto'
 import { RatePlan } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
+import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
+import { notifyOrder } from '../../services/notifications/notify.service'
 import { Order } from '../../model/orderModel'
 import { paginate } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
@@ -206,6 +208,15 @@ export const transitionOrder = catchAsync(
       addTimeline(order, req, `STATUS_${to}`, undefined, reason)
       await order.save()
 
+      // The customer is told their booking is off; the office should never be
+      // the only party that knows.
+      if (to === ORDER_STATUS.CANCELLED) {
+         void notifyOrder(NOTIFICATION_EVENTS.ORDER_CANCELLED, order._id)
+      }
+      if (to === ORDER_STATUS.CONFIRMED) {
+         void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
+      }
+
       await recordAudit(req, {
          action: AUDIT_ACTIONS.UPDATE,
          entityType: 'Order',
@@ -222,6 +233,58 @@ export const transitionOrder = catchAsync(
 )
 
 /** §6.1 cash workflow: mark collected. */
+/**
+ * Attach an issued document (e-ticket, voucher, invoice) to an order.
+ *
+ * This is what DOCUMENTS_ISSUED had been missing: the Notifications screen
+ * offered a template for the event, and nothing in the system could ever fire
+ * it because there was no way to record that a document existed. The file
+ * itself is uploaded privately first (§6.5) and reached later through a signed
+ * link — only the key is stored here.
+ */
+export const attachDocument = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const { kind, fileName, storageKey } = req.body ?? {}
+      if (!['ETICKET', 'VOUCHER', 'INVOICE'].includes(kind)) {
+         return next(new AppError('kind must be ETICKET, VOUCHER or INVOICE', 400))
+      }
+      if (!fileName || !storageKey) {
+         return next(new AppError('fileName and storageKey are required', 400))
+      }
+
+      const order = await Order.findById(req.params.id)
+      if (!order) return next(new AppError('Order not found', 404))
+      const before = order.toObject()
+
+      // Re-issuing supersedes rather than replaces: a customer may already hold
+      // the previous version, so support needs to see both.
+      const previous = order.documents.filter((d: any) => d.kind === kind).length
+      order.documents.push({
+         kind,
+         fileName,
+         storageKey,
+         version: previous + 1,
+         uploadedAt: new Date(),
+         uploadedBy: (req as any).admin?.email,
+      })
+      order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_ISSUED
+      addTimeline(order, req, 'DOCUMENTS_ISSUED', `${kind} v${previous + 1}`)
+      await order.save()
+
+      await recordAudit(req, {
+         action: AUDIT_ACTIONS.UPDATE,
+         entityType: 'Order',
+         entityId: order._id.toString(),
+         before,
+         after: order.toObject(),
+      })
+
+      void notifyOrder(NOTIFICATION_EVENTS.DOCUMENTS_ISSUED, order._id)
+
+      return sendResponse(res, 200, 'Document attached', { order: presentOrder(order) })
+   }
+)
+
 export const markCashReceived = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const order = await Order.findById(req.params.id)
@@ -260,6 +323,8 @@ export const markCashReceived = catchAsync(
       order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_PENDING
       addTimeline(order, req, 'CASH_RECEIVED', undefined, req.body.reason)
       await order.save()
+
+      void notifyOrder(NOTIFICATION_EVENTS.PAYMENT_RECEIVED, order._id)
 
       await recordAudit(req, {
          action: AUDIT_ACTIONS.UPDATE,

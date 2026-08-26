@@ -7,8 +7,6 @@ import { PhoneVerification } from '../../model/phoneVerificationModel'
 import {
    CUSTOMER_SESSION_MS,
    clearCustomerCookie,
-   DEV_OTP,
-   otpDevMode,
    deliverOtp,
    generateOtp,
    hashOtp,
@@ -75,18 +73,37 @@ export const requestOtp = catchAsync(
             },
             { upsert: true }
          )
-         await deliverOtp(phone, code)
+         try {
+            await deliverOtp(phone, code)
+         } catch (err) {
+            /**
+             * The provider refused. The customer has to be told, or they wait
+             * for a code that is never coming — but they get a clean sentence,
+             * not Twilio's wording and certainly not a stack trace with server
+             * paths, which is what an unhandled throw was returning here.
+             *
+             * The real reason is logged for the office: a geo-permission block
+             * (Twilio 21408) or an unverified trial number look identical from
+             * the outside and are fixed in completely different places.
+             */
+            const detail = (err as Error).message
+            console.error(`[otp] delivery failed for ${phone}: ${detail}`)
+            // The unusable code must not sit there blocking a retry.
+            await PhoneVerification.deleteOne({ phone })
+            return next(
+               new AppError(
+                  'We could not send a code to that number. Check it is correct, or contact support.',
+                  502,
+                  'OTP_DELIVERY_FAILED'
+               )
+            )
+         }
       }
 
-      // Always the same answer, and always the same shape.
+      // Always the same answer, and always the same shape. The code itself is
+      // never in the response — it goes to the handset or nowhere.
       return sendResponse(res, 200, 'If that number is valid, a code has been sent', {
          expiresInSeconds: OTP_TTL_MS / 1000,
-         // Only ever the fixed code: outside production, or with OTP_DEV_MODE
-         // set on a deployment that has no SMS provider yet. A real generated
-         // code is never returned here.
-         ...(process.env.NODE_ENV !== 'production' || otpDevMode()
-            ? { devHint: DEV_OTP }
-            : {}),
       })
    }
 )

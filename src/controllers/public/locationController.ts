@@ -19,6 +19,9 @@ const present = (l: any) => ({
    country: l.country,
    kind: l.kind,
    iata: l.iata,
+   // Alternative spellings the office recorded, so the search box can match
+   // what a customer actually types rather than only the official name.
+   aliases: l.aliases ?? [],
    servesVerticals: l.servesVerticals,
    image: l.image,
 })

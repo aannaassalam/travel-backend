@@ -22,6 +22,8 @@ import {
 } from '../../services/orders/inventory.service'
 import { PricedItem, RequestedItem, priceItem, settle } from '../../services/orders/pricing.service'
 import { currentCustomer } from '../../middleware/customerAuth'
+import { notifyOrder } from '../../services/notifications/notify.service'
+import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -46,6 +48,33 @@ const makeReference = () => {
    let out = ''
    for (let i = 0; i < 10; i++) out += ALPHABET[bytes[i] % 32]
    return `FA-${out.slice(0, 5)}-${out.slice(5)}`
+}
+
+/**
+ * Creates the order, re-rolling the reference if it ever collides.
+ *
+ * The odds barely justify the code - 2^50 of keyspace puts the chance of ANY
+ * collision at roughly 1 in 2,252 across a million bookings - but `reference`
+ * is a unique index, so a collision does not merge two orders: it throws
+ * E11000 and the customer's checkout fails. Their stock is already held at that
+ * point, so the failure costs them the booking and us the sale, for something
+ * a second attempt fixes outright.
+ *
+ * Only duplicate-key errors are retried. Anything else is a real fault and is
+ * rethrown immediately rather than attempted three times.
+ */
+const createWithReference = async (doc: Record<string, unknown>) => {
+   for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+         return await Order.create({ ...doc, reference: makeReference() })
+      } catch (err: any) {
+         const duplicateReference =
+            err?.code === 11000 && Object.keys(err?.keyPattern ?? {}).includes('reference')
+         if (!duplicateReference || attempt === 2) throw err
+      }
+   }
+   // Unreachable: the loop either returns or throws.
+   throw new AppError('Could not allocate a booking reference', 500)
 }
 
 /** §7.2: one canonical form, or "the same customer" stops meaning anything. */
@@ -212,8 +241,7 @@ export const createOrder = catchAsync(
          const settings = await getSettings()
          const isCash = method === PAYMENT_METHOD.CASH
 
-         const order = await Order.create({
-            reference: makeReference(),
+         const order = await createWithReference({
             idempotencyKey: key,
             /**
              * §4.3 three independent axes, never merged. A cash order is
@@ -270,6 +298,13 @@ export const createOrder = catchAsync(
                { $set: { heldRatePlanIds: taken.flatMap((t) => t.nights) } }
             )
          }
+
+         /**
+          * Not awaited: the customer's confirmation must not be able to delay
+          * or fail their checkout. `notifyOrder` swallows its own errors and
+          * records them in the delivery log.
+          */
+         void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
 
          return sendResponse(res, 201, 'Order created', { order: presentOrder(order) })
       } catch (err) {
@@ -360,6 +395,8 @@ export const payOrder = catchAsync(
          detail: `rail=${String(req.body?.rail ?? 'MOBILE_MONEY')} (simulated)`,
       })
       await order.save()
+
+      void notifyOrder(NOTIFICATION_EVENTS.PAYMENT_RECEIVED, order._id)
 
       return sendResponse(res, 200, 'Payment received', { order: presentOrder(order) })
    }

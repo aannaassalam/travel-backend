@@ -12,6 +12,7 @@ import adminV1Routes from './routes/admin/v1'
 import v1Routes from './routes/v1'
 import { PUBLIC_DIR, PUBLIC_URL_PREFIX } from './services/storage/localDisk.storage'
 import AppError from './utils/appError'
+import { guardHeaders } from './utils/headerSafe'
 
 const app = express()
 
@@ -76,11 +77,53 @@ app.use(
    })
 )
 
-app.set('trust proxy', true)
+/**
+ * How many proxies sit in front of this process.
+ *
+ * `trust proxy: true` trusts the ENTIRE X-Forwarded-For chain, which means any
+ * caller can prepend a fabricated IP and be seen as a different client on every
+ * request. Every rate limit here is keyed on IP - the OTP limiter that stops an
+ * SMS billing attack, the admin login limiter that stops password brute force,
+ * the checkout limiter that stops someone exhausting inventory holds - so
+ * trusting the chain made all eight decorative. express-rate-limit refuses to
+ * run in that configuration, which is the error this replaces.
+ *
+ * TRUST_PROXY takes:
+ *   unset / "false"  no proxy; use the socket address (correct for local dev)
+ *   a number         hop count, e.g. "1" behind a single load balancer
+ *   a CSV of IPs     explicit trusted proxies or CIDRs
+ *
+ * Set it to the number of proxies you actually have. One too many is the bug;
+ * one too few only means requests share an IP.
+ */
+const trustProxy = (() => {
+   const raw = (process.env.TRUST_PROXY || '').trim()
+   if (!raw || raw === 'false') return false
+   if (raw === 'true') {
+      // Refused deliberately: see above. Treated as "one proxy", which is the
+      // usual intent, rather than silently reinstating the hole.
+      console.warn('TRUST_PROXY=true is unsafe with rate limiting; using 1 hop instead')
+      return 1
+   }
+   if (/^\d+$/.test(raw)) return Number(raw)
+   return raw.split(',').map((v) => v.trim()).filter(Boolean)
+})()
+
+if (process.env.NODE_ENV === 'production' && trustProxy === false) {
+   // Behind a load balancer with this unset, every request looks like it comes
+   // from the balancer, so one noisy client can exhaust a shared limit.
+   console.warn('TRUST_PROXY is not set. If this runs behind a proxy, rate limits will key on the proxy IP.')
+}
+
+app.set('trust proxy', trustProxy)
 
 // Body parser, reading data from body into req.body
 // Sessions travel in an httpOnly cookie as well as the Authorization header,
 // so the cookie has to be parsed before any guard looks for it.
+// Nothing that reaches a header may throw. See utils/headerSafe: a single
+// em dash in a message used to 500 the whole response.
+app.use(guardHeaders)
+
 app.use(cookieParser())
 
 app.use(express.json({ limit: '100mb' }))

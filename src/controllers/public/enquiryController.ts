@@ -1,6 +1,8 @@
 import { Request, Response } from 'express'
 import { VERTICALS } from '../../constants/domain.constants'
 import { Enquiry, ENQUIRY_KINDS } from '../../model/enquiryModel'
+import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
+import { notify } from '../../services/notifications/notify.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -82,6 +84,18 @@ export const createEnquiry = catchAsync(async (req: Request, res: Response) => {
       contactLog: idempotencyKey
          ? [{ kind: 'NOTE', detail: `idem:${idempotencyKey}` }]
          : [],
+   })
+
+   // Acknowledge the lead. §7 makes an unanswered enquiry the thing to avoid;
+   // the first thing that stops it is the customer knowing it arrived.
+   void notify({
+      event: NOTIFICATION_EVENTS.ENQUIRY_RECEIVED,
+      recipient: enquiry.phone,
+      vars: {
+         customer_name: enquiry.customerName,
+         order_ref: enquiry.reference,
+         listing_title: enquiry.listingLabel ?? '',
+      },
    })
 
    sendResponse(res, 201, 'Enquiry received', { reference: enquiry.reference })

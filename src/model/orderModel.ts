@@ -116,6 +116,8 @@ export interface IOrder extends Document {
    channel: string
    /** §6.1: cash orders auto-release at this deadline. */
    cashDeadline?: Date
+   /** §6.1: set when the deadline reminder goes out, so it goes out once. */
+   cashReminderSentAt?: Date
    consent?: any
    documents: any
    timeline: any
@@ -177,6 +179,7 @@ const orderSchema = new Schema<IOrder>(
       },
       channel: { type: String, enum: ['WEB', 'IOS', 'ANDROID', 'ADMIN'], default: 'WEB' },
       cashDeadline: { type: Date, index: true },
+      cashReminderSentAt: Date,
       consent: consentSchema,
       documents: {
          type: [

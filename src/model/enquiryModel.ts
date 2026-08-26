@@ -109,7 +109,16 @@ export const Enquiry = mongoose.model<IEnquiry>('Enquiry', enquirySchema)
 // ---------------------------------------------------------------------------
 
 /**
- * §11 notification templates. One per event per locale.
+ * §11 notification templates. One per event per channel.
+ *
+ * Deliberately NOT per locale. An SMS is often the first thing we send a phone
+ * number, before any customer record exists to hold a language preference - the
+ * sign-in code is exactly that case. Guessing wrong is worse than picking one
+ * language and being consistent, so operational messages are English.
+ *
+ * The legal text in PolicyVersion is a different matter and stays bilingual:
+ * the site knows which language it is rendering, and consent has to be in a
+ * language the customer actually read.
  *
  * §11 is explicit that notification content must NOT contain sensitive data —
  * no passport numbers, no full payment details, no permanent document links.
@@ -135,11 +144,24 @@ export const TEMPLATE_VARIABLES = [
    'departure_date',
    'listing_title',
    'deadline',
+   /**
+    * The customer's link to their own order. This is what lets a GUEST track a
+    * booking: the reference is the read capability, so possession of the link
+    * is the authorisation - no account, no password, nothing to remember.
+    */
+   'order_link',
 ] as const
+
+/**
+ * SMS and push. Kept beside the schema enum below because the two must agree —
+ * and the controller has to check this list by hand, since a field used in an
+ * upsert filter is never validated by mongoose.
+ */
+export const NOTIFICATION_CHANNELS = ['SMS', 'PUSH'] as const
+export type NotificationChannel = (typeof NOTIFICATION_CHANNELS)[number]
 
 export interface INotificationTemplate extends Document {
    event: string
-   locale: string
    channel: string
    subject: string
    body: string
@@ -155,10 +177,15 @@ const notificationTemplateSchema = new Schema<INotificationTemplate>(
          required: true,
          index: true,
       },
-      locale: { type: String, required: true },
+      /**
+       * SMS and push only. Email was removed because this market reaches
+       * customers on a handset — and every extra channel is another template
+       * per event per locale for the office to keep correct, for an address
+       * most customers never gave us.
+       */
       channel: {
          type: String,
-         enum: ['SMS', 'EMAIL', 'PUSH', 'WHATSAPP'],
+         enum: NOTIFICATION_CHANNELS,
          required: true,
       },
       subject: { type: String, default: '' },
@@ -168,10 +195,7 @@ const notificationTemplateSchema = new Schema<INotificationTemplate>(
    { timestamps: true, optimisticConcurrency: true }
 )
 
-notificationTemplateSchema.index(
-   { event: 1, locale: 1, channel: 1 },
-   { unique: true }
-)
+notificationTemplateSchema.index({ event: 1, channel: 1 }, { unique: true })
 
 export const NotificationTemplate = mongoose.model<INotificationTemplate>(
    'NotificationTemplate',
@@ -182,10 +206,12 @@ export const NotificationTemplate = mongoose.model<INotificationTemplate>(
 export interface INotificationLog extends Document {
    event: string
    channel: string
-   locale: string
    recipient: string
    order?: Types.ObjectId
    status: string
+   /** What was actually sent. Support is asked what the customer read, not
+    *  only whether something left the building. */
+   body?: string
    providerMessage?: string
    costMinor?: number
    createdAt: Date
@@ -195,7 +221,6 @@ const notificationLogSchema = new Schema<INotificationLog>(
    {
       event: { type: String, required: true, index: true },
       channel: { type: String, required: true },
-      locale: String,
       recipient: { type: String, required: true, index: true },
       order: { type: Schema.Types.ObjectId, ref: 'Order', index: true },
       status: {
@@ -203,6 +228,7 @@ const notificationLogSchema = new Schema<INotificationLog>(
          enum: ['QUEUED', 'SENT', 'DELIVERED', 'FAILED'],
          default: 'QUEUED',
       },
+      body: { type: String, maxlength: 1000 },
       providerMessage: String,
       costMinor: Number,
       createdAt: { type: Date, default: Date.now },

@@ -1,8 +1,8 @@
 import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
 import jwt from 'jsonwebtoken'
-import twilio from 'twilio'
 import { Customer } from '../model/customerModel.admin'
+import { sendSms } from '../services/notifications/sms.service'
 import AppError from '../utils/appError'
 import catchAsync from '../utils/catchAsync'
 
@@ -117,55 +117,24 @@ export const hashOtp = (code: string) =>
    crypto.createHash('sha256').update(code).digest('hex')
 
 /**
- * The code itself.
+ * The code.
  *
- * ponytail: outside production this is the fixed demo code, because no SMS
- * provider is attached yet and a code nobody can receive is a code nobody can
- * test with. Production generates a real random one — and the verification path
- * is identical either way, so the only thing that changes on the day a provider
- * lands is `deliverOtp` below.
+ * Always six random digits, in every environment. There is no fixed demo code
+ * and no way to ask the API what it is — a code the server will hand back on
+ * request is not a second factor, it is a formality, and leaving that switch in
+ * the codebase means it is one environment variable away from being live.
  */
-export const DEV_OTP = '123456'
-
-/**
- * Escape hatch for a deployed environment with no SMS provider yet: the code is
- * the fixed one and the response hands it back, so sign-in can be exercised
- * end to end.
- *
- * ponytail: this makes every account reachable by anyone who calls the
- * endpoint. Acceptable while the site has no real customers; delete the
- * variable the day it does. Configure Twilio instead of extending this.
- */
-export const otpDevMode = () => process.env.OTP_DEV_MODE === 'true'
-
 export const generateOtp = () =>
-   process.env.NODE_ENV === 'production' && !otpDevMode()
-      ? String(crypto.randomInt(0, 1_000_000)).padStart(6, '0')
-      : DEV_OTP
+   String(crypto.randomInt(0, 1_000_000)).padStart(6, '0')
 
 /**
- * Single seam for SMS delivery.
+ * Delivery. Throws when the provider is unconfigured or refuses.
  *
- * Twilio rather than MSG91: the market is DRC (+243) and MSG91 is India-first.
- * Swapping providers means replacing the body of this function and nothing else.
- *
- * Still throws when unconfigured — a 503 is honest, whereas returning 200 for an
- * SMS nobody sent leaves the customer waiting for a code that will never arrive.
+ * Deliberately no local-console fallback: a request that "succeeds" without an
+ * SMS leaves the customer waiting for a code that does not exist, and hides a
+ * broken provider until someone tries to sign in for real. Failing loudly at
+ * the point of breakage is cheaper than debugging it from the other end.
  */
 export const deliverOtp = async (phone: string, code: string) => {
-   const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER } = process.env
-
-   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
-      if (process.env.NODE_ENV === 'production' && !otpDevMode()) {
-         throw new AppError('SMS delivery is not configured', 503)
-      }
-      console.log(`[otp] ${phone} -> ${code}`)
-      return
-   }
-
-   await twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN).messages.create({
-      to: phone,
-      from: TWILIO_PHONE_NUMBER,
-      body: `${code} is your verification code.`,
-   })
+   await sendSms(phone, `${code} is your Flexi Agency verification code. It expires in 5 minutes.`)
 }

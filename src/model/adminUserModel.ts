@@ -29,6 +29,8 @@ const sessionSchema = new Schema(
 
 const adminUserSchema = new Schema<IAdminUserDocument>(
    {
+      /** For "send test to me" on the Notifications screen. E.164. */
+      phone: { type: String, trim: true },
       email: {
          type: String,
          required: [true, 'Please provide an email'],

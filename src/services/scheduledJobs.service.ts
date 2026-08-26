@@ -14,6 +14,11 @@ import { Customer } from '../model/customerModel.admin'
 import { Order } from '../model/orderModel'
 import { getSettings } from '../model/settingsModel'
 import { sendOutOfBandAlert } from './auditLog.service'
+import { NOTIFICATION_EVENTS } from '../model/enquiryModel'
+import { notifyOrder } from './notifications/notify.service'
+
+/** How long before a cash deadline the customer gets chased. */
+const REMINDER_WINDOW_MS = 12 * 60 * 60 * 1000
 
 /**
  * Background jobs. These are the parts of the guide that only work if something
@@ -101,6 +106,36 @@ export const releaseExpiredCashHolds = async () => {
 
    await systemAudit('CASH_HOLDS_RELEASED', { count: expired.length })
    return expired.length
+}
+
+/**
+ * §6.1: chase the cash before the deadline, not after it.
+ *
+ * Fires once per order, in the window before its deadline — `cashReminderSentAt`
+ * is what stops a customer being texted every ten minutes for the last twelve
+ * hours of their hold. An order that expires unchased is a sale lost to
+ * silence, which is the whole reason the deadline is visible to the office.
+ */
+export const sendCashDeadlineReminders = async () => {
+   const now = Date.now()
+   const due = await Order.find({
+      paymentMethod: 'CASH',
+      paymentStatus: { $in: [PAYMENT_STATUS.UNPAID, PAYMENT_STATUS.PENDING] },
+      status: { $in: [ORDER_STATUS.DRAFT, ORDER_STATUS.SUBMITTED] },
+      cashDeadline: {
+         $gt: new Date(now),
+         $lt: new Date(now + REMINDER_WINDOW_MS),
+      },
+      cashReminderSentAt: { $exists: false },
+   }).limit(200)
+
+   let sent = 0
+   for (const order of due) {
+      await Order.updateOne({ _id: order._id }, { $set: { cashReminderSentAt: new Date() } })
+      sent += await notifyOrder(NOTIFICATION_EVENTS.CASH_DEADLINE_REMINDER, order._id)
+   }
+   if (sent) await systemAudit('CASH_REMINDERS_SENT', { count: sent })
+   return sent
 }
 
 /** §14.5: purge document numbers N days after travel completes. */
@@ -217,6 +252,7 @@ export const startScheduledJobs = () => {
    // Every 10 minutes: the time-sensitive ones.
    cron.schedule('*/10 * * * *', async () => {
       try {
+         await sendCashDeadlineReminders()
          await releaseExpiredCashHolds()
          await applyScheduledPublishing()
          await flagUndocumentedOrders()
@@ -236,5 +272,5 @@ export const startScheduledJobs = () => {
       }
    })
 
-   console.log('Scheduled jobs started (cash release, purge, publishing, reconciliation)')
+   console.log('Scheduled jobs started (cash reminders + release, purge, publishing, reconciliation)')
 }

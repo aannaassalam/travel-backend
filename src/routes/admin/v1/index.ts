@@ -98,6 +98,7 @@ router.get('/orders/:id', requirePermission('orders:read'), orders.getOrder)
 router.post('/orders/:id/transition', requirePermission('orders:write'), orders.transitionOrder)
 router.post('/orders/:id/cash-received', requirePermission('orders:write'), orders.markCashReceived)
 router.post('/orders/:id/notes', requirePermission('orders:write'), orders.addInternalNote)
+router.post('/orders/:id/documents', requirePermission('orders:write'), orders.attachDocument)
 // §14.5: unmasking passport data needs step-up re-auth and is logged.
 router.post(
    '/orders/:id/travellers/:travellerId/unmask',

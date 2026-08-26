@@ -19,6 +19,8 @@ export interface IAdminSession {
 export interface IAdminUserDocument extends Document {
    _id: Types.ObjectId
    email: string
+   /** For "send test to me" on the Notifications screen. E.164. */
+   phone?: string
    name: string
    role: AdminRole
    password: string

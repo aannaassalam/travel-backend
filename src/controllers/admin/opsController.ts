@@ -9,12 +9,15 @@ import {
    NOTIFICATION_EVENTS,
    NotificationLog,
    NotificationTemplate,
+   NOTIFICATION_CHANNELS,
    TEMPLATE_VARIABLES,
 } from '../../model/enquiryModel'
 import { Order } from '../../model/orderModel'
 import SettingsModel, { getSettings, PolicyVersion } from '../../model/settingsModel'
 import { paginate } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
+import { money, notify, render } from '../../services/notifications/notify.service'
+import { sendSms, smsConfigured } from '../../services/notifications/sms.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { FieldMap, present, presentList } from '../../utils/present'
@@ -107,6 +110,21 @@ export const updateEnquiryStage = catchAsync(
          actorEmail: (req as any).admin?.email,
       })
       await enquiry.save()
+
+      // A quote the customer is never told about is not a quote.
+      if (stage === 'QUOTED') {
+         void notify({
+            event: NOTIFICATION_EVENTS.QUOTE_SENT,
+            recipient: enquiry.phone,
+            vars: {
+               customer_name: enquiry.customerName,
+               order_ref: enquiry.reference,
+               listing_title: enquiry.listingLabel ?? '',
+               amount: enquiry.quotedAmount ? money(enquiry.quotedAmount) : '',
+               currency: 'USD',
+            },
+         })
+      }
 
       await recordAudit(req, {
          action: AUDIT_ACTIONS.UPDATE,
@@ -352,7 +370,7 @@ export const getSecurityOverview = catchAsync(
 const templateFields: FieldMap<any> = {
    id: (t) => t._id.toString(),
    event: (t) => t.event,
-   locale: (t) => t.locale,
+
    channel: (t) => t.channel,
    subject: (t) => t.subject,
    body: (t) => t.body,
@@ -362,19 +380,22 @@ const templateFields: FieldMap<any> = {
 
 export const listTemplates = catchAsync(async (_req: Request, res: Response) => {
    const [templates, logs] = await Promise.all([
-      NotificationTemplate.find().sort({ event: 1, locale: 1 }),
+      NotificationTemplate.find().sort({ event: 1, channel: 1 }),
       NotificationLog.find().sort({ _id: -1 }).limit(25),
    ])
    return sendResponse(res, 200, 'OK', {
       items: presentList(templates, templateFields),
       variables: TEMPLATE_VARIABLES,
       events: Object.values(NOTIFICATION_EVENTS),
+      channels: NOTIFICATION_CHANNELS,
       deliveryLog: logs.map((l) => ({
          id: l._id.toString(),
          event: l.event,
          channel: l.channel,
          recipient: l.recipient,
          status: l.status,
+         body: l.body,
+         providerMessage: l.providerMessage,
          createdAt: l.createdAt,
       })),
       smsCostMinor: logs
@@ -398,11 +419,29 @@ const SENSITIVE_PLACEHOLDERS = [
 
 export const upsertTemplate = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const { event, locale, channel, subject, body, isActive } = req.body
-      if (!event || !locale || !channel || !body) {
+      const { event, channel, subject, body, isActive } = req.body
+      if (!event || !channel || !body) {
+         return next(new AppError('event, channel and body are required', 400))
+      }
+      /**
+       * Checked here, explicitly.
+       *
+       * The schema enum does not cover this: `channel` is part of the upsert
+       * FILTER, and mongoose only validates fields it is setting — so
+       * `runValidators` happily wrote an EMAIL template that the model claims
+       * cannot exist and that nothing in the system would ever deliver.
+       */
+      if (!NOTIFICATION_CHANNELS.includes(channel)) {
          return next(
-            new AppError('event, locale, channel and body are required', 400)
+            new AppError(
+               `channel must be one of: ${NOTIFICATION_CHANNELS.join(', ')}`,
+               400,
+               'UNKNOWN_CHANNEL'
+            )
          )
+      }
+      if (!Object.values(NOTIFICATION_EVENTS).includes(event)) {
+         return next(new AppError('Unknown event', 400, 'UNKNOWN_EVENT'))
       }
 
       const used = [...String(body).matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)].map(
@@ -431,9 +470,9 @@ export const upsertTemplate = catchAsync(
          )
       }
 
-      const before = await NotificationTemplate.findOne({ event, locale, channel })
+      const before = await NotificationTemplate.findOne({ event, channel })
       const template = await NotificationTemplate.findOneAndUpdate(
-         { event, locale, channel },
+         { event, channel },
          { subject, body, isActive: isActive ?? true },
          { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
       )
@@ -452,25 +491,79 @@ export const upsertTemplate = catchAsync(
 )
 
 /** §11: send-test-to-me before saving. A broken template reaches every customer. */
+/**
+ * "Send test to me" — a real send to the admin's own number.
+ *
+ * It used to render a preview and write a log line saying it had been sent,
+ * which is the one thing a test button must never do: it certified a channel
+ * that had never carried a message. Now it either delivers or reports why not.
+ */
 export const sendTestNotification = catchAsync(
-   async (req: Request, res: Response) => {
+   async (req: Request, res: Response, next: NextFunction) => {
       const { event, channel, body } = req.body
-      const rendered = String(body || '').replace(
-         /\{\{\s*([a-z_]+)\s*\}\}/g,
-         (_m, v) => `[${v}]`
-      )
-      await NotificationLog.create({
-         event: event || 'TEST',
-         channel: channel || 'EMAIL',
-         recipient: (req as any).admin.email,
-         status: 'SENT',
-         providerMessage: 'Test preview — no provider configured',
+      const admin = (req as any).admin
+      const to = String(req.body.to || admin.phone || '').trim()
+
+      const rendered = render(String(body || ''), {
+         customer_name: admin.name || 'Test',
+         order_ref: 'FA-TEST0-00000',
+         amount: '100.00',
+         currency: 'USD',
+         departure_date: new Date().toISOString().slice(0, 10),
+         listing_title: 'Test listing',
+         deadline: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
       })
-      return sendResponse(res, 200, 'Test recorded in the delivery log', {
-         preview: rendered,
-         // ponytail: renders and logs, but does not transmit. Wire msg91/Azure
-         // here once §18 Q2 names the provider and sender identity.
-         delivered: false,
-      })
+
+      if (channel === 'PUSH') {
+         await NotificationLog.create({
+            event: event || 'TEST',
+            channel: 'PUSH',
+            recipient: to || admin.email,
+            status: 'QUEUED',
+            providerMessage: 'Push provider not configured — nothing transmitted',
+         })
+         return sendResponse(res, 200, 'Push is not wired yet — logged, not sent', {
+            preview: rendered,
+            delivered: false,
+         })
+      }
+
+      if (!to) {
+         return next(
+            new AppError('Add a phone number to your admin profile, or pass one as "to"', 400)
+         )
+      }
+      if (!smsConfigured()) {
+         await NotificationLog.create({
+            event: event || 'TEST',
+            channel: 'SMS',
+            recipient: to,
+            status: 'FAILED',
+            providerMessage: 'SMS provider is not configured',
+         })
+         return next(new AppError('SMS provider is not configured', 503))
+      }
+
+      try {
+         const result = await sendSms(to, rendered)
+         await NotificationLog.create({
+            event: event || 'TEST',
+            channel: 'SMS',
+            recipient: to,
+            status: 'SENT',
+            providerMessage: `${result.sid} (${result.status})`,
+            costMinor: result.costMinor,
+         })
+         return sendResponse(res, 200, `Sent to ${to}`, { preview: rendered, delivered: true })
+      } catch (err) {
+         await NotificationLog.create({
+            event: event || 'TEST',
+            channel: 'SMS',
+            recipient: to,
+            status: 'FAILED',
+            providerMessage: (err as Error).message.slice(0, 300),
+         })
+         return next(new AppError((err as Error).message, 502))
+      }
    }
 )
