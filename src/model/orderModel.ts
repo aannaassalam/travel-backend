@@ -64,6 +64,32 @@ const orderItemSchema = new Schema(
 )
 
 /**
+ * Where a restaurant order is going.
+ *
+ * Only restaurant orders carry this — a flight has no address to deliver to.
+ * The zone and fee are snapshotted rather than referenced, for the same reason
+ * every price on an order is: the office re-drawing its zones next month must
+ * not retroactively change what this customer agreed to pay.
+ *
+ * `fee` is the USD base that reporting sums; `feeCharged` is that fee in the
+ * currency actually charged, taken from the typed per-currency price rather
+ * than converted (§5).
+ */
+const deliverySchema = new Schema(
+   {
+      address: { type: String, required: true, trim: true },
+      zoneId: Schema.Types.ObjectId,
+      zoneName: String,
+      fee: { type: Number, default: 0, min: 0 },
+      feeCharged: { type: Number, default: 0, min: 0 },
+      etaMinutes: Number,
+      /** "Second gate, ask for Papa Jean" — the thing that gets a driver there. */
+      notes: String,
+   },
+   { _id: false }
+)
+
+/**
  * §6.2 / §9.3: the consent record is what defends a chargeback. It stores the
  * exact text shown, not a pointer that could later be edited — §10 keeps policy
  * versions immutable for the same reason.
@@ -118,6 +144,8 @@ export interface IOrder extends Document {
    cashDeadline?: Date
    /** §6.1: set when the deadline reminder goes out, so it goes out once. */
    cashReminderSentAt?: Date
+   /** Restaurant orders only; see deliverySchema. */
+   delivery?: any
    consent?: any
    documents: any
    timeline: any
@@ -180,6 +208,7 @@ const orderSchema = new Schema<IOrder>(
       channel: { type: String, enum: ['WEB', 'IOS', 'ANDROID', 'ADMIN'], default: 'WEB' },
       cashDeadline: { type: Date, index: true },
       cashReminderSentAt: Date,
+      delivery: deliverySchema,
       consent: consentSchema,
       documents: {
          type: [

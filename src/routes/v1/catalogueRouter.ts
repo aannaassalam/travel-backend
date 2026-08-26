@@ -9,6 +9,10 @@ import {
    searchHotels,
    searchListings,
 } from '../../controllers/public/catalogueController'
+import {
+   getRestaurant,
+   searchRestaurants,
+} from '../../controllers/public/restaurantController'
 import { createEnquiry } from '../../controllers/public/enquiryController'
 import { getPolicy } from '../../controllers/public/policyController'
 import { listLocations, listRoutes } from '../../controllers/public/locationController'
@@ -76,6 +80,12 @@ router.get('/listings/:slug', cacheable(300), getListing)
 
 router.get('/hotels', searchLimiter, cacheable(120), searchHotels)
 router.get('/hotels/:slug', cacheable(300), getHotel)
+
+// Restaurants. Same cache windows as hotels: a list that moves rarely, and a
+// menu that the kitchen can 86 an item on at any moment — 300s is the most
+// staleness a "sold out" toggle should ever survive.
+router.get('/restaurants', searchLimiter, cacheable(120), searchRestaurants)
+router.get('/restaurants/:slug', cacheable(300), getRestaurant)
 
 /**
  * Legal text, authored in the admin's content section. Cached hard: it changes

@@ -11,8 +11,24 @@ export const VERTICALS = {
    HOTEL: 'HOTEL',
    ACTIVITY: 'ACTIVITY',
    PROPERTY: 'PROPERTY',
+   RESTAURANT: 'RESTAURANT',
 } as const
 export type Vertical = (typeof VERTICALS)[keyof typeof VERTICALS]
+
+/**
+ * Menu sections. An enum, not free text: §15 is explicit that free text where
+ * an enum belongs destroys reporting, and "Entrées"/"Entrees"/"Starters" typed
+ * by three different people is exactly that. Display names are localised on the
+ * client; this is the stable key.
+ */
+export const MENU_SECTIONS = {
+   STARTER: 'STARTER',
+   MAIN: 'MAIN',
+   SIDE: 'SIDE',
+   DESSERT: 'DESSERT',
+   DRINK: 'DRINK',
+} as const
+export type MenuSection = (typeof MENU_SECTIONS)[keyof typeof MENU_SECTIONS]
 
 /** §5.1 persistent status column. */
 export const LISTING_STATUS = {

@@ -2,6 +2,7 @@ import { Types } from 'mongoose'
 import { CURRENCIES, BASE_CURRENCY, VERTICALS } from '../../constants/domain.constants'
 import { Listing } from '../../model/listingModel'
 import { RatePlan, RoomType } from '../../model/hotelModel'
+import { MenuItem, Restaurant } from '../../model/restaurantModel'
 import { nightsBetween } from './inventory.service'
 
 /**
@@ -145,8 +146,82 @@ export const priceStayItem = async (item: RequestedItem): Promise<PricedItem> =>
    }
 }
 
-export const priceItem = (item: RequestedItem) =>
-   item.vertical === VERTICALS.HOTEL ? priceStayItem(item) : priceListingItem(item)
+/**
+ * A dish. The simplest line on the system: no dates, no nights, no allotment —
+ * a quantity times a typed price.
+ *
+ * `isAvailable` is checked here rather than only in the menu query, because the
+ * kitchen can 86 a dish while the customer is filling their cart. Re-reading it
+ * at checkout is the difference between "sold out, we removed it" and taking
+ * money for food nobody can cook.
+ */
+export const priceMenuItem = async (item: RequestedItem): Promise<PricedItem> => {
+   const dish = await MenuItem.findOne({ _id: item.listingId, status: 'PUBLISHED' })
+   if (!dish) throw new Error('ITEM_UNAVAILABLE')
+   if (!dish.isAvailable) throw new Error('ITEM_UNAVAILABLE')
+
+   // A dish on a restaurant that has since been unpublished is not sellable
+   // either, and the menu query would never have returned it.
+   const restaurant = await Restaurant.findOne({ _id: dish.restaurant, status: 'PUBLISHED' })
+   if (!restaurant) throw new Error('ITEM_UNAVAILABLE')
+
+   const sell = (dish.sellPrice as any) ?? {}
+   const cost = (dish.costPrice as any) ?? {}
+   const byCurrency: Record<string, number> = {}
+   for (const c of CURRENCIES) {
+      if (typeof sell[c] === 'number' && sell[c] > 0) byCurrency[c] = sell[c] * item.quantity
+   }
+
+   return {
+      vertical: VERTICALS.RESTAURANT,
+      // The restaurant, not the dish: `listingId` is what the admin order view
+      // links through to, and a dish on its own is not a page.
+      listingId: dish.restaurant,
+      listingLabel: label((dish as any).name),
+      // Reusing the room-type slot for the dish keeps the order item shape
+      // unchanged — it is already "the child record this line actually sold".
+      roomTypeId: dish._id,
+      quantity: item.quantity,
+      unitSellPrice: sell[BASE_CURRENCY] ?? 0,
+      unitCostPrice: cost[BASE_CURRENCY] ?? 0,
+      lineTotal: (sell[BASE_CURRENCY] ?? 0) * item.quantity,
+      lineCost: (cost[BASE_CURRENCY] ?? 0) * item.quantity,
+      lineTotalByCurrency: byCurrency,
+   }
+}
+
+export const priceItem = (item: RequestedItem) => {
+   if (item.vertical === VERTICALS.HOTEL) return priceStayItem(item)
+   if (item.vertical === VERTICALS.RESTAURANT) return priceMenuItem(item)
+   return priceListingItem(item)
+}
+
+/**
+ * The delivery fee, shaped like a line so `settle` can treat it as one.
+ *
+ * It has to take part in the currency decision, not be added afterwards: a fee
+ * typed only in USD means the order cannot honestly settle in CDF, exactly as a
+ * dish priced only in USD does. Adding it after the fact would either convert
+ * it — which §5 forbids — or quietly charge a USD fee inside a CDF total.
+ */
+export const priceDelivery = (zone: any, restaurantLabel: string): PricedItem => {
+   const fee = (zone?.fee as any) ?? {}
+   const byCurrency: Record<string, number> = {}
+   for (const c of CURRENCIES) {
+      if (typeof fee[c] === 'number') byCurrency[c] = fee[c]
+   }
+   return {
+      vertical: VERTICALS.RESTAURANT,
+      listingId: zone._id,
+      listingLabel: `Livraison — ${restaurantLabel}`,
+      quantity: 1,
+      unitSellPrice: fee[BASE_CURRENCY] ?? 0,
+      unitCostPrice: 0,
+      lineTotal: fee[BASE_CURRENCY] ?? 0,
+      lineCost: 0,
+      lineTotalByCurrency: byCurrency,
+   }
+}
 
 /**
  * What the customer is actually charged.

@@ -115,6 +115,13 @@ const orderDetailFields: FieldMap<IOrder> = {
          documentNumberMasked: maskDocumentNumber(t.documentNumber),
          nationality: t.nationality
       })),
+   /**
+    * Restaurant orders only. The operator dispatching a driver needs the
+    * address and the note more than anything else on this record, so it is
+    * published whole rather than summarised — including the internal zone id,
+    * which the public DTO deliberately omits.
+    */
+   delivery: (o) => (o as any).delivery ?? undefined,
    consent: (o) =>
       o.consent
          ? {

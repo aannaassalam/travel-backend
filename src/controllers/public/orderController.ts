@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
 import { Types } from 'mongoose'
 import {
+   BASE_CURRENCY,
    FULFILMENT_STATUS,
    ORDER_STATUS,
    PAYMENT_METHOD,
@@ -11,6 +12,7 @@ import {
 import { presentOrder } from '../../dto/public/order.dto'
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
+import { Restaurant } from '../../model/restaurantModel'
 import { PolicyVersion, getSettings } from '../../model/settingsModel'
 import {
    commitListing,
@@ -20,7 +22,13 @@ import {
    releaseListing,
    releaseStay,
 } from '../../services/orders/inventory.service'
-import { PricedItem, RequestedItem, priceItem, settle } from '../../services/orders/pricing.service'
+import {
+   PricedItem,
+   RequestedItem,
+   priceDelivery,
+   priceItem,
+   settle,
+} from '../../services/orders/pricing.service'
 import { currentCustomer } from '../../middleware/customerAuth'
 import { notifyOrder } from '../../services/notifications/notify.service'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
@@ -155,9 +163,78 @@ export const createOrder = catchAsync(
          return next(new AppError('One of these items is not priced for sale', 409))
       }
 
+      /**
+       * --- 1b. Restaurant orders: one kitchen, one address ------------------
+       *
+       * A delivery order is one driver leaving one restaurant with one bag. Two
+       * kitchens in an order has no meaning — there is no second driver and no
+       * second fee — so it is refused here rather than half-honoured later.
+       * Mixing a dish with a flight seat is the same problem.
+       */
+      const foodLines = priced.filter((p) => p.vertical === VERTICALS.RESTAURANT)
+      let deliveryLine: PricedItem | null = null
+      let deliveryDoc: Record<string, unknown> | null = null
+
+      if (foodLines.length) {
+         if (foodLines.length !== priced.length) {
+            return next(new AppError('Food cannot be ordered alongside travel', 400))
+         }
+         if (new Set(foodLines.map((p) => String(p.listingId))).size > 1) {
+            return next(new AppError('One order can only come from one restaurant', 400))
+         }
+
+         const delivery = req.body?.delivery
+         const address = String(delivery?.address ?? '').trim()
+         if (!address) return next(new AppError('A delivery address is required', 400))
+
+         const restaurant = await Restaurant.findOne({
+            _id: foodLines[0].listingId,
+            status: 'PUBLISHED',
+         })
+         if (!restaurant) return next(new AppError('That restaurant is not taking orders', 409))
+
+         /**
+          * The zone is read off the restaurant, never taken from the request. A
+          * posted fee is a fee chosen by whoever is driving the browser, which
+          * is the same reason every line price is re-read above.
+          */
+         const zone = (restaurant.deliveryZones ?? []).find(
+            (z: any) => String(z._id) === String(delivery?.zoneId) && z.isActive
+         )
+         if (!zone) return next(new AppError('Choose a delivery zone we cover', 400))
+
+         // Minimum is on the food, not the food plus the fee — otherwise the
+         // delivery charge helps you clear the bar it exists to enforce.
+         const foodUsd = foodLines.reduce((sum, l) => sum + l.lineTotal, 0)
+         const minOrder = (zone.minOrder as any)?.[BASE_CURRENCY] ?? 0
+         if (minOrder && foodUsd < minOrder) {
+            return next(new AppError('Order is below the minimum for that zone', 400))
+         }
+
+         deliveryLine = priceDelivery(zone, restaurant.displayName())
+         deliveryDoc = {
+            address: address.slice(0, 300),
+            zoneId: zone._id,
+            zoneName: zone.name,
+            etaMinutes: (restaurant.prepTimeMinutes ?? 0) + (zone.etaMinutes ?? 0),
+            notes: String(delivery?.notes ?? '').trim().slice(0, 300) || undefined,
+         }
+      }
+
       // --- 2. Hold the stock ------------------------------------------------
       const taken: { item: PricedItem; nights: Types.ObjectId[] }[] = []
       for (const item of priced) {
+         /**
+          * Dishes have no allotment to hold. A kitchen is not a seat map: it
+          * either can cook the dish today or it cannot, which `isAvailable`
+          * already answered when the line was priced. Calling holdListing here
+          * would decrement a counter that does not exist and fail every
+          * restaurant order.
+          */
+         if (item.vertical === VERTICALS.RESTAURANT) {
+            taken.push({ item, nights: [] })
+            continue
+         }
          if (item.vertical === VERTICALS.HOTEL && item.roomTypeId) {
             const { ok, held } = await holdStay(
                item.roomTypeId,
@@ -237,7 +314,14 @@ export const createOrder = catchAsync(
             throw new AppError('No published no-refund policy — cannot take an order', 503)
          }
 
-         const { chargedCurrency, chargedTotal, fxRate, totalUsd } = settle(priced, currency)
+         const { chargedCurrency, chargedTotal, fxRate, totalUsd } = settle(
+            // The fee settles with the food, not after it: a fee typed only in
+            // USD means the order cannot honestly settle in CDF, exactly as a
+            // dish priced only in USD cannot. Added afterwards it would either
+            // be converted (§5 forbids it) or charged in the wrong currency.
+            deliveryLine ? [...priced, deliveryLine] : priced,
+            currency
+         )
          const settings = await getSettings()
          const isCash = method === PAYMENT_METHOD.CASH
 
@@ -286,6 +370,17 @@ export const createOrder = catchAsync(
                ip: req.ip,
                userAgent: req.header('User-Agent')?.slice(0, 300),
             },
+            delivery: deliveryDoc
+               ? {
+                    ...deliveryDoc,
+                    fee: deliveryLine!.lineTotal,
+                    // Falls back to the base amount when the order settled in
+                    // USD, so this is never blank on a real order.
+                    feeCharged:
+                       deliveryLine!.lineTotalByCurrency[chargedCurrency] ??
+                       deliveryLine!.lineTotal,
+                 }
+               : undefined,
             travelDate: priced.find((p) => p.startDate)?.startDate,
             timeline: [{ event: 'ORDER_CREATED', detail: `channel=WEB method=${method}` }],
          })

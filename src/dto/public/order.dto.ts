@@ -53,6 +53,23 @@ const travellerFields: FieldMap<any> = {
    nationality: (t) => t.nationality,
 }
 
+/**
+ * Where a restaurant order is going, as the customer needs to see it back.
+ *
+ * `fee` and `feeCharged` are included because the delivery charge is part of
+ * the total and an unexplained gap between the food and the amount owed is the
+ * kind of thing that turns into a doorstep argument with a driver. The zone id
+ * is not published — it is an internal handle with nothing to say to a reader.
+ */
+const deliveryFields: FieldMap<any> = {
+   address: (d) => d.address,
+   zoneName: (d) => d.zoneName,
+   fee: (d) => d.fee,
+   feeCharged: (d) => d.feeCharged,
+   etaMinutes: (d) => d.etaMinutes,
+   notes: (d) => d.notes,
+}
+
 const consentFields: FieldMap<any> = {
    policyVersionLabel: (c) => c.policyVersionLabel,
    textShown: (c) => c.textShown,
@@ -99,6 +116,7 @@ export const presentOrder = (o: any) => {
       // The number the customer quotes when paying cash at the office. It is
       // the order reference, which they already hold — not a new secret.
       cashReference: o.paymentMethod === 'CASH' ? o.reference : undefined,
+      delivery: o.delivery ? present(o.delivery, deliveryFields) : undefined,
       consent: o.consent ? present(o.consent, consentFields) : undefined,
       documents: (o.documents ?? []).map((d: any) => ({ kind: d.kind, fileName: d.fileName })),
       timeline: (o.timeline ?? []).map((t: any) => present(t, timelineFields)),

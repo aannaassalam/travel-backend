@@ -16,6 +16,7 @@
     "migrate:i18n-money": "ts-node src/scripts/migrateI18nMoney.ts",
     "seed:catalogue": "ts-node src/scripts/seedCatalogue.ts",
     "seed:images": "ts-node src/scripts/seedVerticalImages.ts",
+    "seed:restaurants": "ts-node src/scripts/seedRestaurants.ts",
     "migrate:s3": "ts-node src/scripts/migrateStorageToS3.ts"
   },
   "author": "Anas Alam",

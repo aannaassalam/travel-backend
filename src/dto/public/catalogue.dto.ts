@@ -1,5 +1,6 @@
 import { IHotel, IRoomType } from '../../model/hotelModel'
 import { IListing } from '../../model/listingModel'
+import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
 import { Localized, Money } from '../../model/shared.schema'
 import { FieldMap, present, presentList } from '../../utils/present'
 
@@ -142,3 +143,74 @@ const hotelFields: FieldMap<HotelWithRooms> = {
 
 export const presentHotel = (h: HotelWithRooms) => present(h, hotelFields)
 export const presentHotels = (h: HotelWithRooms[]) => presentList(h, hotelFields)
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Restaurants and their menus.
+ *
+ * `costPrice` has no entry here and never will — same rule as every other
+ * sellable thing (§14.3 rule 3). Because these maps are allow-lists, leaving it
+ * out is the whole protection: a field the serialiser cannot name is a field it
+ * cannot publish, however the document is later extended.
+ */
+
+export interface MenuItemPublic extends IMenuItem {}
+
+const menuItemFields: FieldMap<IMenuItem> = {
+   id: (m) => m._id.toString(),
+   restaurantId: (m) => m.restaurant.toString(),
+   section: (m) => m.section,
+   name: (m) => localized(m.name),
+   description: (m) => localized(m.description),
+   sellPrice: (m) => pickMoney(m.sellPrice),
+   image: (m) => m.image,
+   /** Drives the greyed-out "sold out today" row rather than hiding the dish. */
+   isAvailable: (m) => m.isAvailable !== false,
+   sortOrder: (m) => m.sortOrder ?? 0,
+}
+
+/**
+ * Zones are public: the customer has to see the fee before they commit, and
+ * §1 is explicit that a cost appearing only at the last step is the thing that
+ * loses the order. The fee is still re-read server-side at checkout.
+ */
+const deliveryZoneFields: FieldMap<any> = {
+   id: (z) => z._id.toString(),
+   name: (z) => z.name,
+   fee: (z) => pickMoney(z.fee),
+   minOrder: (z) => (z.minOrder?.USD ? pickMoney(z.minOrder) : undefined),
+   etaMinutes: (z) => z.etaMinutes,
+}
+
+export interface RestaurantWithMenu extends IRestaurant {
+   fromPrice?: Money
+   menu?: IMenuItem[]
+}
+
+const restaurantFields: FieldMap<RestaurantWithMenu> = {
+   id: (r) => r._id.toString(),
+   name: (r) => localized(r.name),
+   slug: (r) => r.slug,
+   description: (r) => localized(r.description),
+   cuisines: (r) => r.cuisines ?? [],
+   address: (r) => r.address,
+   city: (r) => r.city,
+   country: (r) => r.country,
+   geo: (r) => (r.geo?.lat ? { lat: r.geo.lat, lng: r.geo.lng } : undefined),
+   images: (r) => r.images ?? [],
+   openingHours: (r) => r.openingHours,
+   prepTimeMinutes: (r) => r.prepTimeMinutes,
+   phone: (r) => r.phone,
+   rating: (r) => (r as any).rating,
+   reviewCount: (r) => (r as any).reviewCount,
+   // Inactive zones are not offered, so they are not published either.
+   deliveryZones: (r) =>
+      presentList((r.deliveryZones ?? []).filter((z: any) => z.isActive), deliveryZoneFields),
+   fromPrice: (r) => pickMoney(r.fromPrice),
+   menu: (r) => presentList(r.menu ?? [], menuItemFields),
+}
+
+export const presentRestaurant = (r: RestaurantWithMenu) => present(r, restaurantFields)
+export const presentRestaurants = (r: RestaurantWithMenu[]) =>
+   presentList(r, restaurantFields)

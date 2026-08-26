@@ -7,6 +7,7 @@ import * as hotels from '../../../controllers/admin/hotelController'
 import * as listings from '../../../controllers/admin/listingController'
 import * as locations from '../../../controllers/admin/locationController'
 import * as ops from '../../../controllers/admin/opsController'
+import * as restaurants from '../../../controllers/admin/restaurantController'
 import * as orders from '../../../controllers/admin/orderController'
 import {
    getSignedLink,
@@ -76,6 +77,49 @@ router.patch(
 // §5.3 availability calendar
 router.get('/hotels/:id/calendar', requirePermission('inventory:read'), hotels.getCalendar)
 router.post('/hotels/:id/calendar', requirePermission('inventory:write'), hotels.bulkUpdateCalendar)
+
+// --- Inventory: restaurants and menus (§5.2) --------------------------------
+// Same permission as the rest of inventory: a menu is stock like any other.
+router.get(
+   '/restaurants',
+   requirePermission('inventory:read'),
+   boundPagination,
+   restaurants.listRestaurants
+)
+router.post('/restaurants', requirePermission('inventory:write'), restaurants.createRestaurant)
+router.get('/restaurants/:id', requirePermission('inventory:read'), restaurants.getRestaurant)
+router.patch(
+   '/restaurants/:id',
+   requirePermission('inventory:write'),
+   restaurants.updateRestaurant
+)
+router.post(
+   '/restaurants/:id/publish',
+   requirePermission('inventory:write'),
+   restaurants.publishRestaurant
+)
+// Archive, never delete (§5.1) — there is deliberately no DELETE route.
+router.post(
+   '/restaurants/:id/archive',
+   requirePermission('inventory:write'),
+   restaurants.archiveRestaurant
+)
+
+router.post(
+   '/restaurants/:id/menu',
+   requirePermission('inventory:write'),
+   restaurants.createMenuItem
+)
+router.patch(
+   '/restaurants/:id/menu/:menuItemId',
+   requirePermission('inventory:write'),
+   restaurants.updateMenuItem
+)
+router.post(
+   '/restaurants/:id/menu/:menuItemId/archive',
+   requirePermission('inventory:write'),
+   restaurants.archiveMenuItem
+)
 
 // --- Inventory: flights, bus, cars, activities, properties (§5.2) ----------
 router.get('/listings', requirePermission('inventory:read'), boundPagination, listings.listListings)
