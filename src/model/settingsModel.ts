@@ -17,6 +17,17 @@ export interface ISettings extends Document {
    companyName: string
    supportEmail: string
    supportPhone: string
+   /**
+    * Public contact details, shown in the footer, on /contact and in the
+    * homepage JSON-LD. They lived in three hardcoded places in the frontend,
+    * so moving office or changing a number meant a developer and a deploy —
+    * §15 is explicit that anything the office changes is admin-owned config.
+    */
+   whatsappNumber: string
+   streetAddress: string
+   city: string
+   country: string
+   officeHours: string
    enabledLocales: string[]
    defaultLocale: string
    enabledCurrencies: string[]
@@ -44,6 +55,11 @@ const settingsSchema = new Schema<ISettings>(
       companyName: { type: String, default: 'Travel DRC' },
       supportEmail: { type: String, default: '' },
       supportPhone: { type: String, default: '' },
+      whatsappNumber: { type: String, default: '' },
+      streetAddress: { type: String, default: '' },
+      city: { type: String, default: '' },
+      country: { type: String, default: 'CD' },
+      officeHours: { type: String, default: '' },
       enabledLocales: { type: [String], default: ['fr', 'en'] },
       defaultLocale: { type: String, enum: LOCALES, default: DEFAULT_LOCALE },
       enabledCurrencies: { type: [String], default: [...CURRENCIES] },

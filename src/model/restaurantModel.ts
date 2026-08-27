@@ -145,7 +145,9 @@ export interface IMenuItem extends Document {
    description: Localized
    costPrice: Money
    sellPrice: Money
-   image?: string
+   /** Plural: a dish is worth more than one angle, and the menu row shows the
+    *  first while the detail view can show the rest. */
+   images: string[]
    /**
     * The "86" toggle. Off means the kitchen has run out today — the item stays
     * on the menu, greyed and unorderable, rather than vanishing and leaving a
@@ -179,7 +181,7 @@ const menuItemSchema = new Schema<IMenuItem>(
       // because once it is optional it is skipped.
       costPrice: moneyField({ required: true }),
       sellPrice: moneyField({ required: true }),
-      image: { type: String, trim: true },
+      images: { type: [String], default: [] },
       isAvailable: { type: Boolean, default: true },
       sortOrder: { type: Number, default: 0 },
       status: {

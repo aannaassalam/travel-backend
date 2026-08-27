@@ -22,14 +22,34 @@ export const SESSION_INVALID = 'SESSION_INVALID'
 /** 7 days, matching the cookie, so neither expires while the other is alive. */
 export const CUSTOMER_SESSION_MS = Number(process.env.CUSTOMER_SESSION_DAYS || 7) * 86400_000
 
+/**
+ * How long a session can be kept alive by use before the customer has to prove
+ * the phone again. The sliding window below would otherwise renew forever, and
+ * a session that never ends is a stolen cookie that never expires.
+ */
+export const CUSTOMER_ABSOLUTE_MAX_MS =
+   Number(process.env.CUSTOMER_SESSION_MAX_DAYS || 90) * 86400_000
+
+/**
+ * Renew once the token is older than this. Not on every request: that would put
+ * a Set-Cookie on every authenticated response for no benefit.
+ */
+const REFRESH_AFTER_MS = 86400_000
+
 const customerJwtSecret = () => {
    const secret = process.env.JWT_SECRET
    if (!secret) throw new Error('JWT_SECRET is not defined')
    return secret
 }
 
-export const signCustomerToken = (customerId: string) =>
-   jwt.sign({ sub: customerId }, customerJwtSecret(), {
+/**
+ * `authAt` is when the customer last proved the phone with an OTP, and it is
+ * carried forward unchanged by every renewal. It is what makes the absolute cap
+ * possible: without it a renewed token looks brand new and the session could be
+ * extended indefinitely one request at a time.
+ */
+export const signCustomerToken = (customerId: string, authAt = Date.now()) =>
+   jwt.sign({ sub: customerId, authAt }, customerJwtSecret(), {
       audience: CUSTOMER_AUDIENCE,
       expiresIn: CUSTOMER_SESSION_MS / 1000,
    })
@@ -88,20 +108,59 @@ export const currentCustomer = async (req: Request) => {
       })
       const customer = await Customer.findById(decoded.sub)
       if (!customer || customer.isBlocked || !customer.hasAccount) return null
+      // Stashed so the guard can renew without verifying the token a second time.
+      ;(req as any).customerToken = decoded
       return customer
    } catch {
       return null
    }
 }
 
+/**
+ * Sliding renewal.
+ *
+ * Every OTP costs real money at Twilio, so a customer who uses the site should
+ * never be asked for one again — the fixed 7-day window meant a fortnightly
+ * visitor paid for an SMS every single visit. Once a token is more than a day
+ * old it is re-issued with a fresh 7 days, so the window follows the customer.
+ *
+ * The cookie IS the refresh token here. It is httpOnly, rotated on renewal, and
+ * scoped to the API, which is what a separate refresh token would buy — without
+ * a second credential to store, transport and revoke.
+ *
+ * `authAt` is preserved, so the absolute cap still bites: after
+ * CUSTOMER_SESSION_MAX_DAYS from the last real OTP the renewal stops and the
+ * customer proves the phone again.
+ *
+ * ponytail: no refresh-token rotation or reuse detection, and no server-side
+ * session list — a customer session cannot be revoked before it expires. Add
+ * both if account takeover becomes a real concern; the admin side already has
+ * the revocable-session shape to copy.
+ */
+const renewIfStale = (req: Request, res: Response) => {
+   const decoded: any = (req as any).customerToken
+   if (!decoded?.exp) return
+
+   const issuedAt = decoded.iat ? decoded.iat * 1000 : 0
+   if (!issuedAt || Date.now() - issuedAt < REFRESH_AFTER_MS) return
+
+   // Tokens minted before `authAt` existed have no anchor, so treat this
+   // request as the anchor rather than refusing to renew a valid session.
+   const authAt = Number(decoded.authAt) || Date.now()
+   if (Date.now() - authAt >= CUSTOMER_ABSOLUTE_MAX_MS) return
+
+   setCustomerCookie(res, signCustomerToken(String(decoded.sub), authAt))
+}
+
 /** Guard for routes that require a signed-in customer. */
 export const protectCustomer = catchAsync(
-   async (req: Request, _res: Response, next: NextFunction) => {
+   async (req: Request, res: Response, next: NextFunction) => {
       const customer = await currentCustomer(req)
       if (!customer) {
          return next(new AppError('Please sign in', 401, SESSION_INVALID))
       }
       ;(req as any).customer = customer
+      renewIfStale(req, res)
       next()
    }
 )

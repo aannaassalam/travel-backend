@@ -266,6 +266,13 @@ const settingsFields: FieldMap<any> = {
    companyName: (s) => s.companyName,
    supportEmail: (s) => s.supportEmail,
    supportPhone: (s) => s.supportPhone,
+   // Public contact block. `updateSettings` writes whatever this map names, so
+   // listing them here is what makes them editable as well as readable.
+   whatsappNumber: (s) => s.whatsappNumber,
+   streetAddress: (s) => s.streetAddress,
+   city: (s) => s.city,
+   country: (s) => s.country,
+   officeHours: (s) => s.officeHours,
    enabledLocales: (s) => s.enabledLocales,
    defaultLocale: (s) => s.defaultLocale,
    enabledCurrencies: (s) => s.enabledCurrencies,

@@ -164,7 +164,7 @@ const menuItemFields: FieldMap<IMenuItem> = {
    name: (m) => localized(m.name),
    description: (m) => localized(m.description),
    sellPrice: (m) => pickMoney(m.sellPrice),
-   image: (m) => m.image,
+   images: (m) => m.images ?? [],
    /** Drives the greyed-out "sold out today" row rather than hiding the dish. */
    isAvailable: (m) => m.isAvailable !== false,
    sortOrder: (m) => m.sortOrder ?? 0,

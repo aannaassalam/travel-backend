@@ -13,6 +13,7 @@ import {
    getRestaurant,
    searchRestaurants,
 } from '../../controllers/public/restaurantController'
+import { getSiteContact } from '../../controllers/public/siteController'
 import { createEnquiry } from '../../controllers/public/enquiryController'
 import { getPolicy } from '../../controllers/public/policyController'
 import { listLocations, listRoutes } from '../../controllers/public/locationController'
@@ -91,6 +92,10 @@ router.get('/restaurants/:slug', cacheable(300), getRestaurant)
  * Legal text, authored in the admin's content section. Cached hard: it changes
  * a few times a year and every page footer links to it.
  */
+// Contact details change about once a year, so a long cache; the admin edit
+// is not expected to appear on the site within the minute.
+router.get('/site/contact', cacheable(900), getSiteContact)
+
 router.get('/policies/:kind', cacheable(900), getPolicy)
 
 router.post('/enquiries', enquiryLimiter, createEnquiry)
