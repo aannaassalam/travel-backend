@@ -368,13 +368,42 @@ export const getHotel = catchAsync(async (req: Request, res: Response) => {
       .limit(4)
       .lean({ virtuals: false })
 
+   /**
+    * `fromPrice` is computed from room rates, not stored on the hotel — so raw
+    * documents carry none, and `presentHotels` was emitting `{ USD: 0 }` for
+    * every related hotel. The card renders that as "from $0", which on the one
+    * surface whose entire job is the price is worse than showing nothing.
+    *
+    * Same two queries the list endpoint already does, for four documents.
+    */
+   const otherRooms = await RoomType.find({
+      hotel: { $in: others.map((h: any) => h._id) },
+      status: LISTING_STATUS.PUBLISHED,
+   }).lean({ virtuals: false })
+
+   const otherPrices = await priceRoomTypes(
+      otherRooms.map((r: any) => r._id),
+      parseDate(req.query.from),
+      parseDate(req.query.to)
+   )
+
+   const othersWithPrice = others.map((h: any) => {
+      const mine = otherRooms
+         .filter((r: any) => String(r.hotel) === String(h._id))
+         .map((r: any) => ({
+            ...r,
+            ...(otherPrices.get(String(r._id)) ?? { sellPrice: { USD: 0 }, available: 0 }),
+         })) as RoomTypeWithPrice[]
+      return { ...h, roomTypes: mine, fromPrice: cheapestRoom(mine)?.sellPrice ?? { USD: 0 } }
+   })
+
    sendResponse(res, 200, 'Hotel', {
       hotel: presentHotel({
          ...(hotel as any),
          roomTypes: priced,
          fromPrice: cheapestRoom(priced)?.sellPrice ?? { USD: 0 },
       }),
-      others: presentHotels(others as any),
+      others: presentHotels(othersWithPrice as any),
    })
 })
 

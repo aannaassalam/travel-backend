@@ -23,6 +23,15 @@ export interface ICustomer extends Document {
     * booked — but that record is a contact, not a login.
     */
    hasAccount: boolean
+   /**
+    * Bcrypt hash. `select: false` — a customer object is passed around freely
+    * (the guard puts one on every authenticated request), and a hash that comes
+    * along by default eventually ends up in a response body.
+    *
+    * Set at sign-up, once the phone has been proved. See middleware/customerAuth
+    * for why hashing is explicit at the call site rather than a save hook.
+    */
+   password?: string
    phoneVerifiedAt?: Date
    deletedAt?: Date
    /** §8: unpaid cash orders that never got collected. */
@@ -54,6 +63,7 @@ const customerSchema = new Schema<ICustomer>(
        * `phone_verifications`, not here — see that model for why.
        */
       hasAccount: { type: Boolean, default: false, index: true },
+      password: { type: String, select: false },
       phoneVerifiedAt: Date,
       /** §12.4: set when the customer deletes their own account. */
       deletedAt: Date,

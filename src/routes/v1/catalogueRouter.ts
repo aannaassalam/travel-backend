@@ -20,10 +20,12 @@ import { listLocations, listRoutes } from '../../controllers/public/locationCont
 import { createOrder, getOrder, payOrder } from '../../controllers/public/orderController'
 import {
    deleteMe,
+   login,
    logout,
    me,
    myOrders,
    requestOtp,
+   resetPassword,
    updateMe,
    verifyOtp,
 } from '../../controllers/public/customerAuthController'
@@ -135,8 +137,24 @@ const otpLimiter = rateLimit({
    message: { message: 'Too many code requests, please try again later' },
 })
 
+/**
+ * Password sign-in costs us nothing to serve, so it is limited for the other
+ * reason: it is the one endpoint where guessing pays off. Twenty tries an hour
+ * per IP leaves a real customer with a bad memory plenty of room and makes a
+ * dictionary run pointless.
+ */
+const loginLimiter = rateLimit({
+   max: 20,
+   windowMs: 60 * 60 * 1000,
+   standardHeaders: true,
+   legacyHeaders: false,
+   message: { message: 'Too many sign-in attempts, please try again later' },
+})
+
 router.post('/auth/otp/request', otpLimiter, requestOtp)
 router.post('/auth/otp/verify', otpLimiter, verifyOtp)
+router.post('/auth/login', loginLimiter, login)
+router.post('/auth/password/reset', otpLimiter, resetPassword)
 router.post('/auth/logout', logout)
 router.get('/auth/me', protectCustomer, me)
 router.patch('/auth/me', protectCustomer, updateMe)

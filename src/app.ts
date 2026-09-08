@@ -73,7 +73,7 @@ app.use(
          return callback(null, false)
       },
       credentials: true,
-      exposedHeaders: ['X-Message'],
+      exposedHeaders: ['X-Message', 'X-Session-Token'],
    })
 )
 

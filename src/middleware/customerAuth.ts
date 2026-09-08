@@ -1,3 +1,4 @@
+import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
 import jwt from 'jsonwebtoken'
@@ -149,7 +150,19 @@ const renewIfStale = (req: Request, res: Response) => {
    const authAt = Number(decoded.authAt) || Date.now()
    if (Date.now() - authAt >= CUSTOMER_ABSOLUTE_MAX_MS) return
 
-   setCustomerCookie(res, signCustomerToken(String(decoded.sub), authAt))
+   const renewed = signCustomerToken(String(decoded.sub), authAt)
+   setCustomerCookie(res, renewed)
+   /**
+    * The mobile app authenticates with a Bearer token and ignores Set-Cookie
+    * entirely, so cookie-only renewal would leave it hard-expiring at seven
+    * days — re-running the OTP, and re-paying Twilio, exactly as before. The
+    * header is how a non-cookie client learns its session moved.
+    *
+    * Safe to expose: it is the caller's own session, replacing the one it just
+    * presented. It is added to the CORS exposedHeaders list so a browser client
+    * could read it too, though the browser has the cookie already.
+    */
+   res.setHeader('X-Session-Token', renewed)
 }
 
 /** Guard for routes that require a signed-in customer. */
@@ -197,3 +210,18 @@ export const generateOtp = () =>
 export const deliverOtp = async (phone: string, code: string) => {
    await sendSms(phone, `${code} is your Flexi Agency verification code. It expires in 5 minutes.`)
 }
+
+/* ------------------------------------------------------------------ passwords */
+
+/**
+ * Bcrypt, matching the rest of the customer realm (§1.3 keeps Argon2id for the
+ * admin). Hashing lives here rather than in a mongoose pre-save hook because
+ * every other write to a customer goes through `updateOne`, which skips hooks —
+ * a hash that only sometimes happens is a plaintext password waiting to ship.
+ */
+export const MIN_PASSWORD_LENGTH = 8
+
+export const hashPassword = (plain: string) => bcrypt.hash(plain, 12)
+
+export const verifyPassword = (plain: string, hash?: string) =>
+   hash ? bcrypt.compare(plain, hash) : Promise.resolve(false)
