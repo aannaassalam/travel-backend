@@ -17,7 +17,12 @@ import { getSiteContact } from '../../controllers/public/siteController'
 import { createEnquiry } from '../../controllers/public/enquiryController'
 import { getPolicy } from '../../controllers/public/policyController'
 import { listLocations, listRoutes } from '../../controllers/public/locationController'
-import { createOrder, getOrder, payOrder } from '../../controllers/public/orderController'
+import { createOrder, getOrder } from '../../controllers/public/orderController'
+import {
+   maxicashNotify,
+   paymentStatus,
+   startPayment,
+} from '../../controllers/public/paymentController'
 import {
    deleteMe,
    login,
@@ -168,7 +173,34 @@ const privateOnly: express.RequestHandler = (_req, res, next) => {
 router.get('/me/orders', privateOnly, protectCustomer, myOrders)
 
 router.post('/orders', checkoutLimiter, createOrder)
-router.post('/orders/:reference/pay', checkoutLimiter, payOrder)
+/**
+ * Starts a provider payment. Rate-limited with checkout because each call opens
+ * a transaction at MaxiCash.
+ */
+router.post('/orders/:reference/pay', checkoutLimiter, startPayment)
+
+/**
+ * MaxiCash's server-to-server notification.
+ *
+ * Deliberately NOT behind `checkoutLimiter`: throttling a provider's retries
+ * would drop real settlements. It is cheap and safe to call — it believes
+ * nothing in the body and just asks MaxiCash what happened — but it still gets
+ * a generous ceiling so it cannot be used as an amplifier.
+ *
+ * GET as well as POST: MaxiCash does not document the callback's method, and a
+ * settlement notification silently 404ing is the worst possible failure here.
+ */
+const webhookLimiter = rateLimit({
+   max: 600,
+   windowMs: 15 * 60 * 1000,
+   standardHeaders: true,
+   legacyHeaders: false,
+   message: { received: false },
+})
+router.all('/payments/maxicash/notify', webhookLimiter, maxicashNotify)
+
+/** What the return screen polls; re-verifies with the provider. */
+router.get('/orders/:reference/payment', orderReadLimiter, privateOnly, paymentStatus)
 // §8: an order is customer data. Never cacheable, never stored by a proxy.
 router.get('/orders/:reference', orderReadLimiter, (_req, res, next) => {
    res.set('Cache-Control', 'private, no-store, max-age=0')

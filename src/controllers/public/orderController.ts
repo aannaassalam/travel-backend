@@ -119,6 +119,47 @@ export const createOrder = catchAsync(
        */
       const replay = await Order.findOne({ idempotencyKey: key })
       if (replay) {
+         /**
+          * A replay is only a replay while the original is alive. Handing back
+          * a CANCELLED order with a 200 "already created" is how a customer's
+          * genuinely new booking got silently swapped for a dead one — the
+          * client reused its key, we returned the corpse, and the very next
+          * call (/pay) refused it with a 409 that looked like it came from
+          * nowhere. The key is unique-indexed, so the honest answer is: this
+          * attempt is spent, start a new one. ORDER_CANCELLED is the code the
+          * clients already turn into a "take the booking again" action.
+          */
+         if (replay.status === ORDER_STATUS.CANCELLED) {
+            return next(
+               new AppError(
+                  'That booking attempt expired. Please start again.',
+                  409,
+                  'ORDER_CANCELLED'
+               )
+            )
+         }
+         /**
+          * Same key, different currency — so this is not the request the
+          * original order answered.
+          *
+          * An order is priced once and `chargedCurrency` is frozen on it. A
+          * client that switched currency and reused its key would get the old
+          * order back with a 200, and be sent to pay in the currency it had
+          * just changed away from. Replaying the wrong currency is worse than
+          * refusing: it is a customer charged in a currency they did not
+          * choose. Clients mint a fresh key on a currency change; this is the
+          * backstop for the ones that do not.
+          */
+         const wanted = String(req.body?.currency ?? '').toUpperCase()
+         if (wanted && replay.chargedCurrency && wanted !== replay.chargedCurrency) {
+            return next(
+               new AppError(
+                  'That booking was priced in a different currency. Please start again.',
+                  409,
+                  'CURRENCY_CHANGED'
+               )
+            )
+         }
          return sendResponse(res, 200, 'Order already created', { order: presentOrder(replay) })
       }
 
@@ -395,11 +436,26 @@ export const createOrder = catchAsync(
          }
 
          /**
-          * Not awaited: the customer's confirmation must not be able to delay
-          * or fail their checkout. `notifyOrder` swallows its own errors and
-          * records them in the delivery log.
+          * Only an order collected off-platform is told about at creation.
+          *
+          * For cash and bank transfer the SMS IS the payment instruction — the
+          * reference and the link are what the customer brings to the office —
+          * so it has to go out now, before any money moves.
+          *
+          * An online order is different: the payment page is already in front
+          * of the customer, and nothing is settled until the provider says so.
+          * Sending "your booking is registered" here meant every abandoned
+          * checkout got a paid-for SMS about an order that would auto-cancel
+          * twenty minutes later, and a customer who never paid held a message
+          * that read like a confirmation. PAYMENT_RECEIVED, fired from
+          * `settle()`, is the online order's first and only confirmation.
+          *
+          * Not awaited: a notification must never delay or fail a checkout.
+          * `notifyOrder` swallows its own errors into the delivery log.
           */
-         void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
+         if (method === PAYMENT_METHOD.CASH) {
+            void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
+         }
 
          return sendResponse(res, 201, 'Order created', { order: presentOrder(order) })
       } catch (err) {
@@ -439,60 +495,11 @@ export const getOrder = catchAsync(
    }
 )
 
-// ---------------------------------------------------------------------------
-// POST /orders/:reference/pay
-// ---------------------------------------------------------------------------
-
-/**
- * Dummy online payment.
+/*
+ * The simulated `payOrder` that used to live here has been removed.
  *
- * ponytail: this stands in for a provider — it marks the order paid without
- * moving money. It is deliberately the ONLY place that does so, and it writes
- * the same fields a real webhook would, so swapping it for
- * `POST /payments` + a provider callback is a change to this handler and
- * nothing else. §9.3 makes the webhook the source of truth in production; a
- * client-driven route like this one must never survive into it.
+ * It marked orders PAID on request, which was fine while it was scaffolding and
+ * is a hole the moment real money exists. Provider payments now live in
+ * controllers/public/paymentController.ts, where the only path to PAID is a
+ * server-to-server status check against MaxiCash.
  */
-export const payOrder = catchAsync(
-   async (req: Request, res: Response, next: NextFunction) => {
-      const reference = String(req.params.reference).toUpperCase()
-      const order = await Order.findOne({ reference })
-      if (!order) return next(new AppError('Order not found', 404))
-
-      // Idempotent: a retried tap must not double-commit stock.
-      if (order.paymentStatus === PAYMENT_STATUS.PAID) {
-         return sendResponse(res, 200, 'Already paid', { order: presentOrder(order) })
-      }
-      if (order.status === ORDER_STATUS.CANCELLED) {
-         return next(new AppError('This order was cancelled', 409))
-      }
-      if (order.paymentMethod === PAYMENT_METHOD.CASH) {
-         return next(new AppError('Cash orders are settled at the office', 409))
-      }
-
-      // Hold -> sold, per line, before the order is marked paid: a customer who
-      // is charged must own the stock.
-      const heldIds: Types.ObjectId[] = (order as any).heldRatePlanIds ?? []
-      for (const item of order.items) {
-         if (item.roomTypeId && heldIds.length) await commitStay(heldIds, item.quantity)
-         else await commitListing(item.listingId, item.quantity)
-      }
-
-      order.status = ORDER_STATUS.CONFIRMED
-      order.paymentStatus = PAYMENT_STATUS.PAID
-      // §6.1: paid with nothing issued yet is the "needs action" queue.
-      order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_PENDING
-      order.paidAt = new Date()
-      order.confirmedAt = new Date()
-      order.cashDeadline = undefined
-      order.timeline.push({
-         event: 'PAYMENT_RECEIVED',
-         detail: `rail=${String(req.body?.rail ?? 'MOBILE_MONEY')} (simulated)`,
-      })
-      await order.save()
-
-      void notifyOrder(NOTIFICATION_EVENTS.PAYMENT_RECEIVED, order._id)
-
-      return sendResponse(res, 200, 'Payment received', { order: presentOrder(order) })
-   }
-)

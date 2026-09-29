@@ -18,7 +18,9 @@
     "seed:images": "ts-node src/scripts/seedVerticalImages.ts",
     "seed:restaurants": "ts-node src/scripts/seedRestaurants.ts",
     "migrate:s3": "ts-node src/scripts/migrateStorageToS3.ts",
-    "migrate:customer-passwords": "ts-node src/scripts/migrateCustomerPasswords.ts"
+    "migrate:customer-passwords": "ts-node src/scripts/migrateCustomerPasswords.ts",
+    "check:payments": "ts-node src/scripts/checkPayments.ts",
+    "fix:geo": "ts-node src/scripts/fixInventoryGeo.ts"
   },
   "author": "Anas Alam",
   "devDependencies": {

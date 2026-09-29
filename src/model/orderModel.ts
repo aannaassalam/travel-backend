@@ -139,6 +139,25 @@ export interface IOrder extends Document {
    chargedTotal: number
    fxRate: number
    paymentMethod: string
+   /** The instrument: MOBILE_MONEY | CARD | WALLET | BANK_TRANSFER | CASH. */
+   paymentRail?: string
+   /** Provider-side state. Never returned to a client — see presentOrder. */
+   payment?: {
+      provider: string
+      transactionId?: string
+      merchantTransactionId?: string
+      /**
+       * MaxiCash's own payment id, learned from the notification. The only key
+       * its status lookup accepts, so without it an order cannot be verified.
+       */
+      providerPaymentId?: string
+      paymentUrl?: string
+      /** Provider method that actually settled it: OM, MPESA, VISA… */
+      providerMethod?: string
+      lastStatus?: string
+      lastCheckedAt?: Date
+      initializedAt?: Date
+   }
    channel: string
    /** §6.1: cash orders auto-release at this deadline. */
    cashDeadline?: Date
@@ -204,6 +223,34 @@ const orderSchema = new Schema<IOrder>(
          type: String,
          enum: Object.values(PAYMENT_METHOD),
          default: PAYMENT_METHOD.ONLINE,
+      },
+      paymentRail: {
+         type: String,
+         enum: ['MOBILE_MONEY', 'CARD', 'WALLET', 'BANK_TRANSFER', 'CASH'],
+      },
+      /**
+       * Everything the provider gave us for this order.
+       *
+       * Nothing here is a secret: MaxiCash's checkout session is identified by
+       * an opaque LogID and its notification carries no shared token, so there
+       * is nothing to hide with `select: false`. It is still absent from the
+       * public DTO, which is an explicit allow-list.
+       */
+      payment: {
+         provider: { type: String },
+         transactionId: { type: String, index: true, sparse: true },
+         merchantTransactionId: { type: String, index: true, sparse: true },
+         providerPaymentId: { type: String, index: true, sparse: true },
+         paymentUrl: { type: String },
+         /**
+          * The provider's own method code for the rail that actually paid —
+          * `OM`, `MPESA`, `VISA`. Read back from the status check, because the
+          * customer chooses on the provider's page, not ours.
+          */
+         providerMethod: { type: String },
+         lastStatus: { type: String },
+         lastCheckedAt: { type: Date },
+         initializedAt: { type: Date },
       },
       channel: { type: String, enum: ['WEB', 'IOS', 'ANDROID', 'ADMIN'], default: 'WEB' },
       cashDeadline: { type: Date, index: true },

@@ -39,6 +39,38 @@ function rng(seed: number) {
 }
 const rand = rng(20260801)
 const pick = <T>(arr: readonly T[]): T => arr[Math.floor(rand() * arr.length)]
+/**
+ * City-centre coordinates, so a seeded hotel lands in the city it claims.
+ *
+ * This replaced `between(-11.7, -1.6), between(13.4, 29.3)` — a random point
+ * anywhere inside the DRC's bounding box. It produced a "Kinshasa" hotel
+ * plotted 1,200 km away in rural Katanga, which looked fine until a map was
+ * put on the page and showed empty terrain with no streets.
+ */
+const CITY_CENTRES: Record<string, { lat: number; lng: number }> = {
+   Kinshasa: { lat: -4.4419, lng: 15.2663 },
+   Lubumbashi: { lat: -11.6876, lng: 27.5026 },
+   Goma: { lat: -1.6585, lng: 29.2206 },
+   Bukavu: { lat: -2.5083, lng: 28.8608 },
+   Matadi: { lat: -5.8167, lng: 13.45 },
+   Kisangani: { lat: 0.5153, lng: 25.19 },
+   'Mbuji-Mayi': { lat: -6.136, lng: 23.5898 },
+   Kananga: { lat: -5.896, lng: 22.4166 },
+}
+
+/**
+ * A point within roughly 3 km of the city centre.
+ *
+ * Jittered rather than exact so a city's hotels are not stacked on one pixel,
+ * but small enough that every one stays inside the built-up area where the map
+ * actually has streets to show.
+ */
+const nearCity = (city: string) => {
+   const c = CITY_CENTRES[city] ?? CITY_CENTRES.Kinshasa
+   const jitter = () => (Math.random() - 0.5) * 0.055
+   return { lat: +(c.lat + jitter()).toFixed(6), lng: +(c.lng + jitter()).toFixed(6) }
+}
+
 const between = (a: number, b: number) => a + rand() * (b - a)
 const intBetween = (a: number, b: number) => Math.floor(between(a, b + 1))
 const chance = (p: number) => rand() < p
@@ -713,7 +745,7 @@ async function buildHotels() {
          address: `${pick(DISTRICTS[city] ?? ['Centre-ville'])}, ${city}`,
          city,
          country: 'CD',
-         geo: { lat: between(-11.7, -1.6), lng: between(13.4, 29.3) },
+         geo: nearCity(city),
          amenities,
          images: gallery(img.hotel, 2).concat(gallery(img.room, 2)),
          supplier: `${name} direct`,

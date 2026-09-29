@@ -12,7 +12,22 @@ class AppError extends Error {
    */
   public code?: string;
 
-  constructor(message: string, statusCode: number, code?: string) {
+  /**
+   * Diagnostic detail for the operator — never customer copy.
+   *
+   * Carries things like the payment provider's own refusal so it can be read
+   * off the response while debugging. The error handler only serialises this
+   * outside production: it can contain provider internals, endpoints and
+   * account state, none of which belong in a public error body.
+   */
+  public details?: unknown;
+
+  constructor(
+    message: string,
+    statusCode: number,
+    code?: string,
+    details?: unknown
+  ) {
     super();
 
     this.statusCode = statusCode;
@@ -20,6 +35,7 @@ class AppError extends Error {
     this.isOperational = true;
     this.message = message;
     this.code = code;
+    this.details = details;
 
     // Set the prototype explicitly.
 

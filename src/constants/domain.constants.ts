@@ -86,6 +86,40 @@ export const PAYMENT_METHOD = {
 } as const
 
 /**
+ * How the money actually moves.
+ *
+ * `paymentMethod` says only whether we collect it ourselves (CASH) or a
+ * provider does (ONLINE); the rail is the specific instrument, and the office
+ * needs it to reconcile.
+ *
+ * MaxiCash settles all four online rails — card, mobile money, its own wallet
+ * and bank transfer. That last one is why BANK_TRANSFER moved out of the
+ * offline list: the previous provider had no bank-transfer channel at all, so
+ * it had to be collected by hand against the reference. It no longer does.
+ *
+ * CASH stays offline by definition: it is money handed over at the counter.
+ */
+export const PAYMENT_RAIL = {
+   MOBILE_MONEY: 'MOBILE_MONEY',
+   CARD: 'CARD',
+   WALLET: 'WALLET',
+   BANK_TRANSFER: 'BANK_TRANSFER',
+   CASH: 'CASH',
+} as const
+export type PaymentRail = (typeof PAYMENT_RAIL)[keyof typeof PAYMENT_RAIL]
+
+/** Rails MaxiCash settles for us. Everything else is collected off-platform. */
+export const ONLINE_RAILS: PaymentRail[] = [
+   PAYMENT_RAIL.MOBILE_MONEY,
+   PAYMENT_RAIL.CARD,
+   PAYMENT_RAIL.WALLET,
+   PAYMENT_RAIL.BANK_TRANSFER,
+]
+
+/** Rails the office reconciles by hand, against the order reference. */
+export const OFFLINE_RAILS: PaymentRail[] = [PAYMENT_RAIL.CASH]
+
+/**
  * §6.3: allow-listed transitions only, enforced server-side. Anything not
  * listed here is refused rather than quietly written.
  */

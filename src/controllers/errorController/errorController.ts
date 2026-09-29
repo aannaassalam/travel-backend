@@ -27,12 +27,20 @@ const sentErrorDev = (err: AppError, res: Response) => {
     error: err,
     code: err.code,
     message: err.message,
+    // Whatever the upstream actually said — see AppError.details.
+    details: err.details,
     stack: err.stack
   });
 };
 
 const sentErrorProd = (err: AppError, res: Response) => { 
   if (err.isOperational) {
+    /**
+     * Note what is absent: `details` and `stack`. A provider's refusal names
+     * endpoints, merchant state and sometimes the reason an account is
+     * restricted — useful to us, a free reconnaissance report to anyone else.
+     * It is logged instead, where only the office can read it.
+     */
     res.status(err.statusCode).json({
       status: err.status,
       code: err.code,
