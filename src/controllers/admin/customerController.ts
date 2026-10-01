@@ -14,6 +14,7 @@ import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
+import { forReader } from '../../middleware/adminAuth'
 
 export const listCustomers = catchAsync(async (req: Request, res: Response) => {
    const q = req.query.q ? String(req.query.q) : ''
@@ -74,7 +75,11 @@ export const updateCustomer = catchAsync(async (req: Request, res: Response) => 
       { entityType: 'Customer' }
    )
    return sendResponse(res, 200, 'Customer updated', {
-      customer: presentCustomer(customer),
+      // The full profile only for someone who may read customers.
+      customer: forReader(req, 'customers:read', () => presentCustomer(customer), {
+         id: customer._id.toString(),
+         isBlocked: customer.isBlocked,
+      }),
    })
 })
 

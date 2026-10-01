@@ -137,8 +137,11 @@ const orderDetailFields: FieldMap<IOrder> = {
          id: d._id?.toString(),
          kind: d.kind,
          fileName: d.fileName,
+         // Admin surface only: exchanged for a short-lived link, never a URL.
+         storageKey: d.storageKey,
          version: d.version,
-         uploadedAt: d.uploadedAt
+         uploadedAt: d.uploadedAt,
+         uploadedBy: d.uploadedBy
       })),
    timeline: (o) =>
       o.timeline?.map((t: any) => ({

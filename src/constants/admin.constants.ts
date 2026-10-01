@@ -4,15 +4,51 @@
  */
 
 /**
- * Schema is role-capable even though exactly one role exists today (§1.1).
- * Adding named accounts later must be a data change, not a refactor.
+ * The KIND of an admin account (§1.1). SUPER_ADMIN and BREAK_GLASS implicitly
+ * hold every permission. STAFF holds exactly the permissions of its one
+ * assigned AccessRole document, and nothing at all without one.
  */
 export const ADMIN_ROLES = {
    SUPER_ADMIN: 'SUPER_ADMIN',
    BREAK_GLASS: 'BREAK_GLASS',
+   STAFF: 'STAFF',
 } as const
 
 export type AdminRole = (typeof ADMIN_ROLES)[keyof typeof ADMIN_ROLES]
+
+/**
+ * The permission catalogue. These are the only valid permission strings: the
+ * route table, the role editor and the guard all read this one list.
+ *
+ * A write permission does NOT imply the matching read; each is checked alone.
+ */
+export const PERMISSIONS = [
+   'dashboard:read',
+   'orders:read',
+   'orders:write',
+   'enquiries:read',
+   'enquiries:write',
+   'inventory:read',
+   'inventory:write',
+   'customers:read',
+   'customers:write',
+   'customers:export',
+   'payments:read',
+   'content:read',
+   'content:write',
+   'notifications:read',
+   'notifications:write',
+   'settings:read',
+   'settings:write',
+   'security:read',
+   'audit:read',
+   'users:read',
+   'users:write',
+   'roles:read',
+   'roles:write',
+] as const
+
+export type Permission = (typeof PERMISSIONS)[number]
 
 /** Token audience. A customer token must be structurally unable to reach /admin/v1 (§1.3). */
 export const ADMIN_TOKEN_AUDIENCE = 'admin'
@@ -62,6 +98,12 @@ export const PASSWORD_POLICY = {
     * defence-in-depth.
     */
    MIN_LENGTH: 14,
+   /**
+    * How long a system-generated temporary password can be used to sign in.
+    * It sits in a mailbox or a chat message until then, so it must not stay
+    * valid forever; an expired one is simply reset again from the Users screen.
+    */
+   TEMP_PASSWORD_TTL_MS: 72 * 60 * 60 * 1000,
 }
 
 export const LOCKOUT_POLICY = {
@@ -84,6 +126,8 @@ export const AUDIT_ACTIONS = {
    STEP_UP_FAILED: 'STEP_UP_FAILED',
    SESSIONS_REVOKED: 'SESSIONS_REVOKED',
    PASSWORD_CHANGED: 'PASSWORD_CHANGED',
+   /** Any change to who can do what: admin users, their roles, role permissions. */
+   ADMIN_ACCESS_CHANGED: 'ADMIN_ACCESS_CHANGED',
    CREATE: 'CREATE',
    UPDATE: 'UPDATE',
    DELETE: 'DELETE',
@@ -104,4 +148,5 @@ export const OUT_OF_BAND_ALERTS: AuditAction[] = [
    AUDIT_ACTIONS.CUSTOMER_EXPORTED,
    AUDIT_ACTIONS.FINANCIAL_EXPORTED,
    AUDIT_ACTIONS.PASSWORD_CHANGED,
+   AUDIT_ACTIONS.ADMIN_ACCESS_CHANGED,
 ]

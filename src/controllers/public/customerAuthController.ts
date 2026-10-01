@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
 import { presentOrder } from '../../dto/public/order.dto'
 import { Customer } from '../../model/customerModel.admin'
+import { DeviceToken } from '../../model/deviceTokenModel'
 import { Order } from '../../model/orderModel'
 import { PhoneVerification } from '../../model/phoneVerificationModel'
 import {
@@ -349,8 +350,24 @@ export const resetPassword = catchAsync(
       await PhoneVerification.deleteOne({ _id: record._id })
       await Customer.updateOne(
          { _id: customer._id },
-         { $set: { password: await hashPassword(password), phoneVerifiedAt: new Date() } }
+         {
+            $set: {
+               password: await hashPassword(password),
+               phoneVerifiedAt: new Date(),
+               // A second back, so the session issued just below (whose
+               // timestamp is in whole seconds) is not caught by its own reset.
+               passwordChangedAt: new Date(Date.now() - 1000),
+            },
+         }
       )
+      /**
+       * Every phone registered for this account is forgotten. Whoever proves
+       * the number now owns it; a phone that was signed in before must not go
+       * on receiving their bookings — and, by "having the app", suppressing the
+       * SMS that would have reached the real owner. The phone doing the reset
+       * registers again as soon as it signs in.
+       */
+      await DeviceToken.deleteMany({ customer: customer._id })
 
       const token = signCustomerToken(customer._id.toString())
       setCustomerCookie(res, token)
@@ -459,6 +476,8 @@ export const deleteMe = catchAsync(async (req: Request, res: Response) => {
          $unset: { email: 1, phoneVerifiedAt: 1, password: 1 },
       }
    )
+   // A deleted account is never notified again, on any phone.
+   await DeviceToken.deleteMany({ customer: c._id })
    clearCustomerCookie(res)
    return sendResponse(res, 200, 'Account deleted', {})
 })
@@ -482,4 +501,49 @@ export const myOrders = catchAsync(async (req: Request, res: Response) => {
       .select('+travellers.documentNumber')
       .populate('customer', 'phone')
    return sendResponse(res, 200, 'OK', { items: orders.map(presentOrder) })
+})
+
+// ---------------------------------------------------------------------------
+// Push devices: POST / DELETE /me/devices
+// ---------------------------------------------------------------------------
+
+const cleanDevice = (body: any) => {
+   const token = typeof body?.token === 'string' ? body.token.trim() : ''
+   const platform = body?.platform
+   if (!token || token.length > 4096) return null
+   if (platform !== 'ios' && platform !== 'android') return null
+   return { token, platform: platform as 'ios' | 'android' }
+}
+
+/**
+ * Registers this app install for push. Called on every launch while signed in,
+ * which is what keeps `lastSeenAt` honest. The install belongs to whoever
+ * signed in on it last, so an existing token is moved, not duplicated.
+ */
+export const registerDevice = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const device = cleanDevice(req.body)
+      if (!device) return next(new AppError('A push token and platform are required', 400))
+      await DeviceToken.updateOne(
+         { token: device.token },
+         {
+            $set: {
+               customer: (req as any).customer._id,
+               platform: device.platform,
+               lastSeenAt: new Date(),
+            },
+         },
+         { upsert: true }
+      )
+      return sendResponse(res, 200, 'Device registered', {})
+   }
+)
+
+/** Signing out: this install stops receiving this customer's notifications. */
+export const unregisterDevice = catchAsync(async (req: Request, res: Response) => {
+   const token = typeof req.body?.token === 'string' ? req.body.token : ''
+   if (token) {
+      await DeviceToken.deleteOne({ token, customer: (req as any).customer._id })
+   }
+   return sendResponse(res, 200, 'Device removed', {})
 })

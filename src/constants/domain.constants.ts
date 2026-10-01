@@ -120,6 +120,17 @@ export const ONLINE_RAILS: PaymentRail[] = [
 export const OFFLINE_RAILS: PaymentRail[] = [PAYMENT_RAIL.CASH]
 
 /**
+ * Cash-only switch. The online integration stays built, but every booking is
+ * taken as cash unless this is explicitly 'true'. Off by default on purpose: a
+ * missing variable must never open a payment path nobody meant to enable.
+ *
+ * Read at call time, not import time, so a test or a restart with a new value
+ * is honoured without rebuilding.
+ */
+export const onlinePaymentsEnabled = () =>
+   process.env.ONLINE_PAYMENTS_ENABLED === 'true'
+
+/**
  * §6.3: allow-listed transitions only, enforced server-side. Anything not
  * listed here is refused rather than quietly written.
  */

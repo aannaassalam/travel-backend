@@ -3,6 +3,7 @@ import multer from 'multer'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LocalDiskStorage, storage, Visibility } from '../../services/storage'
+import { safeDownloadName } from '../../services/storage/storage.types'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -189,9 +190,16 @@ export const serveSignedFile = catchAsync(
 
       // Never render inline: an HTML or SVG payload served from our origin
       // would run in our security context.
-      res.setHeader('Content-Disposition', 'attachment')
+      const name = safeDownloadName(String(req.query.name ?? ''))
+      res.setHeader(
+         'Content-Disposition',
+         name ? `attachment; filename="${name}"` : 'attachment'
+      )
       res.setHeader('X-Content-Type-Options', 'nosniff')
       if (file.mimeType) res.setHeader('Content-Type', file.mimeType)
+      // An unhandled stream error is an uncaught exception. Headers may already
+      // be out, so the connection is dropped rather than answered.
+      file.stream.on('error', () => res.destroy())
       file.stream.pipe(res)
    }
 )

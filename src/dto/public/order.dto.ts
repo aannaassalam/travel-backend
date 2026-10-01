@@ -93,6 +93,20 @@ const maskPhone = (p?: string) => {
    return `${'•'.repeat(Math.max(p.length - 4, 3))}${p.slice(-4)}`
 }
 
+/**
+ * What the customer should be holding: the newest version of each kind. A
+ * re-issued ticket supersedes the old one, which stays on the order for support
+ * and is not offered for download. Never the storage key.
+ */
+export const currentDocuments = (documents: any[] = []) => {
+   const latest = new Map<string, any>()
+   for (const d of documents) {
+      const seen = latest.get(d.kind)
+      if (!seen || (d.version ?? 1) > (seen.version ?? 1)) latest.set(d.kind, d)
+   }
+   return [...latest.values()]
+}
+
 export const presentOrder = (o: any) => {
    const currency = o.chargedCurrency ?? 'USD'
    const items = (o.items ?? []).map((i: any) =>
@@ -118,7 +132,12 @@ export const presentOrder = (o: any) => {
       cashReference: o.paymentMethod === 'CASH' ? o.reference : undefined,
       delivery: o.delivery ? present(o.delivery, deliveryFields) : undefined,
       consent: o.consent ? present(o.consent, consentFields) : undefined,
-      documents: (o.documents ?? []).map((d: any) => ({ kind: d.kind, fileName: d.fileName })),
+      documents: currentDocuments(o.documents).map((d: any) => ({
+         id: d._id?.toString(),
+         kind: d.kind,
+         fileName: d.fileName,
+         issuedAt: d.uploadedAt?.toISOString?.(),
+      })),
       timeline: (o.timeline ?? []).map((t: any) => present(t, timelineFields)),
       travelDate: o.travelDate?.toISOString?.(),
       createdAt: o.createdAt?.toISOString?.(),

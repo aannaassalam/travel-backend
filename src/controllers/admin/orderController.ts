@@ -13,12 +13,24 @@ import { RatePlan } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import { notifyOrder } from '../../services/notifications/notify.service'
+import { releaseListing, releaseStay } from '../../services/orders/inventory.service'
 import { Order } from '../../model/orderModel'
 import { paginate } from '../../services/adminCrud.service'
+import { forReader } from '../../middleware/adminAuth'
 import { recordAudit } from '../../services/auditLog.service'
+import { storage } from '../../services/storage'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
+
+/** The changed order for someone who may read orders; its bare state otherwise. */
+const orderFor = (req: Request, order: any) =>
+   forReader(req, 'orders:read', () => presentOrder(order), {
+      id: order._id.toString(),
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      fulfilmentStatus: order.fulfilmentStatus,
+   })
 
 /**
  * §6.1: queues, not one list. Default landing is "Needs action" — the
@@ -191,17 +203,53 @@ export const transitionOrder = catchAsync(
           * Manual re-adding will be forgotten and the client will fail to sell
           * stock it still owns.
           */
+         /**
+          * What goes back depends on what the order was holding. A paid order
+          * holds SOLD stock; an unpaid one only a HOLD. This used to subtract
+          * from `sold` for hotel rooms whatever the order's state, and did
+          * nothing at all for flights, buses, cars and activities — so
+          * cancelling an unpaid booking took a night off the sold count it had
+          * never added to, and left every other kind of seat held for ever.
+          */
+         const paid = order.paymentStatus === PAYMENT_STATUS.PAID
+         const heldIds = order.heldRatePlanIds ?? []
          for (const item of order.items) {
-            if (!item.roomTypeId || !item.startDate) continue
-            await RatePlan.updateMany(
-               {
-                  roomType: item.roomTypeId,
-                  date: { $gte: item.startDate, $lt: item.endDate || item.startDate },
-               },
-               { $inc: { sold: -item.quantity } }
+            if (item.roomTypeId) {
+               if (paid && item.startDate) {
+                  await RatePlan.updateMany(
+                     {
+                        roomType: item.roomTypeId,
+                        date: { $gte: item.startDate, $lt: item.endDate || item.startDate },
+                        sold: { $gte: item.quantity },
+                     },
+                     { $inc: { sold: -item.quantity } }
+                  )
+               } else if (heldIds.length) {
+                  await releaseStay(heldIds, item.quantity)
+               }
+            } else if (item.listingId) {
+               if (paid) {
+                  await Listing.updateOne(
+                     { _id: item.listingId, quantitySold: { $gte: item.quantity } },
+                     { $inc: { quantitySold: -item.quantity } }
+                  )
+               } else {
+                  await releaseListing(item.listingId, item.quantity)
+               }
+            }
+         }
+         order.heldRatePlanIds = undefined
+         addTimeline(order, req, 'INVENTORY_RELEASED', `${order.items.length} item(s)`)
+      }
+
+      if (to === ORDER_STATUS.COMPLETED) {
+         // Completed means paid for and delivered; an unpaid one is neither.
+         if (order.paymentStatus !== PAYMENT_STATUS.PAID) {
+            return next(
+               new AppError('An unpaid order cannot be completed', 409, 'ORDER_UNPAID')
             )
          }
-         addTimeline(order, req, 'INVENTORY_RELEASED', `${order.items.length} item(s)`)
+         order.fulfilmentStatus = FULFILMENT_STATUS.DELIVERED
       }
 
       order.status = to
@@ -227,7 +275,7 @@ export const transitionOrder = catchAsync(
       })
 
       return sendResponse(res, 200, `Order ${to.toLowerCase()}`, {
-         order: presentOrder(order),
+         order: orderFor(req, order),
       })
    }
 )
@@ -239,35 +287,71 @@ export const transitionOrder = catchAsync(
  * This is what DOCUMENTS_ISSUED had been missing: the Notifications screen
  * offered a template for the event, and nothing in the system could ever fire
  * it because there was no way to record that a document existed. The file
- * itself is uploaded privately first (§6.5) and reached later through a signed
- * link — only the key is stored here.
+ * arrives with the request (multipart, field `files`), is stored privately
+ * (§6.5) and is reached later through a signed link — only the key is kept.
  */
 export const attachDocument = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const { kind, fileName, storageKey } = req.body ?? {}
+      const kind = req.body?.kind
       if (!['ETICKET', 'VOUCHER', 'INVOICE'].includes(kind)) {
          return next(new AppError('kind must be ETICKET, VOUCHER or INVOICE', 400))
       }
-      if (!fileName || !storageKey) {
-         return next(new AppError('fileName and storageKey are required', 400))
-      }
+      const file = ((req as any).files as Express.Multer.File[] | undefined)?.[0]
+      if (!file) return next(new AppError('Choose a file to attach', 400))
 
       const order = await Order.findById(req.params.id)
       if (!order) return next(new AppError('Order not found', 404))
+      if (order.status === ORDER_STATUS.CANCELLED) {
+         return next(new AppError('A cancelled order cannot be issued documents', 409))
+      }
+      /**
+       * A ticket or voucher is the thing being sold, so it is not handed over
+       * before the money is recorded. An invoice is a request for payment and
+       * may go out first.
+       */
+      if (kind !== 'INVOICE' && order.paymentStatus !== PAYMENT_STATUS.PAID) {
+         return next(
+            new AppError(
+               'Record the payment before issuing a ticket or voucher',
+               409,
+               'ORDER_UNPAID'
+            )
+         )
+      }
       const before = order.toObject()
+
+      /**
+       * Stored here, in one step, rather than taking a storage key from the
+       * request: a key in the body would let a caller attach ANY private file
+       * they could name — another customer's ticket included. Always private
+       * (§6.5): the customer reaches it through a short-lived signed link.
+       */
+      const stored = await storage().save(
+         {
+            buffer: file.buffer,
+            originalName: file.originalname,
+            mimeType: file.mimetype,
+            size: file.size,
+         },
+         { folder: `orders/${order.reference.toLowerCase()}`, visibility: 'private' }
+      )
 
       // Re-issuing supersedes rather than replaces: a customer may already hold
       // the previous version, so support needs to see both.
       const previous = order.documents.filter((d: any) => d.kind === kind).length
       order.documents.push({
          kind,
-         fileName,
-         storageKey,
+         fileName: String(file.originalname).slice(0, 120),
+         storageKey: stored.key,
          version: previous + 1,
          uploadedAt: new Date(),
          uploadedBy: (req as any).admin?.email,
       })
-      order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_ISSUED
+      // Never step back from DELIVERED: re-issuing on a completed order is a
+      // correction, not a return to "awaiting delivery".
+      if (order.fulfilmentStatus !== FULFILMENT_STATUS.DELIVERED) {
+         order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_ISSUED
+      }
       addTimeline(order, req, 'DOCUMENTS_ISSUED', `${kind} v${previous + 1}`)
       await order.save()
 
@@ -281,7 +365,7 @@ export const attachDocument = catchAsync(
 
       void notifyOrder(NOTIFICATION_EVENTS.DOCUMENTS_ISSUED, order._id)
 
-      return sendResponse(res, 200, 'Document attached', { order: presentOrder(order) })
+      return sendResponse(res, 200, 'Document attached', { order: orderFor(req, order) })
    }
 )
 
@@ -335,7 +419,7 @@ export const markCashReceived = catchAsync(
          reason: req.body.reason,
       })
       return sendResponse(res, 200, 'Cash recorded as received', {
-         order: presentOrder(order),
+         order: orderFor(req, order),
       })
    }
 )
@@ -385,7 +469,7 @@ export const addInternalNote = catchAsync(
       addTimeline(order, req, 'NOTE_ADDED', req.body.note)
       await order.save()
       return sendResponse(res, 200, 'Note saved', {
-         order: presentOrder(order),
+         order: orderFor(req, order),
       })
    }
 )

@@ -23,6 +23,7 @@ export interface ICustomer extends Document {
     * booked — but that record is a contact, not a login.
     */
    hasAccount: boolean
+   passwordChangedAt?: Date
    /**
     * Bcrypt hash. `select: false` — a customer object is passed around freely
     * (the guard puts one on every authenticated request), and a hash that comes
@@ -64,6 +65,8 @@ const customerSchema = new Schema<ICustomer>(
        */
       hasAccount: { type: Boolean, default: false, index: true },
       password: { type: String, select: false },
+      /** Sessions opened before this are refused — see currentCustomer. */
+      passwordChangedAt: Date,
       phoneVerifiedAt: Date,
       /** §12.4: set when the customer deletes their own account. */
       deletedAt: Date,

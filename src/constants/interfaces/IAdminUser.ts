@@ -22,9 +22,16 @@ export interface IAdminUserDocument extends Document {
    /** For "send test to me" on the Notifications screen. E.164. */
    phone?: string
    name: string
+   /** The account kind. STAFF permissions come from `roleId`. */
    role: AdminRole
+   roleId?: Types.ObjectId
    password: string
    passwordChangedAt?: Date
+   /** True while the password is a temporary one issued by another admin. */
+   mustChangePassword: boolean
+   temporaryPasswordExpiresAt?: Date
+   temporaryPasswordHash?: string
+   lastLoginAt?: Date
 
    sessions: Types.DocumentArray<IAdminSession & Document>
 

@@ -332,6 +332,8 @@ export type SettlementOutcome = 'PAID' | 'FAILED' | 'PENDING'
 export interface StatusResult {
    outcome: SettlementOutcome
    providerStatus: string
+   /** The merchant reference MaxiCash says this payment was for, if it says. */
+   reference: string | null
    raw: unknown
 }
 
@@ -354,15 +356,18 @@ export interface StatusResult {
  *
  * ponytail: `PmtID` comes from the unverified notification body, so a caller who
  * knows a real PmtID could trigger a genuine verification of someone else's
- * successful payment against OUR order. The order reference is checked against
- * the response where MaxiCash returns one; if they publish a notification
- * signature, verify it in `verifyNotification` below and this note can go.
+ * successful payment against OUR order. Three things stand in the way, all in
+ * paymentController: only an order we opened a payment on is ever reconciled,
+ * one payment id is accepted on one order only, and the reference returned
+ * here must match the order. That last check only bites if MaxiCash actually
+ * returns the reference — CONFIRM THAT AGAINST A REAL RESPONSE BEFORE TURNING
+ * ONLINE PAYMENTS BACK ON, and make a missing reference a refusal if it does.
  */
 export const fetchPaymentStatus = async (paymentId: string): Promise<StatusResult> => {
    const cfg = maxicashConfig()
 
    if (!paymentId) {
-      return { outcome: 'PENDING', providerStatus: 'NO_PAYMENT_ID', raw: null }
+      return { outcome: 'PENDING', providerStatus: 'NO_PAYMENT_ID', reference: null, raw: null }
    }
 
    const data = await postJson(`${cfg.gatewayUrl}/Merchant/api.asmx/PayNowStatus`, {
@@ -383,7 +388,16 @@ export const fetchPaymentStatus = async (paymentId: string): Promise<StatusResul
         ? 'FAILED'
         : 'PENDING'
 
-   return { outcome, providerStatus, raw: data }
+   // Field name is undocumented, so every spelling seen in their other
+   // responses is tried.
+   const reference =
+      data?.Reference ?? data?.reference ?? data?.MerchantReference ?? data?.TransactionReference
+   return {
+      outcome,
+      providerStatus,
+      reference: reference ? String(reference).toUpperCase() : null,
+      raw: data,
+   }
 }
 
 /* ------------------------------------------------------------- webhook */

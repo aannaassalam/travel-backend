@@ -38,7 +38,7 @@ export const isBreached = async (password: string): Promise<boolean> => {
 export const validateAdminPassword = async (
    password: string
 ): Promise<string | null> => {
-   if (!password || password.length < PASSWORD_POLICY.MIN_LENGTH) {
+   if (typeof password !== 'string' || password.length < PASSWORD_POLICY.MIN_LENGTH) {
       return `Password must be at least ${PASSWORD_POLICY.MIN_LENGTH} characters`
    }
    if (await isBreached(password)) {

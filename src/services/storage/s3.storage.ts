@@ -9,6 +9,7 @@ import crypto from 'crypto'
 import path from 'path'
 
 import {
+   safeDownloadName,
    StorageAdapter,
    StoredFile,
    UploadInput,
@@ -87,10 +88,16 @@ export class S3Storage implements StorageAdapter {
       }
    }
 
-   async signedUrl(key: string, ttlSeconds: number): Promise<string> {
+   async signedUrl(key: string, ttlSeconds: number, downloadName?: string): Promise<string> {
+      const name = safeDownloadName(downloadName)
       return getSignedUrl(
          this.client,
-         new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+         new GetObjectCommand({
+            Bucket: this.bucket,
+            Key: key,
+            // Always an attachment: a document must download, never render.
+            ResponseContentDisposition: name ? `attachment; filename="${name}"` : 'attachment',
+         }),
          { expiresIn: ttlSeconds }
       )
    }

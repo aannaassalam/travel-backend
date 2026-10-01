@@ -20,6 +20,7 @@
     "migrate:s3": "ts-node src/scripts/migrateStorageToS3.ts",
     "migrate:customer-passwords": "ts-node src/scripts/migrateCustomerPasswords.ts",
     "check:payments": "ts-node src/scripts/checkPayments.ts",
+    "check:rbac": "ts-node src/scripts/checkRbac.ts",
     "fix:geo": "ts-node src/scripts/fixInventoryGeo.ts"
   },
   "author": "Anas Alam",
@@ -67,6 +68,7 @@
     "express": "^4.19.2",
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^7.2.0",
+    "firebase-admin": "^14.5.0",
     "fs": "^0.0.1-security",
     "googleapis": "^133.0.0",
     "helmet": "^7.1.0",

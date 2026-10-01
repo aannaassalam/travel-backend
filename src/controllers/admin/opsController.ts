@@ -16,12 +16,13 @@ import { Order } from '../../model/orderModel'
 import SettingsModel, { getSettings, PolicyVersion } from '../../model/settingsModel'
 import { paginate } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
-import { money, notify, render } from '../../services/notifications/notify.service'
+import { money, notify, pushBody, render } from '../../services/notifications/notify.service'
 import { sendSms, smsConfigured } from '../../services/notifications/sms.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
-import { FieldMap, present, presentList } from '../../utils/present'
+import { FieldMap, maskPhone, present, presentList } from '../../utils/present'
 import { sendResponse } from '../../utils/response'
+import { forReader } from '../../middleware/adminAuth'
 
 // ===========================================================================
 // Enquiries (§7)
@@ -135,7 +136,11 @@ export const updateEnquiryStage = catchAsync(
          reason: detail,
       })
       return sendResponse(res, 200, `Moved to ${stage}`, {
-         enquiry: present(enquiry, enquiryFields),
+         // The full enquiry only for someone who may read enquiries.
+         enquiry: forReader(req, 'enquiries:read', () => present(enquiry, enquiryFields), {
+            id: enquiry._id.toString(),
+            stage: enquiry.stage,
+         }),
       })
    }
 )
@@ -385,7 +390,14 @@ const templateFields: FieldMap<any> = {
    updatedAt: (t) => t.updatedAt,
 }
 
-export const listTemplates = catchAsync(async (_req: Request, res: Response) => {
+export const listTemplates = catchAsync(async (req: Request, res: Response) => {
+   /**
+    * notifications:read is for whoever maintains the wording. The delivery log
+    * carries customers' numbers and messages with order links in them, which is
+    * order data: the number is masked for everyone here, and the text is shown
+    * only to someone who may read orders anyway.
+    */
+   const mayReadOrders = ((req as any).adminAccess?.permissions ?? []).includes('orders:read')
    const [templates, logs] = await Promise.all([
       NotificationTemplate.find().sort({ event: 1, channel: 1 }),
       NotificationLog.find().sort({ _id: -1 }).limit(25),
@@ -399,10 +411,11 @@ export const listTemplates = catchAsync(async (_req: Request, res: Response) => 
          id: l._id.toString(),
          event: l.event,
          channel: l.channel,
-         recipient: l.recipient,
+         recipient: maskPhone(l.recipient),
          status: l.status,
-         body: l.body,
-         providerMessage: l.providerMessage,
+         body: mayReadOrders ? l.body : undefined,
+         // A provider's failure text can quote the number it was sending to.
+         providerMessage: l.providerMessage?.replace(/\+?\d{9,15}/g, (m) => maskPhone(m) ?? ''),
          createdAt: l.createdAt,
       })),
       smsCostMinor: logs
@@ -511,7 +524,7 @@ export const sendTestNotification = catchAsync(
       const admin = (req as any).admin
       const to = String(req.body.to || admin.phone || '').trim()
 
-      const rendered = render(String(body || ''), {
+      const vars = {
          customer_name: admin.name || 'Test',
          order_ref: 'FA-TEST0-00000',
          amount: '100.00',
@@ -519,20 +532,19 @@ export const sendTestNotification = catchAsync(
          departure_date: new Date().toISOString().slice(0, 10),
          listing_title: 'Test listing',
          deadline: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
-      })
+      }
+      const rendered = render(String(body || ''), vars)
 
       if (channel === 'PUSH') {
-         await NotificationLog.create({
-            event: event || 'TEST',
-            channel: 'PUSH',
-            recipient: to || admin.email,
-            status: 'QUEUED',
-            providerMessage: 'Push provider not configured — nothing transmitted',
-         })
-         return sendResponse(res, 200, 'Push is not wired yet — logged, not sent', {
-            preview: rendered,
-            delivered: false,
-         })
+         // A push goes to a customer's app install, and an administrator has
+         // none — so this can only ever be a preview. Nothing is logged: a
+         // delivery-log row for a message that could not be sent is noise.
+         return sendResponse(
+            res,
+            200,
+            'Preview only: a push goes to the customer app and cannot be test-sent from here',
+            { preview: pushBody(String(body || ''), vars), delivered: false }
+         )
       }
 
       if (!to) {

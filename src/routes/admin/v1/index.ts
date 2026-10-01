@@ -1,5 +1,6 @@
 import express from 'express'
 
+import * as access from '../../../controllers/admin/accessController'
 import { listAuditLogs } from '../../../controllers/admin/auditLogController'
 import * as customers from '../../../controllers/admin/customerController'
 import { getDashboard } from '../../../controllers/admin/dashboardController'
@@ -19,6 +20,7 @@ import {
 import {
    boundPagination,
    protectAdmin,
+   requirePasswordChanged,
    requirePermission,
    requireStepUp,
 } from '../../../middleware/adminAuth'
@@ -44,6 +46,9 @@ router.use('/auth', authRouter)
 router.get('/files/:key', serveSignedFile)
 
 router.use(protectAdmin)
+// A temporary password unlocks nothing below this line. /auth/* is mounted
+// above, so PATCH /auth/password stays reachable.
+router.use(requirePasswordChanged)
 
 // --- Uploads ----------------------------------------------------------------
 router.post(
@@ -142,7 +147,15 @@ router.get('/orders/:id', requirePermission('orders:read'), orders.getOrder)
 router.post('/orders/:id/transition', requirePermission('orders:write'), orders.transitionOrder)
 router.post('/orders/:id/cash-received', requirePermission('orders:write'), orders.markCashReceived)
 router.post('/orders/:id/notes', requirePermission('orders:write'), orders.addInternalNote)
-router.post('/orders/:id/documents', requirePermission('orders:write'), orders.attachDocument)
+// The file rides with the request. Permission first, so nobody without
+// orders:write can make the server buffer an upload.
+router.post(
+   '/orders/:id/documents',
+   requirePermission('orders:write'),
+   uploadMiddleware,
+   handleUploadErrors,
+   orders.attachDocument
+)
 // §14.5: unmasking passport data needs step-up re-auth and is logged.
 router.post(
    '/orders/:id/travellers/:travellerId/unmask',
@@ -201,5 +214,28 @@ router.post('/routes', requirePermission('inventory:write'), locations.createRou
 router.patch('/routes/:id', requirePermission('inventory:write'), locations.updateRoute)
 
 router.get('/audit-logs', requirePermission('audit:read'), boundPagination, listAuditLogs)
+
+// --- Access control: roles and admin-panel users ----------------------------
+// Every mutation here changes who can do what, so every one needs step-up.
+// The permission only opens the door: what the caller may grant, and to whom,
+// is decided in accessController. `npm run check:rbac` verifies this table.
+router.get('/roles', requirePermission('roles:read'), access.listRoles)
+router.post('/roles', requirePermission('roles:write'), requireStepUp, access.createRole)
+router.patch('/roles/:id', requirePermission('roles:write'), requireStepUp, access.updateRole)
+router.delete('/roles/:id', requirePermission('roles:write'), requireStepUp, access.deleteRole)
+
+router.get('/users', requirePermission('users:read'), access.listUsers)
+// Must stay above /users/:id.
+router.get('/users/assignable-roles', requirePermission('users:write'), access.assignableRoles)
+router.post('/users', requirePermission('users:write'), requireStepUp, access.createUser)
+// Deactivate, never delete — audit-log entries reference these accounts, so
+// there is deliberately no DELETE route.
+router.patch('/users/:id', requirePermission('users:write'), requireStepUp, access.updateUser)
+router.post(
+   '/users/:id/reset-password',
+   requirePermission('users:write'),
+   requireStepUp,
+   access.resetUserPassword
+)
 
 export default router

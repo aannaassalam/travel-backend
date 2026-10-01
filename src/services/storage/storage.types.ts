@@ -39,11 +39,19 @@ export interface StoredFile {
    visibility: Visibility
 }
 
+/** A file name that is safe inside a Content-Disposition header. */
+export const safeDownloadName = (name?: string) =>
+   (name ?? '').replace(/[^\w.\- ]+/g, '_').slice(0, 120)
+
 export interface StorageAdapter {
    readonly name: string
    save(input: UploadInput, opts: { folder: string; visibility: Visibility }): Promise<StoredFile>
-   /** Short-lived link for a private file. */
-   signedUrl(key: string, ttlSeconds: number): Promise<string>
+   /**
+    * Short-lived link for a private file. `downloadName` is what the browser
+    * saves it as — without it a ticket lands in Downloads under its storage
+    * key, which the customer will never find again.
+    */
+   signedUrl(key: string, ttlSeconds: number, downloadName?: string): Promise<string>
    /** Reads a private file after the signature has been verified. */
    read(key: string): Promise<{ stream: NodeJS.ReadableStream; mimeType?: string }>
    remove(key: string): Promise<void>

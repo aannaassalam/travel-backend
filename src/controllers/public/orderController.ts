@@ -6,10 +6,12 @@ import {
    FULFILMENT_STATUS,
    ORDER_STATUS,
    PAYMENT_METHOD,
+   onlinePaymentsEnabled,
    PAYMENT_STATUS,
    VERTICALS,
 } from '../../constants/domain.constants'
-import { presentOrder } from '../../dto/public/order.dto'
+import { currentDocuments, presentOrder } from '../../dto/public/order.dto'
+import { storage } from '../../services/storage'
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import { Restaurant } from '../../model/restaurantModel'
@@ -175,8 +177,16 @@ export const createOrder = catchAsync(
       const phone = normalisePhone(contact.phone)
       if (!phone) return next(new AppError('A valid phone number is required', 400))
 
+      /**
+       * Decided here, not by the client. While online payments are switched
+       * off every order is a cash order whatever the request asked for — so an
+       * older build of the app still in someone's pocket books cash too,
+       * instead of creating an ONLINE order that can never be paid.
+       */
       const method =
-         paymentMethod === PAYMENT_METHOD.CASH ? PAYMENT_METHOD.CASH : PAYMENT_METHOD.ONLINE
+         onlinePaymentsEnabled() && paymentMethod !== PAYMENT_METHOD.CASH
+            ? PAYMENT_METHOD.ONLINE
+            : PAYMENT_METHOD.CASH
 
       // --- 1. Re-price from the database ------------------------------------
       let priced: PricedItem[]
@@ -492,6 +502,53 @@ export const getOrder = catchAsync(
          .populate('customer', 'phone')
       if (!order) return next(new AppError('Order not found', 404))
       return sendResponse(res, 200, 'OK', { order: presentOrder(order) })
+   }
+)
+
+// ---------------------------------------------------------------------------
+// GET /orders/:reference/documents/:documentId
+// ---------------------------------------------------------------------------
+
+/** Long enough to tap "download", too short to be worth passing around. */
+const DOCUMENT_LINK_SECONDS = 300
+
+/**
+ * A short-lived link to one issued document.
+ *
+ * Authorised the same way as the order itself: the reference is the read
+ * capability, which is what lets a guest — who has no login — open the ticket
+ * from the link in their SMS. No URL is ever stored or returned in the order
+ * payload; it is minted here, per request, and expires.
+ *
+ * Only the current version of each kind is served. A superseded ticket must not
+ * be downloadable by id just because someone kept the old one.
+ */
+export const getOrderDocument = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const order = await Order.findOne({
+         reference: String(req.params.reference).toUpperCase(),
+      })
+      const doc = order
+         ? currentDocuments(order.documents).find(
+              (d: any) => d._id?.toString() === String(req.params.documentId)
+           )
+         : null
+      // One answer for "no such order" and "no such document": which
+      // references exist is not something to tell a prober.
+      if (!order || !doc?.storageKey) return next(new AppError('Document not found', 404))
+
+      const link = await storage().signedUrl(
+         doc.storageKey,
+         DOCUMENT_LINK_SECONDS,
+         doc.fileName
+      )
+      // The local driver answers with a path on this API; S3 with a full URL.
+      const base = (process.env.API_PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')
+      return sendResponse(res, 200, 'OK', {
+         url: /^https?:\/\//.test(link) ? link : `${base}${link}`,
+         fileName: doc.fileName,
+         expiresInSeconds: DOCUMENT_LINK_SECONDS,
+      })
    }
 )
 

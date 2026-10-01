@@ -17,7 +17,12 @@ import assert from 'assert'
 import fs from 'fs'
 import path from 'path'
 
-import { presentAdminUser, presentSessions } from '../dto/admin/adminUser.dto'
+import {
+   presentAccessRole,
+   presentAccessUser,
+   presentAdminUser,
+   presentSessions,
+} from '../dto/admin/adminUser.dto'
 import { presentAuditLogs } from '../dto/admin/auditLog.dto'
 import { presentPublicUser } from '../dto/public/user.dto'
 
@@ -115,9 +120,25 @@ check('presentPublicUser hides admin-only and secret fields', () => {
 
 console.log('\nAdmin surface DTOs')
 check('presentAdminUser hides credentials', () => {
-   const out = presentAdminUser(poisoned({ createdAt: new Date() }) as any)
+   const out = presentAdminUser(poisoned({ createdAt: new Date() }) as any, {
+      permissions: ['orders:read'],
+      roleName: 'Super admin',
+   })
    assertNoFields('presentAdminUser', out, NEVER_ANYWHERE)
    assert.strictEqual((out as any).role, 'SUPER_ADMIN', 'admin surface should see role')
+   assert.deepStrictEqual((out as any).permissions, ['orders:read'], 'lost permissions')
+})
+
+check('presentAccessUser hides credentials', () => {
+   const out = presentAccessUser(poisoned({ createdAt: new Date() }) as any, 'Front desk')
+   assertNoFields('presentAccessUser', out, [...NEVER_ANYWHERE, 'sessions', 'temporaryPassword'])
+   assert.strictEqual((out as any).email, 'test@example.com', 'lost a legitimate field')
+})
+
+check('presentAccessRole emits only role fields', () => {
+   const out = presentAccessRole(poisoned({ permissions: ['orders:read'] }) as any, 2)
+   assertNoFields('presentAccessRole', out, NEVER_ANYWHERE)
+   assert.strictEqual((out as any).userCount, 2, 'lost a legitimate field')
 })
 
 check('presentSessions hides the token hash', () => {

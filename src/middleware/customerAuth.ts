@@ -109,6 +109,14 @@ export const currentCustomer = async (req: Request) => {
       })
       const customer = await Customer.findById(decoded.sub)
       if (!customer || customer.isBlocked || !customer.hasAccount) return null
+      /**
+       * A password reset ends every session opened before it. Without this a
+       * lost or sold phone stayed signed in after its owner — or the next
+       * holder of a recycled number — reset the password, and went on
+       * re-registering itself for that account's booking notifications.
+       */
+      const changedAt = (customer as any).passwordChangedAt?.getTime?.()
+      if (changedAt && decoded.iat && decoded.iat * 1000 < changedAt) return null
       // Stashed so the guard can renew without verifying the token a second time.
       ;(req as any).customerToken = decoded
       return customer

@@ -61,7 +61,11 @@ const systemAudit = async (action: string, detail: Record<string, any>) => {
  */
 export const releaseExpiredCashHolds = async () => {
    const expired = await Order.find({
-      paymentStatus: { $in: [PAYMENT_STATUS.UNPAID, PAYMENT_STATUS.PENDING] },
+      // FAILED too: a declined payment keeps its hold for a retry, and if no
+      // retry comes the stock has to return to sale like any other lapse.
+      paymentStatus: {
+         $in: [PAYMENT_STATUS.UNPAID, PAYMENT_STATUS.PENDING, PAYMENT_STATUS.FAILED],
+      },
       status: { $in: [ORDER_STATUS.DRAFT, ORDER_STATUS.SUBMITTED] },
       cashDeadline: { $lt: new Date() },
    }).limit(500)

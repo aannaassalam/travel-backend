@@ -8,6 +8,7 @@ import {
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import { sendSms, smsConfigured } from './sms.service'
+import { activeDevices, pushConfigured, sendPush } from './push.service'
 
 /**
  * Sending the messages the admin's Notifications screen configures.
@@ -45,6 +46,8 @@ export interface NotifyInput {
     * Used for the order tracking link, which a guest cannot do without.
     */
    appendIfMissing?: { token: string; text: string }
+   /** The customer to reach by push first, when they have the app. */
+   customer?: Types.ObjectId
 }
 
 /**
@@ -62,8 +65,44 @@ export const render = (body: string, vars: TemplateVars = {}) =>
    })
 
 /**
- * Fires one event to one recipient on every channel the office has configured
- * for it. Resolves to the number of messages actually sent.
+ * Messages that still go by SMS to someone who has the app.
+ *
+ * Push can be silenced per app, and missing either of these costs the
+ * customer their booking: the cash deadline is the last warning before it is
+ * cancelled, and a cancellation must reach them. Everything else goes by push
+ * alone when push can reach them — which is where the Twilio saving comes from.
+ */
+const SMS_EVEN_WITH_APP = new Set<string>([
+   NOTIFICATION_EVENTS.CASH_DEADLINE_REMINDER,
+   NOTIFICATION_EVENTS.ORDER_CANCELLED,
+])
+
+/**
+ * The SMS wording, made fit for a notification.
+ *
+ * Tapping a push opens the booking, so the web link is rendered empty — which
+ * leaves SMS templates ending in a label with nothing after it ("Track it
+ * here:"). That trailing label is dropped, back to the end of the sentence
+ * before it. A template written for push has no such tail and passes through.
+ */
+export const pushBody = (template: string, vars: TemplateVars) => {
+   const text = render(template, { ...vars, order_link: '' }).trim()
+   if (!text.endsWith(':')) return text
+   const end = Math.max(text.lastIndexOf('. '), text.lastIndexOf('! '), text.lastIndexOf('? '))
+   return end > 0 ? text.slice(0, end + 1) : `${text.slice(0, -1)}.`
+}
+
+/** The app's title line; the template is the body. */
+const PUSH_TITLE = 'Flexi Agency'
+
+/**
+ * Fires one event to one recipient. Resolves to the number of messages sent.
+ *
+ * Push first, SMS otherwise: when `customer` is given and that customer has a
+ * signed-in app install, the message goes as a push notification and the SMS
+ * is skipped (bar SMS_EVEN_WITH_APP). No app, push not configured, or every
+ * push refused — then SMS, exactly as before push existed. A guest never has
+ * an app install, so a guest always gets the SMS with their booking link.
  */
 export const notify = async ({
    event,
@@ -71,6 +110,7 @@ export const notify = async ({
    vars = {},
    order,
    appendIfMissing,
+   customer,
 }: NotifyInput): Promise<number> => {
    let sent = 0
    try {
@@ -81,30 +121,60 @@ export const notify = async ({
       const byChannel = new Map<string, (typeof templates)[number]>()
       for (const t of templates) byChannel.set(t.channel, t)
 
-      for (const template of byChannel.values()) {
+      // ------------------------------------------------------------- push
+      let pushed = false
+      const pushTemplate = byChannel.get('PUSH') ?? byChannel.get('SMS')
+      if (customer && pushTemplate && pushConfigured()) {
+         const devices = await activeDevices(customer)
+         if (devices.length) {
+            const body = pushBody(pushTemplate.body, vars)
+            const log = { event, channel: 'PUSH', recipient, order, body }
+            try {
+               const result = await sendPush(
+                  devices.map((d) => d.token),
+                  {
+                     title: PUSH_TITLE,
+                     body,
+                     data: { event, reference: String(vars.order_ref ?? '') },
+                  }
+               )
+               pushed = result.delivered > 0
+               await NotificationLog.create({
+                  ...log,
+                  status: pushed ? 'SENT' : 'FAILED',
+                  providerMessage: `${result.delivered} of ${devices.length} device(s)${
+                     result.error ? ` — ${result.error}` : ''
+                  }`,
+               })
+               if (pushed) sent++
+            } catch (err) {
+               await NotificationLog.create({
+                  ...log,
+                  status: 'FAILED',
+                  providerMessage: (err as Error).message.slice(0, 300),
+               })
+            }
+         }
+      }
+
+      // -------------------------------------------------------------- SMS
+      const template = byChannel.get('SMS')
+      if (template && (!pushed || SMS_EVEN_WITH_APP.has(event))) {
          const source =
             appendIfMissing && !template.body.includes(appendIfMissing.token)
                ? template.body + appendIfMissing.text
                : template.body
          const body = render(source, vars)
-         const log = {
-            event,
-            channel: template.channel,
-            recipient,
-            order,
-            body,
-         }
+         const log = { event, channel: 'SMS', recipient, order, body }
 
          try {
-            if (template.channel === 'SMS') {
-               if (!smsConfigured()) {
-                  await NotificationLog.create({
-                     ...log,
-                     status: 'FAILED',
-                     providerMessage: 'SMS provider is not configured',
-                  })
-                  continue
-               }
+            if (!smsConfigured()) {
+               await NotificationLog.create({
+                  ...log,
+                  status: 'FAILED',
+                  providerMessage: 'SMS provider is not configured',
+               })
+            } else {
                const result = await sendSms(recipient, body)
                await NotificationLog.create({
                   ...log,
@@ -113,20 +183,6 @@ export const notify = async ({
                   costMinor: result.costMinor,
                })
                sent++
-            } else if (template.channel === 'PUSH') {
-               /**
-                * ponytail: push needs a device-token registry and a provider
-                * (FCM/APNs), neither of which exists — there is no mobile app
-                * yet to register one. Logged as QUEUED rather than SENT so the
-                * delivery log tells the truth: the office can see the event
-                * fired and that nothing was transmitted. Wire the provider here
-                * and the templates already written start working unchanged.
-                */
-               await NotificationLog.create({
-                  ...log,
-                  status: 'QUEUED',
-                  providerMessage: 'Push provider not configured — nothing transmitted',
-               })
             }
          } catch (err) {
             // Provider refused. Recorded, never rethrown.
@@ -195,6 +251,7 @@ export const notifyOrder = async (event: NotificationEvent, orderId: Types.Objec
             ? { token: '{{order_link}}', text: `\n${link}` }
             : undefined,
          order: order._id,
+         customer: customer._id,
          vars: {
             customer_name: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
             order_ref: order.reference,

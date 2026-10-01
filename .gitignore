@@ -142,3 +142,7 @@ dist
 .env
 # Uploaded files (STORAGE_DRIVER=local)
 /storage/
+
+# Firebase service-account keys: secrets, never committed.
+*firebase-adminsdk*.json
+firebase-service-account*.json

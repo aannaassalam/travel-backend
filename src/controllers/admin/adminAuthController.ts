@@ -1,3 +1,4 @@
+import argon2 from 'argon2'
 import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
 
@@ -6,7 +7,12 @@ import {
    SESSION_POLICY,
 } from '../../constants/admin.constants'
 import { presentAdminUser, presentSessions } from '../../dto/admin/adminUser.dto'
-import { hashTokenId, signAdminToken, ADMIN_COOKIE } from '../../middleware/adminAuth'
+import {
+   hashTokenId,
+   resolveAccess,
+   signAdminToken,
+   ADMIN_COOKIE,
+} from '../../middleware/adminAuth'
 import AdminUser from '../../model/adminUserModel'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
@@ -25,7 +31,8 @@ import { sendResponse } from '../../utils/response'
  * carries that weight instead of merely adding to it.
  *
  * Still true regardless: no self-registration, and no password reset by email
- * alone (§1.3). The seed script is the only way an admin identity is created.
+ * alone (§1.3). An admin identity is created by the seed script, or by an
+ * existing admin holding users:write (accessController).
  */
 
 /**
@@ -58,19 +65,39 @@ const deviceLabel = (req: Request) => {
    return [browser, os].filter(Boolean).join(' on ') || 'Unknown device'
 }
 
+/**
+ * Opens a session, conditionally on what login just verified.
+ *
+ * The write is filtered on the password hash that was checked and on the
+ * account still being active. Verifying a password takes long enough for a
+ * reset, a password change or a deactivation to land in between; a plain
+ * save() from the copy read before that would then add a live session to an
+ * account that had just been locked down. If the filter no longer matches,
+ * nothing is written and the login fails like any other.
+ */
 const issueSession = async (req: Request, admin: any) => {
    const jti = crypto.randomUUID()
-   admin.sessions.push({
-      tokenIdHash: hashTokenId(jti),
-      ip: req.ip || '',
-      userAgent: req.get('user-agent') || '',
-      deviceLabel: deviceLabel(req),
-      createdAt: new Date(),
-      lastSeenAt: new Date(),
-      // Logging in counts as the step-up for the first few minutes.
-      lastStepUpAt: new Date(),
-   })
-   await admin.save({ validateBeforeSave: false })
+   const now = new Date()
+   const result = await AdminUser.updateOne(
+      { _id: admin._id, isActive: true, password: admin.password },
+      {
+         $push: {
+            sessions: {
+               tokenIdHash: hashTokenId(jti),
+               ip: req.ip || '',
+               userAgent: req.get('user-agent') || '',
+               deviceLabel: deviceLabel(req),
+               createdAt: now,
+               lastSeenAt: now,
+               // Logging in counts as the step-up for the first few minutes.
+               lastStepUpAt: now,
+            },
+         },
+         $set: { lastLoginAt: now, failedLoginCount: 0 },
+         $unset: { lockedUntil: 1 },
+      }
+   )
+   if (result.matchedCount === 0) throw new AppError('Invalid credentials', 401)
    return signAdminToken(admin._id.toString(), jti)
 }
 
@@ -116,8 +143,29 @@ export const login = catchAsync(
          return next(new AppError('Invalid credentials', 401))
       }
 
-      admin.failedLoginCount = 0
-      admin.lockedUntil = undefined
+      /**
+       * A temporary password is good for a limited time. Checked only after the
+       * password itself verified, so this answer tells a stranger nothing: they
+       * would already need the credential to see it.
+       */
+      if (
+         admin.mustChangePassword &&
+         admin.temporaryPasswordExpiresAt &&
+         admin.temporaryPasswordExpiresAt.getTime() < Date.now()
+      ) {
+         await recordAudit(req, {
+            action: AUDIT_ACTIONS.LOGIN_FAILED,
+            actorEmail: admin.email,
+            reason: 'temporary password expired',
+         })
+         return next(
+            new AppError(
+               'This temporary password has expired. Ask an administrator to reset it.',
+               403,
+               'TEMP_PASSWORD_EXPIRED'
+            )
+         )
+      }
 
       const token = await issueSession(req, admin)
       ;(req as any).admin = admin
@@ -127,7 +175,8 @@ export const login = catchAsync(
       return sendResponse(res, 200, 'Signed in', {
          token,
          expiresIn: SESSION_POLICY.MAX_AGE_MS / 1000,
-         admin: presentAdminUser(admin),
+         // Login does not pass through protectAdmin, so resolve access here.
+         admin: presentAdminUser(admin, await resolveAccess(admin)),
       })
    }
 )
@@ -172,7 +221,7 @@ export const stepUp = catchAsync(
 
 export const me = catchAsync(async (req: Request, res: Response) => {
    return sendResponse(res, 200, 'OK', {
-      admin: presentAdminUser((req as any).admin),
+      admin: presentAdminUser((req as any).admin, (req as any).adminAccess),
    })
 })
 
@@ -219,23 +268,64 @@ export const logout = catchAsync(async (req: Request, res: Response) => {
 
 export const changePassword = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const { currentPassword, newPassword } = req.body
+      const { currentPassword, newPassword } = req.body ?? {}
+      if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
+         return next(new AppError('Current and new password are required', 400))
+      }
       const admin = await AdminUser.findById((req as any).admin._id).select(
-         '+password +sessions'
+         '+password +sessions +temporaryPasswordHash'
       )
       if (!admin || !(await admin.verifyPassword(currentPassword))) {
          // Same reasoning as stepUp: a typo here must not sign the admin out.
          return next(new AppError('Current password is incorrect', 403, 'BAD_PASSWORD'))
       }
 
+      // An expired or cancelled temporary password cannot set a real one
+      // either — otherwise a session opened earlier would outlive the expiry.
+      if (
+         admin.mustChangePassword &&
+         admin.temporaryPasswordExpiresAt &&
+         admin.temporaryPasswordExpiresAt.getTime() < Date.now()
+      ) {
+         return next(
+            new AppError(
+               'This temporary password has expired. Ask an administrator to reset it.',
+               403,
+               'TEMP_PASSWORD_EXPIRED'
+            )
+         )
+      }
+
+      /**
+       * A temporary password must actually be replaced. Compared against the
+       * stored hashes rather than the request body, so it cannot be dodged by
+       * how the body is shaped — and not changed back to later either: whoever
+       * issued the temporary password still knows it.
+       */
+      const reused =
+         (await admin.verifyPassword(newPassword)) ||
+         (admin.temporaryPasswordHash
+            ? await argon2.verify(admin.temporaryPasswordHash, newPassword).catch(() => false)
+            : false)
+      if (reused) {
+         return next(
+            new AppError('The new password must differ from the current one', 400)
+         )
+      }
+
       const problem = await validateAdminPassword(newPassword)
       if (problem) return next(new AppError(problem, 400))
 
       admin.password = newPassword
+      admin.mustChangePassword = false
+      admin.temporaryPasswordExpiresAt = undefined
       // Changing the password signs every device out, including this one.
       admin.sessions.forEach((s: any) => {
          if (!s.revokedAt) s.revokedAt = new Date()
       })
+      // Versioned: if an administrator reset this account in the same instant,
+      // one of the two writes fails rather than silently undoing the other.
+      admin.increment()
       await admin.save()
 
       await recordAudit(req, { action: AUDIT_ACTIONS.PASSWORD_CHANGED })

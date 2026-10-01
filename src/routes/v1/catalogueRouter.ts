@@ -17,7 +17,11 @@ import { getSiteContact } from '../../controllers/public/siteController'
 import { createEnquiry } from '../../controllers/public/enquiryController'
 import { getPolicy } from '../../controllers/public/policyController'
 import { listLocations, listRoutes } from '../../controllers/public/locationController'
-import { createOrder, getOrder } from '../../controllers/public/orderController'
+import {
+   createOrder,
+   getOrder,
+   getOrderDocument,
+} from '../../controllers/public/orderController'
 import {
    maxicashNotify,
    paymentStatus,
@@ -25,6 +29,8 @@ import {
 } from '../../controllers/public/paymentController'
 import {
    deleteMe,
+   registerDevice,
+   unregisterDevice,
    login,
    logout,
    me,
@@ -171,6 +177,9 @@ const privateOnly: express.RequestHandler = (_req, res, next) => {
    next()
 }
 router.get('/me/orders', privateOnly, protectCustomer, myOrders)
+// Push notifications for the app: one entry per install, signed-in only.
+router.post('/me/devices', protectCustomer, registerDevice)
+router.delete('/me/devices', protectCustomer, unregisterDevice)
 
 router.post('/orders', checkoutLimiter, createOrder)
 /**
@@ -201,6 +210,13 @@ router.all('/payments/maxicash/notify', webhookLimiter, maxicashNotify)
 
 /** What the return screen polls; re-verifies with the provider. */
 router.get('/orders/:reference/payment', orderReadLimiter, privateOnly, paymentStatus)
+/** Exchanges a document id for a short-lived download link. */
+router.get(
+   '/orders/:reference/documents/:documentId',
+   orderReadLimiter,
+   privateOnly,
+   getOrderDocument
+)
 // §8: an order is customer data. Never cacheable, never stored by a proxy.
 router.get('/orders/:reference', orderReadLimiter, (_req, res, next) => {
    res.set('Cache-Control', 'private, no-store, max-age=0')

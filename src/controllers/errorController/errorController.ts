@@ -57,6 +57,11 @@ const sentErrorProd = (err: AppError, res: Response) => {
 
 
 const errorHandler = (err: any, req: Request, res: Response, next: NextFunction) => {
+  // Two writers changed the same document at once and the second was refused.
+  // That is a retry, not a server fault — in every environment.
+  if (err.name === 'VersionError') {
+    err = new AppError('This was changed by someone else at the same moment. Try again.', 409, 'CONFLICT');
+  }
   err.statusCode = err.statusCode || 500;
   err.status = err.status || 'error';
 

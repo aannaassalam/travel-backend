@@ -1,7 +1,11 @@
 /**
  * Provisions the administrator accounts. There is no signup endpoint on
- * /admin/v1 by design (§1.3), so this script is the only way an admin identity
- * comes into existence.
+ * /admin/v1 by design (§1.3), so this script is how the first SUPER_ADMIN comes
+ * into existence, and the only way a BREAK_GLASS account ever does. Everyone
+ * else is created from the Users screen by an admin holding users:write.
+ *
+ * The kind is always set explicitly here: the schema default is STAFF, which
+ * holds no permissions.
  *
  *   npm run seed:admin                        # creates/updates the SUPER_ADMIN
  *   npm run seed:admin -- --break-glass       # additionally seals a break-glass account
@@ -61,9 +65,19 @@ const run = async () => {
 
    const existing = await AdminUser.findOne({ email: email.toLowerCase() })
    if (existing) {
+      // This is the recovery path, so it restores the whole account, not just
+      // the password: a demoted, deactivated, locked or temporary-password
+      // owner would otherwise still be shut out after running it.
       existing.password = password
+      existing.role = ADMIN_ROLES.SUPER_ADMIN
+      existing.roleId = undefined
+      existing.isActive = true
+      existing.mustChangePassword = false
+      existing.temporaryPasswordExpiresAt = undefined
+      existing.failedLoginCount = 0
+      existing.lockedUntil = undefined
       await existing.save()
-      console.log(`Updated password for ${email}`)
+      console.log(`Restored ${email} as an active SUPER_ADMIN with the new password`)
    } else {
       await AdminUser.create({
          email,

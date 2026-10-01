@@ -3,6 +3,7 @@ import { Types } from 'mongoose'
 import {
    FULFILMENT_STATUS,
    ONLINE_RAILS,
+   onlinePaymentsEnabled,
    ORDER_STATUS,
    OFFLINE_RAILS,
    PAYMENT_METHOD,
@@ -70,6 +71,16 @@ const settle = async (
       return
    }
 
+   /**
+    * An order that has since become a cash order is owed at the counter. A
+    * late "failed" or "pending" from an abandoned online attempt must not move
+    * it off the office's cash list; only money actually arriving changes it.
+    */
+   if (order.paymentMethod === PAYMENT_METHOD.CASH && outcome !== 'PAID') {
+      await order.save()
+      return
+   }
+
    if (outcome === 'PENDING') {
       if (order.paymentStatus !== PAYMENT_STATUS.PENDING) {
          order.paymentStatus = PAYMENT_STATUS.PENDING
@@ -131,11 +142,35 @@ const reconcile = async (order: any): Promise<SettlementOutcome> => {
     * has nothing to verify against and stays pending. Failing closed is the
     * whole point: PENDING is recoverable, a wrongly-PAID order is not.
     */
+   /**
+    * Only an order WE opened a payment on can be settled by the provider.
+    * `transactionId` is written by `startPayment` and by nothing else, so a
+    * cash order — which never reaches the provider — has none and stops here.
+    * Without this, anyone who knew a reference could point the webhook at a
+    * cash order and have it marked paid or failed.
+    */
+   if (!order.payment?.transactionId) return 'PENDING'
+
    const paymentId = order.payment?.providerPaymentId
    if (!paymentId) {
       return 'PENDING'
    }
    const status = await fetchPaymentStatus(paymentId)
+
+   /**
+    * A successful payment must be THIS order's payment. The payment id arrives
+    * in an unsigned notification, so a genuine id from a small payment could
+    * otherwise be replayed against a large order. Where MaxiCash names the
+    * reference it was paid against, it has to match; a mismatch is left
+    * PENDING for the office to look at, never settled.
+    */
+   if (status.outcome === 'PAID' && status.reference && status.reference !== order.reference) {
+      console.error(
+         `[maxicash] payment ${paymentId} belongs to ${status.reference}, not ${order.reference} — not settled`
+      )
+      return 'PENDING'
+   }
+
    await settle(order._id, status.outcome, status.providerStatus)
    return status.outcome
 }
@@ -182,7 +217,28 @@ export const startPayment = catchAsync(
        */
       if (OFFLINE_RAILS.includes(rail) || order.paymentMethod === PAYMENT_METHOD.CASH) {
          order.paymentRail = OFFLINE_RAILS.includes(rail) ? rail : PAYMENT_RAIL.CASH
+         /**
+          * Cash chosen on an order that was created for online payment — after
+          * a failed attempt, or on an order that straddled the cash-only
+          * switch. Setting the rail alone left it an ONLINE order on the short
+          * online hold: it never reached the office's cash list and was
+          * auto-cancelled minutes after the customer was told to come and pay.
+          * So it becomes a cash order in full, with the cash deadline and the
+          * SMS that carries the reference to the counter.
+          */
+         const converted = order.paymentMethod !== PAYMENT_METHOD.CASH
+         if (converted) {
+            const settings = await getSettings()
+            order.paymentMethod = PAYMENT_METHOD.CASH
+            order.paymentStatus = PAYMENT_STATUS.UNPAID
+            order.cashDeadline = new Date(Date.now() + settings.holdTtlCashHours * 3600_000)
+            order.timeline.push({
+               event: 'PAYMENT_METHOD_CHANGED',
+               detail: 'ONLINE -> CASH at the customer\'s request',
+            })
+         }
          await order.save()
+         if (converted) void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
          return sendResponse(res, 200, 'Settle offline', {
             status: 'OFFLINE',
             rail: order.paymentRail,
@@ -193,7 +249,8 @@ export const startPayment = catchAsync(
       if (!ONLINE_RAILS.includes(rail)) {
          return next(new AppError('Choose a payment method', 400, 'RAIL_INVALID'))
       }
-      if (!maxicashEnabled()) {
+      // Cash-only mode refuses here, before any provider call or link reuse.
+      if (!onlinePaymentsEnabled() || !maxicashEnabled()) {
          return next(
             new AppError('Online payment is unavailable', 503, 'PAYMENT_UNAVAILABLE')
          )
@@ -348,11 +405,40 @@ export const maxicashNotify = catchAsync(async (req: Request, res: Response) => 
       return res.status(200).json({ received: true })
    }
 
+   // No payment was ever opened on this order (every cash order): nothing a
+   // notification says about it can be true, so nothing is stored or asked.
+   if (!order.payment?.transactionId) {
+      console.warn(`[maxicash] notify for ${order.reference}, which has no open payment — ignored`)
+      return res.status(200).json({ received: true })
+   }
+
+   /**
+    * One payment settles one order. An id already recorded against another
+    * order is a replay, whoever sent it.
+    *
+    * ponytail: check-then-write, so two simultaneous notifications could both
+    * pass. A unique index on payment.providerPaymentId closes that; it needs
+    * the existing non-unique index dropped first, so it is a migration.
+    */
+   if (
+      n.paymentId &&
+      (await Order.exists({
+         'payment.providerPaymentId': n.paymentId,
+         _id: { $ne: order._id },
+      }))
+   ) {
+      console.error(
+         `[maxicash] payment ${n.paymentId} is already recorded on another order — notify for ${order.reference} ignored`
+      )
+      return res.status(200).json({ received: true })
+   }
+
    /**
     * The payment id is the one thing worth keeping from an unverified body: it
     * is the only key `PayNowStatus` accepts, so without it the order can never
-    * be verified at all. Storing it is safe precisely because it grants
-    * nothing — it is an input to a question, not an answer.
+    * be verified at all. It is an input to a question, not an answer — and the
+    * two checks above are what stop it being an answer borrowed from somewhere
+    * else.
     */
    if (n.paymentId && n.paymentId !== order.payment?.providerPaymentId) {
       await Order.updateOne(

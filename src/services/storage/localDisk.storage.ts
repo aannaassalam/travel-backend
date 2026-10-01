@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 
 import {
+   safeDownloadName,
    StorageAdapter,
    StoredFile,
    UploadInput,
@@ -72,10 +73,16 @@ export class LocalDiskStorage implements StorageAdapter {
       }
    }
 
-   async signedUrl(key: string, ttlSeconds: number): Promise<string> {
+   async signedUrl(key: string, ttlSeconds: number, downloadName?: string): Promise<string> {
       const expires = Math.floor(Date.now() / 1000) + ttlSeconds
       const sig = LocalDiskStorage.sign(key, expires)
-      return `/admin/v1/files/${encodeURIComponent(key)}?expires=${expires}&signature=${sig}`
+      const name = safeDownloadName(downloadName)
+      // The name is cosmetic and outside the signature; it is sanitised again
+      // where it is used.
+      return (
+         `/admin/v1/files/${encodeURIComponent(key)}?expires=${expires}&signature=${sig}` +
+         (name ? `&name=${encodeURIComponent(name)}` : '')
+      )
    }
 
    static sign(key: string, expires: number) {
@@ -96,7 +103,10 @@ export class LocalDiskStorage implements StorageAdapter {
 
    async read(key: string) {
       const full = resolveSafe('private', key)
-      await fs.promises.access(full)
+      // A directory passes an access() check and then kills the process when
+      // it is streamed, so it has to be a file.
+      const stat = await fs.promises.stat(full)
+      if (!stat.isFile()) throw new Error('Not a file')
       return { stream: fs.createReadStream(full) }
    }
 

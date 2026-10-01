@@ -74,7 +74,7 @@ export const sendEmail = async (options: EmailOptions): Promise<void> => {
       })
 
       const mailOptions: nodemailer.SendMailOptions = {
-         from: `Health Consultant <${process.env.EMAIL_USERNAME}>`,
+         from: `${process.env.EMAIL_FROM_NAME || 'Admin'} <${process.env.EMAIL_USERNAME}>`,
          to: options.email,
          subject: options.subject,
          html: options.html,
