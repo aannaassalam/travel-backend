@@ -34,6 +34,8 @@ export interface ICustomer extends Document {
     */
    password?: string
    phoneVerifiedAt?: Date
+   /** §BUG-016: sessions issued before this are refused — set on logout. */
+   tokensValidFrom?: Date
    deletedAt?: Date
    /** §8: unpaid cash orders that never got collected. */
    noShowCount: number
@@ -51,6 +53,12 @@ const customerSchema = new Schema<ICustomer>(
          type: String,
          required: true,
          trim: true,
+         // §BUG-017: the phone IS the identity (§8), so it must be unique. The
+         // sign-up and guest-checkout paths already dedupe on phone in code
+         // (findOne / findOneAndUpdate-upsert), so new rows cannot collide; this
+         // index is the backstop. NOTE: any pre-existing duplicate phones must be
+         // merged before this unique index can build — it does not delete data.
+         unique: true,
          index: true,
          // E.164 — free-text phone numbers make merge-on-phone (§8) impossible.
          match: [/^\+?[1-9]\d{6,14}$/, 'Phone must be in E.164 format'],
@@ -68,6 +76,8 @@ const customerSchema = new Schema<ICustomer>(
       /** Sessions opened before this are refused — see currentCustomer. */
       passwordChangedAt: Date,
       phoneVerifiedAt: Date,
+      /** §BUG-016: logout sets this to now; older tokens are then rejected. */
+      tokensValidFrom: Date,
       /** §12.4: set when the customer deletes their own account. */
       deletedAt: Date,
       noShowCount: { type: Number, default: 0 },

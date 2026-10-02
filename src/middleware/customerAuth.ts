@@ -117,6 +117,13 @@ export const currentCustomer = async (req: Request) => {
        */
       const changedAt = (customer as any).passwordChangedAt?.getTime?.()
       if (changedAt && decoded.iat && decoded.iat * 1000 < changedAt) return null
+      /**
+       * §BUG-016: logout revokes the bearer token. A token issued before the
+       * customer last logged out is refused, the same way a password change ends
+       * older sessions above.
+       */
+      const validFrom = (customer as any).tokensValidFrom?.getTime?.()
+      if (validFrom && decoded.iat && decoded.iat * 1000 < validFrom) return null
       // Stashed so the guard can renew without verifying the token a second time.
       ;(req as any).customerToken = decoded
       return customer

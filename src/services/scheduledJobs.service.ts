@@ -193,11 +193,16 @@ export const applyScheduledPublishing = async () => {
    return { published: published.modifiedCount, unpublished: unpublished.modifiedCount }
 }
 
-/** Expire listings whose sell-by date has passed, so spoilage is truthful. */
+/**
+ * Expire what can no longer be sold, so spoilage is truthful: a flight or bus
+ * once it has departed, and anything still carrying an old sell-by date (the
+ * panel no longer sets one; records from before keep theirs).
+ */
 export const expireStaleListings = async () => {
+   const now = new Date()
    const r = await Listing.updateMany(
       {
-         validUntil: { $lt: new Date() },
+         $or: [{ validUntil: { $lt: now } }, { 'attributes.departsAt': { $lt: now } }],
          status: { $in: [LISTING_STATUS.PUBLISHED, LISTING_STATUS.DRAFT] },
       },
       { $set: { status: LISTING_STATUS.EXPIRED } }

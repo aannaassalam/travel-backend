@@ -9,6 +9,7 @@ import {
    CUSTOMER_SESSION_MS,
    MIN_PASSWORD_LENGTH,
    clearCustomerCookie,
+   currentCustomer,
    deliverOtp,
    generateOtp,
    hashOtp,
@@ -73,9 +74,13 @@ export const requestOtp = catchAsync(
                $set: {
                   codeHash: hashOtp(code),
                   expiresAt: new Date(Date.now() + OTP_TTL_MS),
-                  attempts: 0,
                   lastSentAt: new Date(),
                },
+               // §BUG-019: attempts are NOT reset on resend — the guess budget
+               // must persist across resends within the window, or an attacker
+               // resets the counter by requesting a new code between guesses.
+               // Only a brand-new record (TTL-expired and gone) starts at zero.
+               $setOnInsert: { attempts: 0 },
             },
             { upsert: true }
          )
@@ -130,20 +135,33 @@ const checkOtp = async (phone: string, code: string) => {
 
    if (!record || record.expiresAt.getTime() < Date.now()) return { error: invalid }
 
-   if (record.attempts >= MAX_ATTEMPTS) {
+   /**
+    * §BUG-019: claim one attempt ATOMICALLY before checking the code. The old
+    * check-then-increment let two parallel guesses both read attempts=4, both
+    * pass the cap, and both increment — so the cap could be overrun. `$inc` with
+    * the post-increment value is each caller's own count, which no race shares.
+    */
+   const bumped = await PhoneVerification.findOneAndUpdate(
+      { _id: record._id },
+      { $inc: { attempts: 1 } },
+      { new: true }
+   )
+   // Deleted out from under us (expired/burned by a parallel request).
+   if (!bumped) return { error: invalid }
+
+   if (bumped.attempts > MAX_ATTEMPTS) {
       // Burn it rather than leaving it guessable for the rest of its TTL.
-      await PhoneVerification.deleteOne({ _id: record._id })
+      await PhoneVerification.deleteOne({ _id: bumped._id })
       return {
          error: new AppError('Too many attempts. Request a new code.', 429, 'OTP_LOCKED'),
       }
    }
 
-   if (record.codeHash !== hashOtp(code)) {
-      await PhoneVerification.updateOne({ _id: record._id }, { $inc: { attempts: 1 } })
+   if (bumped.codeHash !== hashOtp(code)) {
       return { error: invalid }
    }
 
-   return { record }
+   return { record: bumped }
 }
 
 /** §7.5: one rule, so the client and the server cannot disagree about it. */
@@ -482,7 +500,20 @@ export const deleteMe = catchAsync(async (req: Request, res: Response) => {
    return sendResponse(res, 200, 'Account deleted', {})
 })
 
-export const logout = catchAsync(async (_req: Request, res: Response) => {
+export const logout = catchAsync(async (req: Request, res: Response) => {
+   /**
+    * §BUG-016: revoke the bearer token, not just the cookie. The mobile client
+    * signs in with the token and ignores Set-Cookie, so clearing the cookie alone
+    * left its session usable until expiry. Stamping `tokensValidFrom` makes the
+    * currentCustomer guard refuse every token issued before now.
+    */
+   const customer = await currentCustomer(req)
+   if (customer) {
+      await Customer.updateOne(
+         { _id: customer._id },
+         { $set: { tokensValidFrom: new Date() } }
+      )
+   }
    clearCustomerCookie(res)
    return sendResponse(res, 200, 'Signed out', {})
 })

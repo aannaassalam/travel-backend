@@ -16,6 +16,9 @@ import { sendResponse } from '../../utils/response'
  * the model and the public surface grows it silently.
  */
 
+/** Same shape the customer realm already uses. */
+const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+
 const B32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 /** §14.3 rule 4: unguessable. Sequential ids invite someone to walk the table. */
 const makeReference = () => {
@@ -38,9 +41,20 @@ export const createEnquiry = catchAsync(async (req: Request, res: Response) => {
 
    const name = String(customerName ?? '').trim()
    if (name.length < 3) throw new AppError('A full name is required', 400)
+   // §BUG-015: cap the free-text fields and refuse a malformed e-mail.
+   if (name.length > 120) throw new AppError('That name is too long', 400)
 
    const e164 = normalisePhone(phone ?? '')
    if (!e164) throw new AppError('A valid phone number is required', 400)
+
+   const mail = String(email ?? '').trim()
+   if (mail && !EMAIL_RX.test(mail.toLowerCase())) {
+      throw new AppError('That email address is not valid', 400)
+   }
+
+   if (String(listingLabel ?? '').trim().length > 120) {
+      throw new AppError('That listing label is too long', 400)
+   }
 
    const body = String(message ?? '').trim()
    if (!body) throw new AppError('A message is required', 400)

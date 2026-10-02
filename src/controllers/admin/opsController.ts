@@ -1,11 +1,12 @@
 import { NextFunction, Request, Response } from 'express'
+import { isValidObjectId } from 'mongoose'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { PAYMENT_STATUS } from '../../constants/domain.constants'
-import { presentSessions } from '../../dto/admin/adminUser.dto'
-import AuditLog from '../../model/auditLogModel'
 import {
    Enquiry,
+   ENQUIRY_STAGES,
+   LOSS_REASONS,
    NOTIFICATION_EVENTS,
    NotificationLog,
    NotificationTemplate,
@@ -14,6 +15,7 @@ import {
 } from '../../model/enquiryModel'
 import { Order } from '../../model/orderModel'
 import SettingsModel, { getSettings, PolicyVersion } from '../../model/settingsModel'
+import { geoPoint, parseGeo } from '../../model/shared.schema'
 import { paginate } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
 import { money, notify, pushBody, render } from '../../services/notifications/notify.service'
@@ -38,110 +40,268 @@ const enquiryFields: FieldMap<any> = {
    phone: (e) => e.phone,
    email: (e) => e.email,
    message: (e) => e.message,
+   listingId: (e) => e.listingId?.toString(),
    listingLabel: (e) => e.listingLabel,
    source: (e) => e.source,
    firstContactAt: (e) => e.firstContactAt,
    lossReason: (e) => e.lossReason,
    quotedAmount: (e) => e.quotedAmount,
+   quoteExpiresAt: (e) => e.quoteExpiresAt,
    contactLog: (e) =>
-      e.contactLog?.map((c: any) => ({
-         at: c.at,
-         kind: c.kind,
-         detail: c.detail,
-         actorEmail: c.actorEmail,
-      })),
+      e.contactLog
+         // The public create endpoint parks its idempotency key here; it is
+         // plumbing, not a note anyone wrote.
+         ?.filter((c: any) => !String(c.detail ?? '').startsWith('idem:'))
+         .map((c: any) => ({
+            at: c.at,
+            kind: c.kind,
+            detail: c.detail,
+            actorEmail: c.actorEmail,
+         })),
    createdAt: (e) => e.createdAt,
 }
 
+const STAGES = Object.values(ENQUIRY_STAGES) as string[]
+const REASONS = Object.values(LOSS_REASONS) as string[]
+const MAX_DETAIL = 1000
+
+/** Escaped, NUL-free, capped — a pasted paragraph never becomes a regex. */
+const rx = (value: string) =>
+   new RegExp(
+      value.replace(/\0/g, '').trim().slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      'i'
+   )
+
+const detailText = (value: unknown) => {
+   if (value === undefined || value === null || value === '') return undefined
+   if (typeof value !== 'string') throw new AppError('detail must be text', 400)
+   const text = value.trim()
+   if (text.length > MAX_DETAIL) {
+      throw new AppError(`detail is limited to ${MAX_DETAIL} characters`, 400)
+   }
+   return text || undefined
+}
+
+/**
+ * §7: SLA timer on each enquiry, visible and colour-coded, escalating when
+ * breached. §15 lists "no SLA or escalation on enquiries — leads simply go
+ * cold" as a thing to avoid, so the breach is computed server-side rather
+ * than left to each client to work out.
+ */
+const withSla = (e: any, slaHours: number) => {
+   const dto = present(e, enquiryFields) as any
+   const deadline = new Date(e.createdAt.getTime() + slaHours * 3600 * 1000)
+   dto.slaDeadline = deadline
+   dto.slaBreached = !e.firstContactAt && Date.now() > deadline.getTime()
+   dto.hoursWaiting = e.firstContactAt
+      ? null
+      : Math.round((Date.now() - e.createdAt.getTime()) / 3600000)
+   return dto
+}
+
+/** Not yet contacted and older than the SLA window. */
+const overdueFilter = (slaHours: number) => ({
+   firstContactAt: { $exists: false },
+   createdAt: { $lt: new Date(Date.now() - slaHours * 3600 * 1000) },
+})
+
 export const listEnquiries = catchAsync(async (req: Request, res: Response) => {
+   const settings = await getSettings()
    const filter: Record<string, any> = {}
    if (req.query.stage) filter.stage = req.query.stage
    if (req.query.kind) filter.kind = req.query.kind
+   if (req.query.overdue === '1') Object.assign(filter, overdueFilter(settings.enquirySlaHours))
+
+   const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+   if (q) {
+      const term = rx(q)
+      const or: Record<string, any>[] = [
+         { reference: term },
+         { customerName: term },
+         { phone: term },
+         { email: term },
+      ]
+      // "081 234 56 78" typed the local way: numbers are stored as +243…
+      const digits = q.replace(/[\s.\-()]/g, '')
+      if (/^0\d{5,}$/.test(digits)) or.push({ phone: rx(`+243${digits.slice(1)}`) })
+      filter.$or = or
+   }
 
    const { items, nextCursor } = await paginate(Enquiry, filter, req)
-   const settings = await getSettings()
-
-   /**
-    * §7: SLA timer on each enquiry, visible and colour-coded, escalating when
-    * breached. §15 lists "no SLA or escalation on enquiries — leads simply go
-    * cold" as a thing to avoid, so the breach is computed server-side rather
-    * than left to each client to work out.
-    */
-   const slaMs = settings.enquirySlaHours * 3600 * 1000
-   const withSla = (items as any[]).map((e) => {
-      const dto = present(e, enquiryFields) as any
-      const deadline = new Date(e.createdAt.getTime() + slaMs)
-      dto.slaDeadline = deadline
-      dto.slaBreached = !e.firstContactAt && Date.now() > deadline.getTime()
-      dto.hoursWaiting = e.firstContactAt
-         ? null
-         : Math.round((Date.now() - e.createdAt.getTime()) / 3600000)
-      return dto
-   })
-
    return sendResponse(res, 200, 'OK', {
-      items: withSla,
+      items: (items as any[]).map((e) => withSla(e, settings.enquirySlaHours)),
       nextCursor,
       slaHours: settings.enquirySlaHours,
    })
 })
 
-export const updateEnquiryStage = catchAsync(
-   async (req: Request, res: Response, next: NextFunction) => {
-      const { stage, lossReason, detail } = req.body
-      const enquiry = await Enquiry.findById(req.params.id)
-      if (!enquiry) return next(new AppError('Enquiry not found', 404))
+export const enquirySummary = catchAsync(async (_req: Request, res: Response) => {
+   const settings = await getSettings()
+   const since = new Date(Date.now() - 30 * 86400000)
+   const [stages, overdue, won] = await Promise.all([
+      Enquiry.aggregate([{ $group: { _id: '$stage', n: { $sum: 1 } } }]),
+      Enquiry.countDocuments(overdueFilter(settings.enquirySlaHours)),
+      Enquiry.aggregate([
+         { $match: { stage: ENQUIRY_STAGES.WON, updatedAt: { $gte: since } } },
+         { $group: { _id: null, count: { $sum: 1 }, value: { $sum: { $ifNull: ['$quotedAmount', 0] } } } },
+      ]),
+   ])
+   const byStage = Object.fromEntries(STAGES.map((s) => [s, 0]))
+   stages.forEach((s: any) => (byStage[s._id] = s.n))
+   return sendResponse(res, 200, 'OK', {
+      byStage,
+      overdue,
+      slaHours: settings.enquirySlaHours,
+      wonLast30d: { count: won[0]?.count ?? 0, value: won[0]?.value ?? 0 },
+   })
+})
 
-      if (stage === 'LOST' && !lossReason) {
-         // §7: LOST always carries a reason, or the pipeline teaches nothing.
-         return next(new AppError('A loss reason is required', 400))
-      }
-
-      const before = enquiry.toObject()
-      enquiry.stage = stage
-      if (lossReason) enquiry.lossReason = lossReason
-      // Moving off NEW is the first contact — stops the SLA clock.
-      if (stage !== 'NEW' && !enquiry.firstContactAt) {
-         enquiry.firstContactAt = new Date()
-      }
+/**
+ * The one place a stage changes: first-contact clock, log line, quote SMS.
+ * `detail` null skips the log line, for a caller that writes its own.
+ */
+const applyStage = (enquiry: any, stage: string, detail: string | null | undefined, req: Request) => {
+   enquiry.stage = stage
+   // Moving off NEW is the first contact — stops the SLA clock.
+   if (stage !== ENQUIRY_STAGES.NEW && !enquiry.firstContactAt) {
+      enquiry.firstContactAt = new Date()
+   }
+   if (detail !== null) {
       enquiry.contactLog.push({
          at: new Date(),
          kind: 'NOTE',
          detail: detail || `Stage → ${stage}`,
          actorEmail: (req as any).admin?.email,
       })
-      await enquiry.save()
+   }
+   // A quote the customer is never told about is not a quote.
+   if (stage === ENQUIRY_STAGES.QUOTED) {
+      void notify({
+         event: NOTIFICATION_EVENTS.QUOTE_SENT,
+         recipient: enquiry.phone,
+         vars: {
+            customer_name: enquiry.customerName,
+            order_ref: enquiry.reference,
+            listing_title: enquiry.listingLabel ?? '',
+            amount: enquiry.quotedAmount ? money(enquiry.quotedAmount) : '',
+            currency: 'USD',
+         },
+      })
+   }
+}
 
-      // A quote the customer is never told about is not a quote.
-      if (stage === 'QUOTED') {
-         void notify({
-            event: NOTIFICATION_EVENTS.QUOTE_SENT,
-            recipient: enquiry.phone,
-            vars: {
-               customer_name: enquiry.customerName,
-               order_ref: enquiry.reference,
-               listing_title: enquiry.listingLabel ?? '',
-               amount: enquiry.quotedAmount ? money(enquiry.quotedAmount) : '',
-               currency: 'USD',
-            },
-         })
+/** Save, audit and answer with the enquiry — shared tail of every write. */
+const finishEnquiryWrite = async (
+   req: Request,
+   res: Response,
+   enquiry: any,
+   before: any,
+   message: string,
+   reason?: string
+) => {
+   await enquiry.save()
+   await recordAudit(req, {
+      action: AUDIT_ACTIONS.UPDATE,
+      entityType: 'Enquiry',
+      entityId: enquiry._id.toString(),
+      before,
+      after: enquiry.toObject(),
+      reason,
+   })
+   const settings = await getSettings()
+   return sendResponse(res, 200, message, {
+      // The full enquiry only for someone who may read enquiries.
+      enquiry: forReader(req, 'enquiries:read', () => withSla(enquiry, settings.enquirySlaHours), {
+         id: enquiry._id.toString(),
+         stage: enquiry.stage,
+      }),
+   })
+}
+
+export const updateEnquiryStage = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const { stage, lossReason } = req.body
+      if (!STAGES.includes(stage)) {
+         return next(new AppError(`stage must be one of: ${STAGES.join(', ')}`, 400))
       }
+      if (lossReason !== undefined && !REASONS.includes(lossReason)) {
+         return next(new AppError(`lossReason must be one of: ${REASONS.join(', ')}`, 400))
+      }
+      if (stage === ENQUIRY_STAGES.LOST && !lossReason) {
+         // §7: LOST always carries a reason, or the pipeline teaches nothing.
+         return next(new AppError('A loss reason is required', 400))
+      }
+      const detail = detailText(req.body.detail)
+      const enquiry = await Enquiry.findById(req.params.id)
+      if (!enquiry) return next(new AppError('Enquiry not found', 404))
 
-      await recordAudit(req, {
-         action: AUDIT_ACTIONS.UPDATE,
-         entityType: 'Enquiry',
-         entityId: enquiry._id.toString(),
-         before,
-         after: enquiry.toObject(),
-         reason: detail,
+      const before = enquiry.toObject()
+      if (lossReason) enquiry.lossReason = lossReason
+      applyStage(enquiry, stage, detail, req)
+      return finishEnquiryWrite(req, res, enquiry, before, `Moved to ${stage}`, detail)
+   }
+)
+
+/** A call, a note or a viewing. Contact made on a NEW lead stops the SLA clock. */
+export const addEnquiryNote = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const { kind } = req.body
+      if (!['CALL', 'NOTE', 'VIEWING'].includes(kind)) {
+         return next(new AppError('kind must be CALL, NOTE or VIEWING', 400))
+      }
+      const detail = detailText(req.body.detail)
+      if (!detail) return next(new AppError('detail is required', 400))
+      const enquiry = await Enquiry.findById(req.params.id)
+      if (!enquiry) return next(new AppError('Enquiry not found', 404))
+
+      const before = enquiry.toObject()
+      const contacted = kind !== 'NOTE' && !enquiry.firstContactAt
+      if (contacted && enquiry.stage === ENQUIRY_STAGES.NEW) {
+         // The call entry below is the record; no second "Stage →" line.
+         applyStage(enquiry, ENQUIRY_STAGES.CONTACTED, null, req)
+      } else if (contacted) {
+         enquiry.firstContactAt = new Date()
+      }
+      enquiry.contactLog.push({
+         at: new Date(),
+         kind,
+         detail,
+         actorEmail: (req as any).admin?.email,
       })
-      return sendResponse(res, 200, `Moved to ${stage}`, {
-         // The full enquiry only for someone who may read enquiries.
-         enquiry: forReader(req, 'enquiries:read', () => present(enquiry, enquiryFields), {
-            id: enquiry._id.toString(),
-            stage: enquiry.stage,
-         }),
+      return finishEnquiryWrite(req, res, enquiry, before, 'Logged')
+   }
+)
+
+/** Sets the amount, then moves to QUOTED — so the quote SMS carries a figure. */
+export const quoteEnquiry = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const { amount, expiresAt } = req.body
+      if (!Number.isInteger(amount) || amount <= 0) {
+         return next(new AppError('amount must be a whole number of cents above zero', 400))
+      }
+      let expiry: Date | undefined
+      if (expiresAt !== undefined && expiresAt !== null && expiresAt !== '') {
+         expiry = new Date(expiresAt)
+         if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now()) {
+            return next(new AppError('expiresAt must be a date in the future', 400))
+         }
+      }
+      const detail = detailText(req.body.detail)
+      const enquiry = await Enquiry.findById(req.params.id)
+      if (!enquiry) return next(new AppError('Enquiry not found', 404))
+
+      const before = enquiry.toObject()
+      enquiry.quotedAmount = amount
+      enquiry.quoteExpiresAt = expiry
+      const line = `Quoted USD ${(amount / 100).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+      enquiry.contactLog.push({
+         at: new Date(),
+         kind: 'QUOTE',
+         detail: detail ? `${line} — ${detail}` : line,
+         actorEmail: (req as any).admin?.email,
       })
+      applyStage(enquiry, ENQUIRY_STAGES.QUOTED, null, req)
+      return finishEnquiryWrite(req, res, enquiry, before, 'Quote sent', detail)
    }
 )
 
@@ -272,12 +432,20 @@ const settingsFields: FieldMap<any> = {
    supportEmail: (s) => s.supportEmail,
    supportPhone: (s) => s.supportPhone,
    // Public contact block. `updateSettings` writes whatever this map names, so
-   // listing them here is what makes them editable as well as readable.
-   whatsappNumber: (s) => s.whatsappNumber,
-   streetAddress: (s) => s.streetAddress,
-   city: (s) => s.city,
-   country: (s) => s.country,
-   officeHours: (s) => s.officeHours,
+   // listing it here is what makes it editable as well as readable.
+   offices: (s) =>
+      (s.offices ?? []).map((o: any) => ({
+         id: o._id.toString(),
+         name: o.name,
+         city: o.city,
+         streetAddress: o.streetAddress,
+         phone: o.phone,
+         whatsapp: o.whatsapp,
+         email: o.email,
+         hours: o.hours,
+         geo: geoPoint(o.geo),
+         isPrimary: o.isPrimary,
+      })),
    enabledLocales: (s) => s.enabledLocales,
    defaultLocale: (s) => s.defaultLocale,
    enabledCurrencies: (s) => s.enabledCurrencies,
@@ -305,10 +473,83 @@ export const getSettingsHandler = catchAsync(
    }
 )
 
+const MAX_OFFICES = 20
+
+/** A free-text office field: trimmed, capped, blank allowed. */
+const officeText = (value: unknown, label: string, max: number) => {
+   if (value === undefined || value === null) return ''
+   if (typeof value !== 'string') throw new AppError(`${label} must be text`, 400)
+   const text = value.trim()
+   if (text.length > max) throw new AppError(`${label} is limited to ${max} characters`, 400)
+   return text
+}
+
+/**
+ * The office list from the form, as a full replacement. Exactly one office is
+ * primary — the first one marked, or the first one listed — because the public
+ * API fills the legacy single-office fields from it and cannot pick between two.
+ */
+/**
+ * A number the footer can turn into a tel: and a wa.me link: digits with an
+ * optional leading +, 8 to 15 of them. Spaces, dots and dashes are allowed
+ * for reading and stripped. "081 000 00 00" written the local way is refused
+ * here, where the admin sees the message, rather than quietly producing a
+ * WhatsApp link that does not work.
+ */
+const officePhone = (value: unknown, label: string) => {
+   const text = officeText(value, label, 40)
+   if (!text) return ''
+   const compact = text.replace(/[\s.\-()]/g, '')
+   if (!/^\+?[1-9]\d{7,14}$/.test(compact)) {
+      throw new AppError(`${label} must be an international number, for example +243 81 000 00 00`, 400)
+   }
+   return compact
+}
+
+export const parseOffices = (input: unknown) => {
+   if (input === undefined) return undefined
+   if (!Array.isArray(input)) throw new AppError('offices must be a list', 400)
+   if (input.length > MAX_OFFICES) {
+      throw new AppError(`At most ${MAX_OFFICES} offices can be listed`, 400)
+   }
+   const offices = input.map((o: any, i: number) => {
+      const label = `Office ${i + 1}`
+      if (!o || typeof o !== 'object' || Array.isArray(o)) {
+         throw new AppError(`${label} is not an office`, 400)
+      }
+      const name = officeText(o.name, `${label} name`, 80)
+      const city = officeText(o.city, `${label} city`, 80)
+      if (!name || !city) throw new AppError(`${label} needs a name and a city`, 400)
+      return {
+         // Keep the id of an office that already exists, so edits stay edits.
+         ...(isValidObjectId(o.id) ? { _id: String(o.id) } : {}),
+         name,
+         city,
+         streetAddress: officeText(o.streetAddress, `${label} address`, 200),
+         phone: officePhone(o.phone, `${label} phone`),
+         whatsapp: officePhone(o.whatsapp, `${label} WhatsApp`),
+         email: officeText(o.email, `${label} email`, 200),
+         hours: officeText(o.hours, `${label} hours`, 200),
+         geo: parseGeo(o.geo) ?? undefined,
+         isPrimary: o.isPrimary === true,
+      }
+   })
+   // One document per id: a repeated id would be two offices under one _id.
+   const ids = offices.map((o: any) => o._id).filter(Boolean)
+   if (new Set(ids).size !== ids.length) throw new AppError('Two offices share an id', 400)
+
+   const primary = Math.max(offices.findIndex((o) => o.isPrimary), 0)
+   offices.forEach((o, i) => (o.isPrimary = i === primary))
+   return offices
+}
+
 /** §1.3: settings changes require step-up re-auth (enforced at the route). */
 export const updateSettings = catchAsync(async (req: Request, res: Response) => {
    const settings = await getSettings()
    const before = settings.toObject()
+
+   // Validated here, because the copy below writes whatever the body carries.
+   if (req.body.offices !== undefined) req.body.offices = parseOffices(req.body.offices)
 
    Object.keys(settingsFields).forEach((key) => {
       if (key === 'updatedAt') return
@@ -328,52 +569,6 @@ export const updateSettings = catchAsync(async (req: Request, res: Response) => 
       settings: present(settings, settingsFields),
    })
 })
-
-// ===========================================================================
-// Security (§14.1, §14.4)
-// ===========================================================================
-
-export const getSecurityOverview = catchAsync(
-   async (req: Request, res: Response) => {
-      const admin = (req as any).admin
-      const active = admin.sessions.filter((s: any) => !s.revokedAt)
-
-      // §14.4: a dedicated export log visible in the Security section.
-      const exports = await AuditLog.find({
-         action: { $in: [AUDIT_ACTIONS.CUSTOMER_EXPORTED, AUDIT_ACTIONS.FINANCIAL_EXPORTED] },
-      })
-         .sort({ _id: -1 })
-         .limit(25)
-
-      const recentFailures = await AuditLog.find({
-         action: AUDIT_ACTIONS.LOGIN_FAILED,
-      })
-         .sort({ _id: -1 })
-         .limit(10)
-
-      return sendResponse(res, 200, 'OK', {
-         currentSessionId: (req as any).adminSessionId,
-         sessions: presentSessions(active),
-         exportLog: exports.map((e) => ({
-            id: e._id.toString(),
-            action: e.action,
-            actorEmail: e.actorEmail,
-            ip: e.ip,
-            rows: (e.after as any)?.rows,
-            createdAt: e.createdAt,
-         })),
-         recentFailedLogins: recentFailures.map((e) => ({
-            id: e._id.toString(),
-            actorEmail: e.actorEmail,
-            ip: e.ip,
-            reason: e.reason,
-            createdAt: e.createdAt,
-         })),
-         // §14.2: surfaced so an unconfigured alert channel is visible, not silent.
-         alertChannelConfigured: Boolean(process.env.ADMIN_ALERT_EMAIL),
-      })
-   }
-)
 
 // ===========================================================================
 // Notifications (§11)
@@ -552,6 +747,13 @@ export const sendTestNotification = catchAsync(
             new AppError('Add a phone number to your admin profile, or pass one as "to"', 400)
          )
       }
+      // §BUG-018: a test send must go to a real E.164 number — reject anything
+      // else before it reaches the provider.
+      if (!/^\+[1-9]\d{6,14}$/.test(to)) {
+         return next(
+            new AppError('Enter the number in international format, e.g. +243970000000', 400)
+         )
+      }
       if (!smsConfigured()) {
          await NotificationLog.create({
             event: event || 'TEST',
@@ -575,14 +777,20 @@ export const sendTestNotification = catchAsync(
          })
          return sendResponse(res, 200, `Sent to ${to}`, { preview: rendered, delivered: true })
       } catch (err) {
+         // §BUG-018: the raw provider/Twilio text (error codes, account state,
+         // sender ids) is logged server-side but never echoed to the client.
+         const raw = (err as Error).message
+         console.error(`[notify:test] send to ${to} failed: ${raw}`)
          await NotificationLog.create({
             event: event || 'TEST',
             channel: 'SMS',
             recipient: to,
             status: 'FAILED',
-            providerMessage: (err as Error).message.slice(0, 300),
+            providerMessage: raw.slice(0, 300),
          })
-         return next(new AppError((err as Error).message, 502))
+         return next(
+            new AppError('Could not send the test message. Check the number and try again.', 502)
+         )
       }
    }
 )

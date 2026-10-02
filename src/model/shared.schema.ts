@@ -5,6 +5,7 @@ import {
    DEFAULT_LOCALE,
    LOCALES,
 } from '../constants/domain.constants'
+import AppError from '../utils/appError'
 
 /**
  * Building blocks shared by every sellable thing: localised text and money.
@@ -116,3 +117,46 @@ export const parseMoney = (input: any): Money | undefined => {
    })
    return out
 }
+
+// ---------------------------------------------------------------------------
+
+export type GeoPoint = { lat: number; lng: number }
+
+/**
+ * Map pin from a form: `{ lat, lng }` as numbers, `null` to clear the pin,
+ * `undefined` to leave it alone. Anything else is refused rather than cast —
+ * a string that happens to cast, or a NaN that does not, is how a pin ends up
+ * in the sea.
+ */
+export const parseGeo = (input: unknown): GeoPoint | null | undefined => {
+   if (input === undefined) return undefined
+   if (input === null) return null
+   const g = input as any
+   const ok =
+      typeof g === 'object' &&
+      !Array.isArray(g) &&
+      Object.keys(g).every((k) => k === 'lat' || k === 'lng') &&
+      typeof g.lat === 'number' &&
+      typeof g.lng === 'number' &&
+      g.lat >= -90 &&
+      g.lat <= 90 &&
+      g.lng >= -180 &&
+      g.lng <= 180
+   if (!ok) {
+      throw new AppError(
+         'geo must be { lat, lng } with lat between -90 and 90 and lng between -180 and 180, or null to clear it',
+         400
+      )
+   }
+   return { lat: g.lat, lng: g.lng }
+}
+
+/**
+ * The pin for a response, only when both coordinates are set. An unset nested
+ * path reads as `{}` on a document and as `null` once cleared — neither is a
+ * place on a map.
+ */
+export const geoPoint = (g: Partial<GeoPoint> | null | undefined): GeoPoint | undefined =>
+   typeof g?.lat === 'number' && typeof g?.lng === 'number'
+      ? { lat: g.lat, lng: g.lng }
+      : undefined

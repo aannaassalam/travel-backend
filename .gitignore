@@ -146,3 +146,4 @@ dist
 # Firebase service-account keys: secrets, never committed.
 *firebase-adminsdk*.json
 firebase-service-account*.json
+.env.minimal

@@ -171,6 +171,30 @@ const reconcile = async (order: any): Promise<SettlementOutcome> => {
       return 'PENDING'
    }
 
+   /**
+    * §BUG-003: the money must match the order before it is marked PAID. The
+    * amount is in the same minor units we sent (toProviderAmount is identity for
+    * USD), and the currency is the one the order was priced in. A provider amount
+    * or currency that disagrees is left PENDING for the office, never settled —
+    * this is what stops a small payment being replayed to clear a large order.
+    * (Only checked when the provider actually returns the figure; see the
+    * fail-closed note in maxicash.service.)
+    */
+   if (status.outcome === 'PAID') {
+      const expectedAmount = Number(order.chargedTotal ?? order.total)
+      const expectedCurrency = String(order.chargedCurrency ?? order.currency ?? '').toUpperCase()
+      if (
+         (status.amount !== null && status.amount !== expectedAmount) ||
+         (status.currency && status.currency !== expectedCurrency)
+      ) {
+         console.error(
+            `[maxicash] amount/currency mismatch for ${order.reference}: ` +
+               `provider=${status.amount}/${status.currency} expected=${expectedAmount}/${expectedCurrency} — not settled`
+         )
+         return 'PENDING'
+      }
+   }
+
    await settle(order._id, status.outcome, status.providerStatus)
    return status.outcome
 }
@@ -204,6 +228,12 @@ export const startPayment = catchAsync(
       }
 
       const rail = String(req.body?.rail ?? '').toUpperCase() as PaymentRail
+
+      // Product decision 2026-10-02: cash only in every environment. Refused
+      // before anything below can touch the provider.
+      if (rail && rail !== PAYMENT_RAIL.CASH) {
+         return next(new AppError('Only cash payment is available.', 400, 'CASH_ONLY'))
+      }
 
       /**
        * Cash never reaches the provider — it is money handed over at the
@@ -383,6 +413,15 @@ export const startPayment = catchAsync(
  * form-encoded parameters are all searched, case-insensitively.
  */
 export const maxicashNotify = catchAsync(async (req: Request, res: Response) => {
+   // §BUG-003: MaxiCash publishes NO notification signature, HMAC, shared secret
+   // or callback IP range (developer.maxicashapp.com EN+FR, verified 2026-10-02;
+   // the public SDKs do not parse the callback either) — there is no spec to wait
+   // for. Sender authenticity therefore has to come from us: a per-order secret
+   // token in the NotifyURL registered with PayEntryWeb (not yet implemented — it
+   // needs one sandbox transaction to confirm MaxiCash preserves the query
+   // string). Payment truth comes from reconcile(): nothing in this body is
+   // trusted, the status is re-fetched server-to-server, and reference, amount
+   // and currency are confirmed against the order before it can be marked PAID.
    const n = parseNotification([req.body, req.query as any])
 
    if (!n.reference && !n.paymentId) {
@@ -459,11 +498,10 @@ export const maxicashNotify = catchAsync(async (req: Request, res: Response) => 
 /* --------------------------------- GET /orders/:reference/payment (polling) */
 
 /**
- * What the customer's screen asks after coming back from the payment page.
+ * What the customer's screen polls for the order's payment state.
  *
- * The return URL cannot be trusted — anyone can type it — so landing on it
- * proves nothing and this endpoint re-asks the provider. It is also the safety
- * net for the webhook never arriving, which happens.
+ * Product decision 2026-10-02: cash only, so this never asks the provider any
+ * more — it reports the order's own paymentStatus, which the office sets.
  */
 export const paymentStatus = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
@@ -471,24 +509,10 @@ export const paymentStatus = catchAsync(
       const order = await Order.findOne({ reference })
       if (!order) return next(new AppError('Order not found', 404))
 
-      if (
-         order.paymentStatus !== PAYMENT_STATUS.PAID &&
-         order.payment?.transactionId &&
-         maxicashEnabled()
-      ) {
-         // Best effort: a provider outage must not make the page look broken.
-         try {
-            await reconcile(order)
-         } catch (err) {
-            console.error(`[maxicash] reconcile failed for ${reference}: ${(err as Error).message}`)
-         }
-      }
-
-      const fresh = await Order.findOne({ reference })
       return sendResponse(res, 200, 'OK', {
          reference,
-         paymentStatus: fresh?.paymentStatus ?? order.paymentStatus,
-         paid: fresh?.paymentStatus === PAYMENT_STATUS.PAID,
+         paymentStatus: order.paymentStatus,
+         paid: order.paymentStatus === PAYMENT_STATUS.PAID,
       })
    }
 )

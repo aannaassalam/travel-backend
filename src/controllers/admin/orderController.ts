@@ -9,6 +9,7 @@ import {
    PAYMENT_STATUS,
 } from '../../constants/domain.constants'
 import { presentOrder, presentOrderList } from '../../dto/admin/order.dto'
+import { Customer } from '../../model/customerModel.admin'
 import { RatePlan } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
@@ -31,6 +32,12 @@ const orderFor = (req: Request, order: any) =>
       paymentStatus: order.paymentStatus,
       fulfilmentStatus: order.fulfilmentStatus,
    })
+
+/** Free-text search box: NUL stripped (the driver throws on it) and capped so a pasted paragraph never becomes a regex. */
+const searchTerm = (v: unknown) =>
+   typeof v === 'string' ? v.replace(/\0/g, '').trim().slice(0, 80) : ''
+const searchRx = (value: string) =>
+   new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
 
 /**
  * §6.1: queues, not one list. Default landing is "Needs action" — the
@@ -74,9 +81,38 @@ export const listOrders = catchAsync(
       if (!build) return next(new AppError(`Unknown queue: ${queue}`, 400))
 
       const filter: Record<string, any> = build()
-      // §3: the reference read out over the phone is the primary lookup.
-      if (req.query.q) {
-         filter.reference = { $regex: String(req.query.q), $options: 'i' }
+      // §3: the reference read out over the phone is the primary lookup, but
+      // the caller may equally give their name or number — so the customer
+      // record is searched too and the order list is filtered to their ids.
+      const q = searchTerm(req.query.q)
+      if (q) {
+         const rx = searchRx(q)
+         const phones = [rx]
+         // Local "0 81…" dialled form of a +243 E.164 phone.
+         if (/^0\d+$/.test(q)) phones.push(searchRx('+243' + q.slice(1)))
+         const customers = await Customer.find({
+            $or: [
+               ...phones.map((phone) => ({ phone })),
+               { firstName: rx },
+               { lastName: rx },
+               { email: rx },
+            ],
+         })
+            .select('_id')
+            .limit(200)
+         const search = {
+            $or: [
+               { reference: rx },
+               { customer: { $in: customers.map((c) => c._id) } },
+            ],
+         }
+         // The queue's own $or (needs-action) must stay in force as well.
+         if (filter.$or) {
+            filter.$and = [{ $or: filter.$or }, search]
+            delete filter.$or
+         } else {
+            filter.$or = search.$or
+         }
       }
 
       const sort =
@@ -280,36 +316,62 @@ export const transitionOrder = catchAsync(
    }
 )
 
-/** §6.1 cash workflow: mark collected. */
+const DOCUMENT_KINDS = ['ETICKET', 'VOUCHER', 'INVOICE']
+/** Enough for a family's tickets in one go; the multer cap (10) sits above it. */
+export const MAX_DOCUMENTS_PER_UPLOAD = 7
+
 /**
- * Attach an issued document (e-ticket, voucher, invoice) to an order.
+ * Attach issued documents (e-tickets, vouchers, invoices) to an order.
  *
  * This is what DOCUMENTS_ISSUED had been missing: the Notifications screen
  * offered a template for the event, and nothing in the system could ever fire
- * it because there was no way to record that a document existed. The file
- * arrives with the request (multipart, field `files`), is stored privately
- * (§6.5) and is reached later through a signed link — only the key is kept.
+ * it because there was no way to record that a document existed. The files
+ * arrive with the request (multipart, field `files`, up to seven), are stored
+ * privately (§6.5) and reached later through a signed link — only the key is
+ * kept. One kind for the batch (`kind`), or one per file (`kinds`, a JSON list
+ * in file order). The customer is told once, however many files came.
  */
 export const attachDocument = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const kind = req.body?.kind
-      if (!['ETICKET', 'VOUCHER', 'INVOICE'].includes(kind)) {
+      const files = ((req as any).files as Express.Multer.File[] | undefined) ?? []
+      if (!files.length) return next(new AppError('Choose a file to attach', 400))
+      if (files.length > MAX_DOCUMENTS_PER_UPLOAD) {
+         return next(
+            new AppError(`Attach up to ${MAX_DOCUMENTS_PER_UPLOAD} documents at a time`, 400)
+         )
+      }
+      let kinds: unknown[]
+      if (req.body?.kinds !== undefined) {
+         try {
+            kinds = JSON.parse(String(req.body.kinds))
+         } catch {
+            return next(new AppError('kinds must be a JSON list', 400))
+         }
+         if (!Array.isArray(kinds) || kinds.length !== files.length) {
+            return next(new AppError('kinds must name one kind per file, in order', 400))
+         }
+      } else {
+         kinds = files.map(() => req.body?.kind)
+      }
+      if (kinds.some((k) => !DOCUMENT_KINDS.includes(String(k)))) {
          return next(new AppError('kind must be ETICKET, VOUCHER or INVOICE', 400))
       }
-      const file = ((req as any).files as Express.Multer.File[] | undefined)?.[0]
-      if (!file) return next(new AppError('Choose a file to attach', 400))
 
       const order = await Order.findById(req.params.id)
       if (!order) return next(new AppError('Order not found', 404))
       if (order.status === ORDER_STATUS.CANCELLED) {
          return next(new AppError('A cancelled order cannot be issued documents', 409))
       }
+      // Completed means handed over: the paperwork is closed with it.
+      if (order.status === ORDER_STATUS.COMPLETED) {
+         return next(new AppError('A completed order no longer takes documents', 409))
+      }
       /**
        * A ticket or voucher is the thing being sold, so it is not handed over
        * before the money is recorded. An invoice is a request for payment and
        * may go out first.
        */
-      if (kind !== 'INVOICE' && order.paymentStatus !== PAYMENT_STATUS.PAID) {
+      if (kinds.some((k) => k !== 'INVOICE') && order.paymentStatus !== PAYMENT_STATUS.PAID) {
          return next(
             new AppError(
                'Record the payment before issuing a ticket or voucher',
@@ -320,39 +382,43 @@ export const attachDocument = catchAsync(
       }
       const before = order.toObject()
 
-      /**
-       * Stored here, in one step, rather than taking a storage key from the
-       * request: a key in the body would let a caller attach ANY private file
-       * they could name — another customer's ticket included. Always private
-       * (§6.5): the customer reaches it through a short-lived signed link.
-       */
-      const stored = await storage().save(
-         {
-            buffer: file.buffer,
-            originalName: file.originalname,
-            mimeType: file.mimetype,
-            size: file.size,
-         },
-         { folder: `orders/${order.reference.toLowerCase()}`, visibility: 'private' }
-      )
-
-      // Re-issuing supersedes rather than replaces: a customer may already hold
-      // the previous version, so support needs to see both.
-      const previous = order.documents.filter((d: any) => d.kind === kind).length
-      order.documents.push({
-         kind,
-         fileName: String(file.originalname).slice(0, 120),
-         storageKey: stored.key,
-         version: previous + 1,
-         uploadedAt: new Date(),
-         uploadedBy: (req as any).admin?.email,
-      })
-      // Never step back from DELIVERED: re-issuing on a completed order is a
-      // correction, not a return to "awaiting delivery".
+      const issued: string[] = []
+      for (const [i, file] of files.entries()) {
+         const kind = String(kinds[i])
+         /**
+          * Stored here, in one step, rather than taking a storage key from the
+          * request: a key in the body would let a caller attach ANY private
+          * file they could name — another customer's ticket included. Always
+          * private (§6.5): the customer reaches it through a short-lived
+          * signed link.
+          */
+         const stored = await storage().save(
+            {
+               buffer: file.buffer,
+               originalName: file.originalname,
+               mimeType: file.mimetype,
+               size: file.size,
+            },
+            { folder: `orders/${order.reference.toLowerCase()}`, visibility: 'private' }
+         )
+         // Re-issuing supersedes rather than replaces: a customer may already
+         // hold the previous version, so support needs to see both.
+         const previous = order.documents.filter((d: any) => d.kind === kind).length
+         order.documents.push({
+            kind,
+            fileName: String(file.originalname).slice(0, 120),
+            storageKey: stored.key,
+            version: previous + 1,
+            uploadedAt: new Date(),
+            uploadedBy: (req as any).admin?.email,
+         })
+         issued.push(`${kind} v${previous + 1}`)
+      }
+      // Never step back from DELIVERED.
       if (order.fulfilmentStatus !== FULFILMENT_STATUS.DELIVERED) {
          order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_ISSUED
       }
-      addTimeline(order, req, 'DOCUMENTS_ISSUED', `${kind} v${previous + 1}`)
+      addTimeline(order, req, 'DOCUMENTS_ISSUED', issued.join(', '))
       await order.save()
 
       await recordAudit(req, {
@@ -365,7 +431,55 @@ export const attachDocument = catchAsync(
 
       void notifyOrder(NOTIFICATION_EVENTS.DOCUMENTS_ISSUED, order._id)
 
-      return sendResponse(res, 200, 'Document attached', { order: orderFor(req, order) })
+      return sendResponse(
+         res,
+         200,
+         files.length === 1 ? 'Document attached' : `${files.length} documents attached`,
+         { order: orderFor(req, order) }
+      )
+   }
+)
+
+/**
+ * Take a document back — the wrong file was sent, or the right one to the
+ * wrong booking. Allowed until the order is completed; after that the
+ * paperwork is closed. The customer's signed links expire within minutes and
+ * the file itself is removed, so nothing keeps serving it.
+ */
+export const removeDocument = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const order = await Order.findById(req.params.id)
+      if (!order) return next(new AppError('Order not found', 404))
+      if (order.status === ORDER_STATUS.COMPLETED) {
+         return next(new AppError('Documents on a completed order cannot be removed', 409))
+      }
+      const doc = (order.documents as any).id(req.params.documentId)
+      if (!doc) return next(new AppError('Document not found', 404))
+      const before = order.toObject()
+      const { storageKey, kind, version, fileName } = doc
+
+      ;(order.documents as any).pull(doc._id)
+      // Nothing left to hand over: back to "paid, documents pending".
+      if (!order.documents.length && order.fulfilmentStatus === FULFILMENT_STATUS.DOCUMENTS_ISSUED) {
+         order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_PENDING
+      }
+      addTimeline(order, req, 'DOCUMENT_REMOVED', `${kind} v${version} — ${fileName}`, req.body?.reason)
+      await order.save()
+      // The record is what matters; a file already gone is not an error.
+      await storage()
+         .remove(storageKey)
+         .catch(() => undefined)
+
+      await recordAudit(req, {
+         action: AUDIT_ACTIONS.UPDATE,
+         entityType: 'Order',
+         entityId: order._id.toString(),
+         before,
+         after: order.toObject(),
+         reason: req.body?.reason,
+      })
+
+      return sendResponse(res, 200, 'Document removed', { order: orderFor(req, order) })
    }
 )
 
@@ -375,6 +489,18 @@ export const markCashReceived = catchAsync(
       if (!order) return next(new AppError('Order not found', 404))
       if (order.paymentMethod !== 'CASH') {
          return next(new AppError('This is not a cash order', 400))
+      }
+      /**
+       * §BUG-001: idempotent, and only from the one state that means "owed at the
+       * counter". Without this guard a second click double-fires the hold→sold
+       * conversion, and a CANCELLED (inventory already released) order could be
+       * revived straight to PAID.
+       */
+      if (
+         order.status !== ORDER_STATUS.SUBMITTED ||
+         order.paymentStatus !== PAYMENT_STATUS.UNPAID
+      ) {
+         return next(new AppError('Order is not awaiting cash payment', 409))
       }
       const before = order.toObject()
 

@@ -43,6 +43,25 @@ const redact = (value: any): any => {
 /** Exposed for the leak tests — not part of the public surface. */
 export const __testRedact = redact
 
+/**
+ * Key order is not a change. A document read back from Mongoose can list the
+ * keys of a nested object in a different order from the one just saved, and
+ * a plain JSON comparison then reports every settings save as having changed
+ * the whole offices list.
+ */
+const stable = (value: any): any => {
+   if (Array.isArray(value)) return value.map(stable)
+   if (value && typeof value === 'object' && !(value instanceof Date)) {
+      return Object.keys(value)
+         .sort()
+         .reduce<Record<string, any>>((acc, k) => {
+            acc[k] = stable(value[k])
+            return acc
+         }, {})
+   }
+   return value
+}
+
 /** Only the fields that actually changed — a full-document diff is unreadable. */
 const diff = (before: any, after: any) => {
    if (!before || !after) {
@@ -52,7 +71,7 @@ const diff = (before: any, after: any) => {
    const b: Record<string, any> = {}
    const a: Record<string, any> = {}
    keys.forEach((k) => {
-      if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
+      if (JSON.stringify(stable(before[k])) !== JSON.stringify(stable(after[k]))) {
          b[k] = before[k]
          a[k] = after[k]
       }

@@ -6,7 +6,6 @@ import {
    FULFILMENT_STATUS,
    ORDER_STATUS,
    PAYMENT_METHOD,
-   onlinePaymentsEnabled,
    PAYMENT_STATUS,
    VERTICALS,
 } from '../../constants/domain.constants'
@@ -87,6 +86,9 @@ const createWithReference = async (doc: Record<string, unknown>) => {
    throw new AppError('Could not allocate a booking reference', 500)
 }
 
+/** Same shape the customer realm already uses (customerAuthController.updateMe). */
+const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+
 /** §7.2: one canonical form, or "the same customer" stops meaning anything. */
 const normalisePhone = (raw: string) => {
    const trimmed = String(raw ?? '').replace(/[\s.-]/g, '')
@@ -114,6 +116,17 @@ export const createOrder = catchAsync(
       if (!key) return next(new AppError('Idempotency-Key header is required', 400))
 
       /**
+       * §BUG-009: the caller this key belongs to — the signed-in customer, else
+       * the normalised phone they typed. A key is only a replay for the SAME
+       * caller; resolved here so it can gate the replay below.
+       */
+      const signedIn = await currentCustomer(req)
+      const idempotencyScope =
+         (signedIn
+            ? String(signedIn._id)
+            : normalisePhone(req.body?.contact?.phone ?? '')) || undefined
+
+      /**
        * §4.6: a dropped response on a mobile network gets retried, and a
        * duplicate order double-books stock and double-charges a customer. The
        * key is stored on the order, so the replay returns the original rather
@@ -121,6 +134,16 @@ export const createOrder = catchAsync(
        */
       const replay = await Order.findOne({ idempotencyKey: key })
       if (replay) {
+         /**
+          * §BUG-009: scoped replay. A key already spent by another caller is
+          * unusable, never a window onto that caller's order. (Legacy orders with
+          * no stored scope fall through to the existing behaviour.)
+          */
+         if (replay.idempotencyScope && replay.idempotencyScope !== idempotencyScope) {
+            return next(
+               new AppError('Idempotency key already used', 409, 'IDEMPOTENCY_KEY_USED')
+            )
+         }
          /**
           * A replay is only a replay while the original is alive. Handing back
           * a CANCELLED order with a 200 "already created" is how a customer's
@@ -176,17 +199,54 @@ export const createOrder = catchAsync(
       }
       const phone = normalisePhone(contact.phone)
       if (!phone) return next(new AppError('A valid phone number is required', 400))
+      // §BUG-014: an invalid e-mail is refused when one is given (names are
+      // capped to 80 where they are stored, below and on the customer record).
+      if (contact.email && !EMAIL_RX.test(String(contact.email).trim().toLowerCase())) {
+         return next(new AppError('That email address is not valid', 400))
+      }
 
       /**
-       * Decided here, not by the client. While online payments are switched
-       * off every order is a cash order whatever the request asked for — so an
-       * older build of the app still in someone's pocket books cash too,
-       * instead of creating an ONLINE order that can never be paid.
+       * §BUG-014: travellers are stored almost verbatim, so each is validated
+       * here. A name that is not a non-empty string (an object or array) is how a
+       * query operator gets smuggled into a stored document; a `enc:v1:`
+       * documentNumber is client-supplied ciphertext we must never store; a
+       * future date of birth is nonsense.
        */
-      const method =
-         onlinePaymentsEnabled() && paymentMethod !== PAYMENT_METHOD.CASH
-            ? PAYMENT_METHOD.ONLINE
-            : PAYMENT_METHOD.CASH
+      const travellerList = (Array.isArray(travellers) ? travellers : [])
+         .filter((t: any) => t && typeof t === 'object' && !Array.isArray(t))
+         .filter((t: any) => t.firstName || t.lastName)
+         .slice(0, 20)
+      const endOfToday = new Date()
+      endOfToday.setHours(23, 59, 59, 999)
+      for (const t of travellerList) {
+         if (
+            typeof t.firstName !== 'string' ||
+            !t.firstName.trim() ||
+            typeof t.lastName !== 'string' ||
+            !t.lastName.trim()
+         ) {
+            return next(new AppError('Each traveller needs a first and last name', 400))
+         }
+         if (t.dateOfBirth !== undefined && t.dateOfBirth !== null && t.dateOfBirth !== '') {
+            const dob = new Date(t.dateOfBirth).getTime()
+            if (Number.isNaN(dob) || dob > endOfToday.getTime()) {
+               return next(new AppError('A traveller date of birth is not valid', 400))
+            }
+         }
+         if (typeof t.documentNumber === 'string' && t.documentNumber.startsWith('enc:v1:')) {
+            return next(new AppError('Invalid document number', 400))
+         }
+      }
+
+      /**
+       * Product decision 2026-10-02: cash only in every environment. A request
+       * for any other method is refused outright, not silently booked as cash —
+       * the client must show the customer the right thing, not guess.
+       */
+      if (paymentMethod && paymentMethod !== PAYMENT_METHOD.CASH) {
+         return next(new AppError('Only cash payment is available.', 400, 'CASH_ONLY'))
+      }
+      const method = PAYMENT_METHOD.CASH
 
       // --- 1. Re-price from the database ------------------------------------
       let priced: PricedItem[]
@@ -207,6 +267,10 @@ export const createOrder = catchAsync(
             return next(new AppError('This listing is enquiry-only', 400))
          }
          if (code === 'INVALID_QUANTITY') return next(new AppError('Invalid quantity', 400))
+         // §BUG-008: bad/reversed/past/over-long dates are a 400, not a 409.
+         if (code === 'INVALID_DATES') {
+            return next(new AppError('Those dates are not valid', 400))
+         }
          return next(new AppError('One of these items is no longer available', 409))
       }
 
@@ -321,13 +385,20 @@ export const createOrder = catchAsync(
           * validators on upsert, the required `firstName` would not complain
           * either: every checkout would quietly file a nameless customer.
           */
-         const set: Record<string, unknown> = {
+         /**
+          * §BUG-002: identity fields go in `$setOnInsert`, never `$set`. A guest
+          * checkout must NOT rewrite the name/email of an existing customer who
+          * happens to share this phone — the guest's own contact details already
+          * live on the order. On insert these seed a brand-new contact record.
+          */
+         const onInsert: Record<string, unknown> = {
+            phone,
+            locale: wanted,
+            hasAccount: false,
             firstName: String(contact.firstName).trim().slice(0, 80),
             lastName: String(contact.lastName).trim().slice(0, 80),
          }
-         // Only overwrite an existing email when one was actually given — a
-         // guest checkout without an email must not blank a known address.
-         if (contact.email) set.email = String(contact.email).toLowerCase()
+         if (contact.email) onInsert.email = String(contact.email).toLowerCase()
 
          /**
           * A guest checkout files a CONTACT, never an account.
@@ -342,14 +413,30 @@ export const createOrder = catchAsync(
           * A signed-in customer is matched by session, not by the phone typed
           * into the form, so they cannot attach an order to someone else.
           */
-         const signedIn = await currentCustomer(req)
          const customer = signedIn?.phone === phone
             ? signedIn
             : await Customer.findOneAndUpdate(
                  { phone },
-                 { $set: set, $setOnInsert: { phone, locale: wanted, hasAccount: false } },
+                 { $setOnInsert: onInsert },
                  { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
               )
+
+         /**
+          * §BUG-002 (attachment): an order is never filed into an account the
+          * caller has not proved they own. A guest — or a signed-in customer
+          * typing somebody else's number — whose phone resolves to a registered
+          * account is told to sign in, instead of that account silently gaining
+          * an order it did not place.
+          */
+         if (customer.hasAccount && String(customer._id) !== String(signedIn?._id ?? '')) {
+            // throw, never `return next(...)`: we are inside the try whose catch
+            // releases the stock held above — a plain return leaks the hold.
+            throw new AppError(
+               'This number belongs to an account. Please sign in to book.',
+               409,
+               'ACCOUNT_EXISTS'
+            )
+         }
 
          // --- 4. Consent evidence (§2.2) ------------------------------------
          /**
@@ -378,6 +465,7 @@ export const createOrder = catchAsync(
 
          const order = await createWithReference({
             idempotencyKey: key,
+            idempotencyScope,
             /**
              * §4.3 three independent axes, never merged. A cash order is
              * SUBMITTED / UNPAID / NOT_STARTED — it exists and is owed, which is
@@ -400,9 +488,7 @@ export const createOrder = catchAsync(
                lineTotal: p.lineTotal,
                lineCost: p.lineCost,
             })),
-            travellers: (Array.isArray(travellers) ? travellers : [])
-               .filter((t: any) => t?.firstName || t?.lastName)
-               .slice(0, 20),
+            travellers: travellerList,
             total: totalUsd,
             chargedCurrency,
             chargedTotal,

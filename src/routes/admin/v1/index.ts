@@ -1,7 +1,7 @@
 import express from 'express'
 
 import * as access from '../../../controllers/admin/accessController'
-import { listAuditLogs } from '../../../controllers/admin/auditLogController'
+import { auditLogSummary, listAuditLogs } from '../../../controllers/admin/auditLogController'
 import * as customers from '../../../controllers/admin/customerController'
 import { getDashboard } from '../../../controllers/admin/dashboardController'
 import * as hotels from '../../../controllers/admin/hotelController'
@@ -156,6 +156,12 @@ router.post(
    handleUploadErrors,
    orders.attachDocument
 )
+// A wrong file taken back; refused once the order is completed.
+router.delete(
+   '/orders/:id/documents/:documentId',
+   requirePermission('orders:write'),
+   orders.removeDocument
+)
 // §14.5: unmasking passport data needs step-up re-auth and is logged.
 router.post(
    '/orders/:id/travellers/:travellerId/unmask',
@@ -178,7 +184,11 @@ router.post(
 
 // --- Enquiries (§7) ---------------------------------------------------------
 router.get('/enquiries', requirePermission('enquiries:read'), boundPagination, ops.listEnquiries)
+// Declared before the :id routes so "summary" is never read as an id.
+router.get('/enquiries/summary', requirePermission('enquiries:read'), ops.enquirySummary)
 router.post('/enquiries/:id/stage', requirePermission('enquiries:write'), ops.updateEnquiryStage)
+router.post('/enquiries/:id/notes', requirePermission('enquiries:write'), ops.addEnquiryNote)
+router.post('/enquiries/:id/quote', requirePermission('enquiries:write'), ops.quoteEnquiry)
 
 // --- Payments (§9.1) --------------------------------------------------------
 // Payment exceptions and FX rates were removed: prices are typed per currency,
@@ -201,10 +211,6 @@ router.get('/settings', requirePermission('settings:read'), ops.getSettingsHandl
 // §1.3: settings changes require step-up re-authentication.
 router.patch('/settings', requirePermission('settings:write'), requireStepUp, ops.updateSettings)
 
-// --- Security (§14) ---------------------------------------------------------
-router.get('/security', requirePermission('security:read'), ops.getSecurityOverview)
-
-// --- Audit log (§14.6) ------------------------------------------------------
 // --- Locations & serviced routes (§12) --------------------------------------
 router.get('/locations', requirePermission('inventory:read'), locations.listLocations)
 router.post('/locations', requirePermission('inventory:write'), locations.createLocation)
@@ -213,6 +219,8 @@ router.get('/routes', requirePermission('inventory:read'), locations.listRoutes)
 router.post('/routes', requirePermission('inventory:write'), locations.createRoute)
 router.patch('/routes/:id', requirePermission('inventory:write'), locations.updateRoute)
 
+// Must stay above any future /audit-logs/:id.
+router.get('/audit-logs/summary', requirePermission('audit:read'), auditLogSummary)
 router.get('/audit-logs', requirePermission('audit:read'), boundPagination, listAuditLogs)
 
 // --- Access control: roles and admin-panel users ----------------------------

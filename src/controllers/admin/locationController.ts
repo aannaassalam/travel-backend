@@ -23,6 +23,14 @@ const slugify = (s: string) =>
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')
 
+/** Free-text search box: NUL stripped (the driver throws on it) and capped so a pasted paragraph never becomes a regex. */
+const searchTerm = (v: unknown) =>
+   typeof v === 'string' ? v.replace(/\0/g, '').trim().slice(0, 80) : ''
+// §BUG-007: escape before building the RegExp — a raw user string is a malformed
+// regex that makes the driver throw and leak Mongo internals (Location51091).
+const searchRx = (value: string) =>
+   new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+
 const present = (l: any) => ({
    id: l._id.toString(),
    name: l.name,
@@ -40,7 +48,8 @@ const present = (l: any) => ({
 
 export const listLocations = catchAsync(async (req: Request, res: Response) => {
    const filter: Record<string, unknown> = {}
-   if (req.query.q) filter.name = { $regex: String(req.query.q), $options: 'i' }
+   const q = searchTerm(req.query.q)
+   if (q) filter.name = searchRx(q)
    if (req.query.active === 'true') filter.isActive = true
    if (req.query.active === 'false') filter.isActive = false
 

@@ -16,16 +16,26 @@ import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
 import { forReader } from '../../middleware/adminAuth'
 
+/** Free-text search box: NUL stripped (the driver throws on it) and capped so a pasted paragraph never becomes a regex. */
+const searchTerm = (v: unknown) =>
+   typeof v === 'string' ? v.replace(/\0/g, '').trim().slice(0, 80) : ''
+// §BUG-007: escape before building the RegExp — an unescaped user string is a
+// malformed regex that makes the driver throw and leak Mongo internals (e.g.
+// Location51091), and at worst a ReDoS.
+const searchRx = (value: string) =>
+   new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+
 export const listCustomers = catchAsync(async (req: Request, res: Response) => {
-   const q = req.query.q ? String(req.query.q) : ''
+   const q = searchTerm(req.query.q)
    const filter: Record<string, any> = {}
    if (q) {
       // §8: searchable by phone (primary), name, email.
+      const rx = searchRx(q)
       filter.$or = [
-         { phone: { $regex: q, $options: 'i' } },
-         { firstName: { $regex: q, $options: 'i' } },
-         { lastName: { $regex: q, $options: 'i' } },
-         { email: { $regex: q, $options: 'i' } },
+         { phone: rx },
+         { firstName: rx },
+         { lastName: rx },
+         { email: rx },
       ]
    }
    const { items, nextCursor } = await paginate(Customer, filter, req)

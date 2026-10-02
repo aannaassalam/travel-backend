@@ -118,6 +118,7 @@ export interface IListing extends Document {
    status: ListingStatus
    city: string
    country: string
+   geo?: { lat: number; lng: number }
    images: string[]
    supplier?: string
    /**
@@ -162,6 +163,7 @@ const listingSchema = new Schema<IListing>(
       },
       city: { type: String, required: true, trim: true, index: true },
       country: { type: String, default: 'CD' },
+      geo: { lat: Number, lng: Number },
       images: { type: [String], default: [] },
       supplier: { type: String, trim: true, index: true },
       costPrice: moneyField(),
@@ -217,9 +219,8 @@ listingSchema.methods.publishBlockers = function (): string[] {
          b.push('USD sell price must be above cost price')
       }
       if (this.quantityTotal <= 0) b.push('Quantity must be above zero')
-      if (this.validUntil && this.validUntil.getTime() < Date.now()) {
-         b.push('Sell-by date must be in the future')
-      }
+      // validUntil is no longer managed from the panel, so it must not block:
+      // a record that still carries an old date could never be published.
    }
 
    if (this.vertical === VERTICALS.FLIGHT && !this.attributes?.segments?.length) {

@@ -2,8 +2,9 @@
 ### Elastic Beanstalk.
 ###
 ### The compile happens here rather than on the EB instance because `tsc` lives
-### in devDependencies, and EB installs with NODE_ENV=production — the build
-### would fail on the box with "tsc: not found".
+### in devDependencies, and EB installs with `npm install --production` — the
+### build would fail on the box with "tsc: not found". (That install flag does
+### NOT set NODE_ENV for the running app; .ebextensions/01-env.config does.)
 ###
 ### Use the Amazon Linux 2023 CodeBuild image so the native module (argon2)
 ### compiles against the same libc the EB platform runs.
@@ -31,3 +32,4 @@ artifacts:
       - package-lock.json
       - Procfile
       - .platform/**/*
+      - .ebextensions/**/*

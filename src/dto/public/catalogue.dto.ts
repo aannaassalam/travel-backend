@@ -1,7 +1,7 @@
 import { IHotel, IRoomType } from '../../model/hotelModel'
 import { IListing } from '../../model/listingModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
-import { Localized, Money } from '../../model/shared.schema'
+import { geoPoint, Localized, Money } from '../../model/shared.schema'
 import { FieldMap, present, presentList } from '../../utils/present'
 
 /** Only the locales that actually have text — blanks are noise on the wire. */
@@ -46,6 +46,7 @@ const listingFields: FieldMap<IListing> = {
    status: (l) => l.status,
    city: (l) => l.city,
    country: (l) => l.country,
+   geo: (l) => geoPoint(l.geo),
    images: (l) => l.images ?? [],
    /**
     * Per-currency integer minor units. Explicit prices, not conversions — the
@@ -129,7 +130,7 @@ const hotelFields: FieldMap<HotelWithRooms> = {
    address: (h) => h.address,
    city: (h) => h.city,
    country: (h) => h.country,
-   geo: (h) => (h.geo?.lat ? { lat: h.geo.lat, lng: h.geo.lng } : undefined),
+   geo: (h) => geoPoint(h.geo),
    amenities: (h) => h.amenities ?? [],
    images: (h) => h.images ?? [],
    checkInTime: (h) => h.checkInTime,
@@ -197,7 +198,7 @@ const restaurantFields: FieldMap<RestaurantWithMenu> = {
    address: (r) => r.address,
    city: (r) => r.city,
    country: (r) => r.country,
-   geo: (r) => (r.geo?.lat ? { lat: r.geo.lat, lng: r.geo.lng } : undefined),
+   geo: (r) => geoPoint(r.geo),
    images: (r) => r.images ?? [],
    openingHours: (r) => r.openingHours,
    prepTimeMinutes: (r) => r.prepTimeMinutes,

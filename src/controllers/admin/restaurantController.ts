@@ -8,12 +8,40 @@ import {
    presentRestaurants,
 } from '../../dto/admin/inventory.dto'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
-import { parseMoney, resolveLocalized } from '../../model/shared.schema'
+import { parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
 import { archiveDoc, createDoc, paginate, updateDoc } from '../../services/adminCrud.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
+import { pick } from '../../utils/pick'
 import { sendResponse } from '../../utils/response'
 import { uniqueSlug } from '../../utils/uniqueSlug'
+
+/**
+ * §BUG-010: fields a caller may set. geo/deliveryZones are parsed and written
+ * explicitly; slug, status, createdBy, rating and reviewCount never from the body.
+ */
+const RESTAURANT_EDITABLE = [
+   'name',
+   'description',
+   'cuisines',
+   'address',
+   'city',
+   'country',
+   'images',
+   'openingHours',
+   'prepTimeMinutes',
+   'phone',
+] as const
+
+/** §BUG-010: costPrice/sellPrice parsed explicitly; restaurant/status never from body. */
+const MENUITEM_EDITABLE = [
+   'section',
+   'name',
+   'description',
+   'images',
+   'isAvailable',
+   'sortOrder',
+] as const
 
 /**
  * Restaurants and their menus, admin side.
@@ -27,6 +55,12 @@ import { uniqueSlug } from '../../utils/uniqueSlug'
 const ENTITY = 'Restaurant'
 const MENU_ENTITY = 'MenuItem'
 
+/** Free-text search box: NUL stripped (the driver throws on it) and capped so a pasted paragraph never becomes a regex. */
+const searchTerm = (v: unknown) =>
+   typeof v === 'string' ? v.replace(/\0/g, '').trim().slice(0, 80) : ''
+const searchRx = (value: string) =>
+   new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+
 /** Declared order, not alphabetical — see the public controller for why. */
 const SECTION_RANK = Object.values(MENU_SECTIONS).reduce<Record<string, number>>(
    (acc, s, i) => ({ ...acc, [s]: i }),
@@ -39,11 +73,16 @@ export const listRestaurants = catchAsync(async (req: Request, res: Response) =>
    // Archived records stay in the database forever but out of the way.
    filter.status = status ? status : { $ne: LISTING_STATUS.ARCHIVED }
    if (city) filter.city = city
-   // Search every locale, not only the default one.
-   if (q) {
-      filter.$or = LOCALES.map((l) => ({
-         [`name.${l}`]: { $regex: String(q), $options: 'i' },
-      }))
+   // Search every locale, not only the default one — plus city, slug, cuisine.
+   const term = searchTerm(q)
+   if (term) {
+      const rx = searchRx(term)
+      filter.$or = [
+         ...LOCALES.map((l) => ({ [`name.${l}`]: rx })),
+         { city: rx },
+         { slug: rx },
+         { cuisines: rx },
+      ]
    }
 
    const { items, nextCursor } = await paginate(Restaurant, filter, req)
@@ -78,7 +117,8 @@ export const createRestaurant = catchAsync(async (req: Request, res: Response) =
       req,
       Restaurant,
       {
-         ...req.body,
+         ...pick(req.body, RESTAURANT_EDITABLE),
+         geo: parseGeo(req.body.geo),
          deliveryZones: parseZones(req.body.deliveryZones),
          slug: await uniqueSlug(Restaurant, [resolveLocalized(name), city]),
          createdBy: (req as any).admin._id,
@@ -91,12 +131,13 @@ export const createRestaurant = catchAsync(async (req: Request, res: Response) =
 })
 
 export const updateRestaurant = catchAsync(async (req: Request, res: Response) => {
-   const patch: Record<string, unknown> = { ...req.body }
+   const patch: Record<string, unknown> = pick(req.body, RESTAURANT_EDITABLE)
    // Only rewrite zones when the form actually sent them, so a PATCH of the
    // opening hours does not silently wipe the delivery table.
    if (req.body.deliveryZones !== undefined) {
       patch.deliveryZones = parseZones(req.body.deliveryZones)
    }
+   patch.geo = parseGeo(req.body.geo)
    const restaurant = await updateDoc<any>(req, Restaurant, req.params.id, patch, {
       entityType: ENTITY,
    })
@@ -166,7 +207,7 @@ export const createMenuItem = catchAsync(
          req,
          MenuItem,
          {
-            ...req.body,
+            ...pick(req.body, MENUITEM_EDITABLE),
             restaurant: restaurant._id,
             costPrice: parseMoney(req.body.costPrice),
             sellPrice: parseMoney(req.body.sellPrice),
@@ -178,13 +219,12 @@ export const createMenuItem = catchAsync(
 )
 
 export const updateMenuItem = catchAsync(async (req: Request, res: Response) => {
-   const patch: Record<string, unknown> = { ...req.body }
+   // §BUG-010: allow-listed — restaurant is excluded, so a dish can never be
+   // re-pointed at a different kitchen, and status moves only via archive.
+   const patch: Record<string, unknown> = pick(req.body, MENUITEM_EDITABLE)
    // parseMoney drops blanks, so an untouched currency box never becomes 0.
    if (req.body.costPrice !== undefined) patch.costPrice = parseMoney(req.body.costPrice)
    if (req.body.sellPrice !== undefined) patch.sellPrice = parseMoney(req.body.sellPrice)
-   // The restaurant a dish belongs to is not editable — moving it would
-   // silently re-point historical order lines at a different kitchen.
-   delete patch.restaurant
 
    const item = await updateDoc<any>(req, MenuItem, req.params.menuItemId, patch, {
       entityType: MENU_ENTITY,

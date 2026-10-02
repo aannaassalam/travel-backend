@@ -22,11 +22,7 @@ import {
    getOrder,
    getOrderDocument,
 } from '../../controllers/public/orderController'
-import {
-   maxicashNotify,
-   paymentStatus,
-   startPayment,
-} from '../../controllers/public/paymentController'
+import { paymentStatus, startPayment } from '../../controllers/public/paymentController'
 import {
    deleteMe,
    registerDevice,
@@ -183,32 +179,13 @@ router.delete('/me/devices', protectCustomer, unregisterDevice)
 
 router.post('/orders', checkoutLimiter, createOrder)
 /**
- * Starts a provider payment. Rate-limited with checkout because each call opens
- * a transaction at MaxiCash.
+ * Confirms the cash rail on an order. Product decision 2026-10-02: cash only in
+ * every environment, so the MaxiCash notify route is gone (404) and any other
+ * rail is refused with CASH_ONLY.
  */
 router.post('/orders/:reference/pay', checkoutLimiter, startPayment)
 
-/**
- * MaxiCash's server-to-server notification.
- *
- * Deliberately NOT behind `checkoutLimiter`: throttling a provider's retries
- * would drop real settlements. It is cheap and safe to call — it believes
- * nothing in the body and just asks MaxiCash what happened — but it still gets
- * a generous ceiling so it cannot be used as an amplifier.
- *
- * GET as well as POST: MaxiCash does not document the callback's method, and a
- * settlement notification silently 404ing is the worst possible failure here.
- */
-const webhookLimiter = rateLimit({
-   max: 600,
-   windowMs: 15 * 60 * 1000,
-   standardHeaders: true,
-   legacyHeaders: false,
-   message: { received: false },
-})
-router.all('/payments/maxicash/notify', webhookLimiter, maxicashNotify)
-
-/** What the return screen polls; re-verifies with the provider. */
+/** What the return screen polls; reports the order's own paymentStatus. */
 router.get('/orders/:reference/payment', orderReadLimiter, privateOnly, paymentStatus)
 /** Exchanges a document id for a short-lived download link. */
 router.get(

@@ -8,6 +8,8 @@ import { Location } from '../../model/locationModel'
 import {
    availableCurrencies,
    baseAmount,
+   geoPoint,
+   parseGeo,
    parseMoney,
    resolveLocalized,
    translationStatus,
@@ -22,11 +24,33 @@ import {
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
+import { pick } from '../../utils/pick'
 import { FieldMap, present, presentList } from '../../utils/present'
 import { sendResponse } from '../../utils/response'
 import { uniqueSlug } from '../../utils/uniqueSlug'
 
 /** Serves flights, bus, cars, activities and properties (§5.2). */
+
+/**
+ * §BUG-010: fields a caller may set on a listing. costPrice/sellPrice/geo are
+ * parsed and written explicitly below; slug, status, createdBy, quantitySold,
+ * quantityHeld, rating and reviewCount are never taken from the body — status
+ * moves only through publish/archive, inventory counts only through checkout.
+ */
+const LISTING_EDITABLE = [
+   'title',
+   'description',
+   'city',
+   'country',
+   'images',
+   'supplier',
+   'quantityTotal',
+   'validFrom',
+   'validUntil',
+   'attributes',
+   'publishAt',
+   'unpublishAt',
+] as const
 
 const listingFields: FieldMap<IListing> = {
    id: (l) => l._id.toString(),
@@ -38,6 +62,7 @@ const listingFields: FieldMap<IListing> = {
    status: (l) => l.status,
    city: (l) => l.city,
    country: (l) => l.country,
+   geo: (l) => geoPoint(l.geo),
    images: (l) => l.images,
    supplier: (l) => l.supplier,
    // Admin surface only — §2.1's canonical example of what must never leak.
@@ -71,6 +96,12 @@ export const presentListing = (l: IListing) => present(l, listingFields)
 
 const ENTITY = 'Listing'
 
+/** Free-text search box: NUL stripped (the driver throws on it) and capped so a pasted paragraph never becomes a regex. */
+const searchTerm = (v: unknown) =>
+   typeof v === 'string' ? v.replace(/\0/g, '').trim().slice(0, 80) : ''
+const searchRx = (value: string) =>
+   new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+
 export const listListings = catchAsync(async (req: Request, res: Response) => {
    const { vertical, status, city, q } = req.query
    const filter: Record<string, any> = {}
@@ -78,11 +109,24 @@ export const listListings = catchAsync(async (req: Request, res: Response) => {
    filter.status = status ? status : { $ne: LISTING_STATUS.ARCHIVED }
    if (city) filter.city = city
    // Search every locale — an English-speaking admin should still find a
-   // listing whose French title is the only one filled in.
-   if (q) {
-      filter.$or = LOCALES.map((l) => ({
-         [`title.${l}`]: { $regex: String(q), $options: 'i' },
-      }))
+   // listing whose French title is the only one filled in — plus the fields
+   // a caller actually quotes: slug, city, carrier, flight number, route,
+   // bus operator, car make/model.
+   const term = searchTerm(q)
+   if (term) {
+      const rx = searchRx(term)
+      filter.$or = [
+         ...LOCALES.map((l) => ({ [`title.${l}`]: rx })),
+         { slug: rx },
+         { city: rx },
+         { 'attributes.segments.carrier': rx },
+         { 'attributes.segments.flightNumber': rx },
+         { 'attributes.segments.origin': rx },
+         { 'attributes.segments.destination': rx },
+         { 'attributes.operator': rx },
+         { 'attributes.make': rx },
+         { 'attributes.model': rx },
+      ]
    }
 
    const { items, nextCursor } = await paginate(Listing, filter, req)
@@ -164,9 +208,11 @@ export const createListing = catchAsync(
          req,
          Listing,
          {
-            ...req.body,
+            ...pick(req.body, LISTING_EDITABLE),
+            vertical,
             costPrice: parseMoney(req.body.costPrice),
             sellPrice: parseMoney(req.body.sellPrice),
+            geo: parseGeo(req.body.geo),
             slug: await uniqueSlug(Listing, [title, city]),
             createdBy: (req as any).admin._id,
          },
@@ -211,9 +257,11 @@ export const updateListing = catchAsync(
          }
       }
 
-      const patch = { ...req.body }
-      if (patch.costPrice !== undefined) patch.costPrice = parseMoney(patch.costPrice)
-      if (patch.sellPrice !== undefined) patch.sellPrice = parseMoney(patch.sellPrice)
+      // §BUG-010: never spread the raw body — vertical is immutable on update.
+      const patch: Record<string, any> = pick(req.body, LISTING_EDITABLE)
+      if (req.body.costPrice !== undefined) patch.costPrice = parseMoney(req.body.costPrice)
+      if (req.body.sellPrice !== undefined) patch.sellPrice = parseMoney(req.body.sellPrice)
+      patch.geo = parseGeo(req.body.geo)
 
       const listing = await updateDoc<IListing>(req, Listing, req.params.id, patch, {
          entityType: ENTITY,
@@ -267,6 +315,9 @@ export const duplicateListing = catchAsync(
       delete copy.createdAt
       delete copy.updatedAt
       delete copy.id
+      // A sell-by date belongs to the departure it was set for, and the panel
+      // has no way to change it on the copy.
+      delete copy.validUntil
       copy.title = req.body.title || {
          ...source.title,
          fr: `${resolveLocalized(source.title)} (copie)`,
@@ -394,7 +445,6 @@ const CSV_COLUMNS = [
    'sell_price_eur',
    'quantity',
    'valid_from',
-   'valid_until',
    'supplier',
 ] as const
 
@@ -402,8 +452,8 @@ export const csvTemplate = catchAsync(async (req: Request, res: Response) => {
    const vertical = String(req.query.vertical || 'BUS')
    const example =
       vertical === 'PROPERTY'
-         ? 'Villa 4 chambres,4-bedroom villa,Kinshasa,Belle villa à Gombe,Fine villa in Gombe,0,250000,,,1,,,Agence Gombe'
-         : 'Kinshasa → Lubumbashi,Kinshasa → Lubumbashi,Kinshasa,Départ quotidien 08h00,Daily 08:00 departure,45,70,196000,64,40,2026-09-01,2026-09-30,Transco'
+         ? 'Villa 4 chambres,4-bedroom villa,Kinshasa,Belle villa à Gombe,Fine villa in Gombe,0,250000,,,1,,Agence Gombe'
+         : 'Kinshasa → Lubumbashi,Kinshasa → Lubumbashi,Kinshasa,Départ quotidien 08h00,Daily 08:00 departure,45,70,196000,64,40,2026-09-01,Transco'
    res.set('Content-Type', 'text/csv')
    res.set('Content-Disposition', `attachment; filename="${vertical.toLowerCase()}-template.csv"`)
    return res.send(`${CSV_COLUMNS.join(',')}\n${example}\n`)
@@ -479,10 +529,8 @@ export const importListingsCsv = catchAsync(
             }
             if (!Number(r.quantity)) push('quantity', 'Quantity must be above zero')
          }
-         if (r.valid_until && Number.isNaN(Date.parse(r.valid_until))) {
-            push('valid_until', 'Not a valid date (use YYYY-MM-DD)')
-         }
 
+         // Older spreadsheets still carry a valid_until column; it is ignored.
          prepared.push({
             vertical,
             title: { fr: r.title_fr, en: r.title_en || '' },
@@ -498,7 +546,6 @@ export const importListingsCsv = catchAsync(
             },
             quantityTotal: Number(r.quantity) || 0,
             validFrom: r.valid_from ? new Date(r.valid_from) : undefined,
-            validUntil: r.valid_until ? new Date(r.valid_until) : undefined,
             supplier: r.supplier || undefined,
             status: LISTING_STATUS.DRAFT,
             slug: slugify(`${r.title_fr}-${r.city}-${Date.now()}-${idx}`, {

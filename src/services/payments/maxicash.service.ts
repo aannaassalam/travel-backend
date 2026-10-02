@@ -334,6 +334,10 @@ export interface StatusResult {
    providerStatus: string
    /** The merchant reference MaxiCash says this payment was for, if it says. */
    reference: string | null
+   /** §BUG-003: provider-reported amount (minor units) and currency, if present,
+    *  so the caller can confirm the money matches the order before marking PAID. */
+   amount: number | null
+   currency: string | null
    raw: unknown
 }
 
@@ -367,7 +371,14 @@ export const fetchPaymentStatus = async (paymentId: string): Promise<StatusResul
    const cfg = maxicashConfig()
 
    if (!paymentId) {
-      return { outcome: 'PENDING', providerStatus: 'NO_PAYMENT_ID', reference: null, raw: null }
+      return {
+         outcome: 'PENDING',
+         providerStatus: 'NO_PAYMENT_ID',
+         reference: null,
+         amount: null,
+         currency: null,
+         raw: null,
+      }
    }
 
    const data = await postJson(`${cfg.gatewayUrl}/Merchant/api.asmx/PayNowStatus`, {
@@ -378,24 +389,43 @@ export const fetchPaymentStatus = async (paymentId: string): Promise<StatusResul
       Language: 'en',
    })
 
+   /**
+    * §BUG-003: `ResponseStatus` is the ENVELOPE — did the lookup CALL succeed —
+    * not the payment's own state. Conflating them read a successful *lookup* as a
+    * successful *payment*. The payment state is a separate field; if the lookup
+    * itself did not succeed, or no payment-state field is present, we fail closed
+    * to PENDING rather than guess.
+    */
+   const apiOk = String(data?.ResponseStatus ?? '').toLowerCase() === 'success'
    const providerStatus = String(
-      data?.ResponseStatus ?? data?.Status ?? data?.ResponseData ?? 'UNKNOWN'
+      data?.Status ?? data?.PaymentStatus ?? data?.TransactionStatus ?? 'UNKNOWN'
    ).toUpperCase()
 
-   const outcome: SettlementOutcome = SUCCESS_STATUSES.has(providerStatus)
-      ? 'PAID'
-      : FAILURE_STATUSES.has(providerStatus)
-        ? 'FAILED'
-        : 'PENDING'
+   const outcome: SettlementOutcome = !apiOk
+      ? 'PENDING'
+      : SUCCESS_STATUSES.has(providerStatus)
+        ? 'PAID'
+        : FAILURE_STATUSES.has(providerStatus)
+          ? 'FAILED'
+          : 'PENDING'
 
-   // Field name is undocumented, so every spelling seen in their other
+   // Field names are undocumented, so every spelling seen in their other
    // responses is tried.
    const reference =
       data?.Reference ?? data?.reference ?? data?.MerchantReference ?? data?.TransactionReference
+   const amountRaw =
+      data?.Amount ?? data?.amount ?? data?.PaymentAmount ?? data?.TransactionAmount
+   const amountNum =
+      amountRaw === undefined || amountRaw === null || amountRaw === ''
+         ? null
+         : Number(amountRaw)
+   const currencyRaw = data?.Currency ?? data?.currency ?? data?.CurrencyCode
    return {
       outcome,
       providerStatus,
       reference: reference ? String(reference).toUpperCase() : null,
+      amount: amountNum !== null && Number.isFinite(amountNum) ? amountNum : null,
+      currency: currencyRaw ? String(currencyRaw).toUpperCase() : null,
       raw: data,
    }
 }

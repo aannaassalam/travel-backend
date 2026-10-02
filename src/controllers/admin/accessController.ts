@@ -387,6 +387,9 @@ export const updateRole = catchAsync(
       if (input.name !== undefined) role.name = input.name
       if (input.description !== undefined) role.description = input.description
       if (input.permissions !== undefined) role.permissions = input.permissions
+      // A permission retired from the catalogue (security:read was one) would
+      // fail the schema enum on this save; it grants nothing anyway, so drop it.
+      role.permissions = role.permissions.filter((p) => (PERMISSIONS as readonly string[]).includes(p))
       await role.save()
 
       /**

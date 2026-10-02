@@ -1,5 +1,5 @@
 import { Request, Response } from 'express'
-import { LISTING_STATUS, VERTICALS } from '../../constants/domain.constants'
+import { LISTING_STATUS, LOCALES, VERTICALS } from '../../constants/domain.constants'
 import {
    HotelWithRooms,
    presentHotel,
@@ -38,9 +38,13 @@ const cheapestRoom = (rooms: { sellPrice?: Money }[]) =>
 
 /** Escapes a user string before it reaches a $regex. */
 const rx = (value: string) =>
-   new RegExp(value.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+   // A NUL byte cannot be sent to MongoDB in a regex (the driver throws),
+   // and no name contains one.
+   new RegExp(value.replace(/\0/g, '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
 
 const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+/** Free-text search box: capped so a pasted paragraph never becomes a regex. */
+const term = (v: unknown) => str(v)?.slice(0, 80)
 const int = (v: unknown) => {
    const n = Number(v)
    return Number.isFinite(n) ? Math.trunc(n) : undefined
@@ -64,8 +68,22 @@ const SORTS: Record<string, Record<string, 1 | -1>> = {
 }
 
 /**
+ * Besides the title and city, the attributes the search box on a listing page
+ * looks in: the carrier, the car, the meeting point, the kind of property.
+ */
+// A flight's carrier lives on its segments, so an airline name matches there.
+const SEARCHED_ATTRIBUTES = [
+   'operator',
+   'segments.carrier',
+   'meetingPoint',
+   'model',
+   'make',
+   'propertyType',
+]
+
+/**
  * GET /api/v1/listings
- * Allow-listed params: vertical, city, origin, destination, cabin, tripType,
+ * Allow-listed params: q, vertical, city, origin, destination, cabin, tripType,
  * propertyType, operator, category, transmission, withDriver, bedrooms,
  * minPrice, maxPrice, sort, limit, cursor.
  */
@@ -79,6 +97,21 @@ export const searchListings = catchAsync(async (req: Request, res: Response) => 
          throw new AppError('Unknown vertical', 400)
       }
       filter.vertical = vertical
+   }
+
+   // Free text, composed with every filter below rather than replacing them.
+   if (term(q.q)) {
+      const value = rx(term(q.q)!)
+      filter.$and = [
+         ...(filter.$and ?? []),
+         {
+            $or: [
+               ...LOCALES.map((l) => ({ [`title.${l}`]: value })),
+               { city: value },
+               ...SEARCHED_ATTRIBUTES.map((a) => ({ [`attributes.${a}`]: value })),
+            ],
+         },
+      ]
    }
 
    if (str(q.city)) filter.city = rx(str(q.city)!)
@@ -272,6 +305,18 @@ export const searchHotels = catchAsync(async (req: Request, res: Response) => {
    if (str(q.destination)) {
       const value = rx(str(q.destination)!)
       filter.$or = [{ city: value }, { name: value }, { address: value }]
+   }
+   if (term(q.q)) {
+      const value = rx(term(q.q)!)
+      filter.$and = [
+         {
+            $or: [
+               ...LOCALES.map((l) => ({ [`name.${l}`]: value })),
+               { address: value },
+               { city: value },
+            ],
+         },
+      ]
    }
    const stars = str(q.stars)
       ?.split(',')

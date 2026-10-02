@@ -13,6 +13,40 @@ import {
  *
  * Single document — there is one platform.
  */
+
+/**
+ * One office, for the footer and the contact page. The office has several of
+ * them in several cities; the primary one is the public site's main contact.
+ */
+export interface IOffice {
+   _id: Types.ObjectId
+   name: string
+   city: string
+   streetAddress: string
+   phone: string
+   whatsapp: string
+   email: string
+   hours: string
+   geo?: { lat: number; lng: number }
+   /** Exactly one — it fills the legacy single-office fields on the public API. */
+   isPrimary: boolean
+}
+
+const officeSchema = new Schema<IOffice>(
+   {
+      name: { type: String, required: true, trim: true },
+      city: { type: String, required: true, trim: true },
+      streetAddress: { type: String, default: '' },
+      phone: { type: String, default: '' },
+      whatsapp: { type: String, default: '' },
+      email: { type: String, default: '' },
+      hours: { type: String, default: '' },
+      geo: { lat: Number, lng: Number },
+      isPrimary: { type: Boolean, default: false },
+   },
+   { _id: true }
+)
+
 export interface ISettings extends Document {
    companyName: string
    supportEmail: string
@@ -23,11 +57,7 @@ export interface ISettings extends Document {
     * so moving office or changing a number meant a developer and a deploy —
     * §15 is explicit that anything the office changes is admin-owned config.
     */
-   whatsappNumber: string
-   streetAddress: string
-   city: string
-   country: string
-   officeHours: string
+   offices: IOffice[]
    enabledLocales: string[]
    defaultLocale: string
    enabledCurrencies: string[]
@@ -55,23 +85,22 @@ const settingsSchema = new Schema<ISettings>(
       companyName: { type: String, default: 'Travel DRC' },
       supportEmail: { type: String, default: '' },
       supportPhone: { type: String, default: '' },
-      whatsappNumber: { type: String, default: '' },
-      streetAddress: { type: String, default: '' },
-      city: { type: String, default: '' },
-      country: { type: String, default: 'CD' },
-      officeHours: { type: String, default: '' },
+      offices: { type: [officeSchema], default: [] },
       enabledLocales: { type: [String], default: ['fr', 'en'] },
       defaultLocale: { type: String, enum: LOCALES, default: DEFAULT_LOCALE },
       enabledCurrencies: { type: [String], default: [...CURRENCIES] },
       baseCurrency: { type: String, default: BASE_CURRENCY },
-      priceChangeGuardPercent: { type: Number, default: 40 },
-      holdTtlOnlineMinutes: { type: Number, default: 20 },
-      holdTtlCashHours: { type: Number, default: 48 },
-      maxConcurrentCashHolds: { type: Number, default: 3 },
-      customerExportRowCap: { type: Number, default: 5000 },
-      atRiskWindowDays: { type: Number, default: 7 },
-      enquirySlaHours: { type: Number, default: 4 },
-      passportRetentionDays: { type: Number, default: 90 },
+      // Bounded + required: updateSettings copies the body onto the doc and
+      // save() validates, so a 0/negative/null value (which would e.g. purge
+      // every passport or expire every hold instantly) is refused as a 400.
+      priceChangeGuardPercent: { type: Number, default: 40, required: true, min: 0, max: 100 },
+      holdTtlOnlineMinutes: { type: Number, default: 20, required: true, min: 1, max: 1440 },
+      holdTtlCashHours: { type: Number, default: 48, required: true, min: 1, max: 720 },
+      maxConcurrentCashHolds: { type: Number, default: 3, required: true, min: 1, max: 50 },
+      customerExportRowCap: { type: Number, default: 5000, required: true, min: 1, max: 100000 },
+      atRiskWindowDays: { type: Number, default: 7, required: true, min: 1, max: 365 },
+      enquirySlaHours: { type: Number, default: 4, required: true, min: 1, max: 720 },
+      passportRetentionDays: { type: Number, default: 90, required: true, min: 1, max: 3650 },
       maintenanceMode: { type: Boolean, default: false },
    },
    { timestamps: true }

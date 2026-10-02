@@ -1,5 +1,5 @@
 import { Request, Response } from 'express'
-import { LISTING_STATUS, MENU_SECTIONS } from '../../constants/domain.constants'
+import { LISTING_STATUS, LOCALES, MENU_SECTIONS } from '../../constants/domain.constants'
 import { presentRestaurant, presentRestaurants } from '../../dto/public/catalogue.dto'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
 import AppError from '../../utils/appError'
@@ -46,19 +46,38 @@ const fromPrices = async (ids: any[]) => {
 }
 
 /**
- * GET /api/v1/restaurants?city=Kinshasa&cuisine=Congolais&sort=price_asc
+ * Escaped before it reaches a RegExp: an unescaped query string lets a caller
+ * post `.*` — or something far more expensive — and have the database
+ * evaluate it.
+ */
+const escapeRx = (value: string) =>
+   value.replace(/\0/g, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * GET /api/v1/restaurants?q=poisson&city=Kinshasa&cuisine=Congolais&sort=price_asc
  */
 export const searchRestaurants = catchAsync(async (req: Request, res: Response) => {
    const filter: Record<string, unknown> = { status: PUBLIC_STATUS }
 
    const city = String(req.query.city ?? req.query.destination ?? '').trim()
-   // Anchored, case-insensitive, and escaped: an unescaped query string reaching
-   // a RegExp lets a caller post `.*` — or something far more expensive — and
-   // have the database evaluate it.
-   if (city) filter.city = new RegExp(`^${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+   // Anchored and case-insensitive: the city filter is a pick, not a search.
+   if (city) filter.city = new RegExp(`^${escapeRx(city)}$`, 'i')
 
    const cuisine = String(req.query.cuisine ?? '').trim()
    if (cuisine) filter.cuisines = cuisine
+
+   // The search box: a substring of the name in any locale, a cuisine, the
+   // address or the city. Capped so a pasted paragraph never becomes a regex.
+   const q = String(req.query.q ?? '').trim().slice(0, 80)
+   if (q) {
+      const value = new RegExp(escapeRx(q), 'i')
+      filter.$or = [
+         ...LOCALES.map((l) => ({ [`name.${l}`]: value })),
+         { cuisines: value },
+         { address: value },
+         { city: value },
+      ]
+   }
 
    const limit = Math.min(Math.max(Number(req.query.limit) || 24, 1), 60)
 

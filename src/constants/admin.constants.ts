@@ -40,7 +40,6 @@ export const PERMISSIONS = [
    'notifications:write',
    'settings:read',
    'settings:write',
-   'security:read',
    'audit:read',
    'users:read',
    'users:write',

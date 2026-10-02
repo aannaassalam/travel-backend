@@ -56,6 +56,8 @@ const CITY_CENTRES: Record<string, { lat: number; lng: number }> = {
    Kisangani: { lat: 0.5153, lng: 25.19 },
    'Mbuji-Mayi': { lat: -6.136, lng: 23.5898 },
    Kananga: { lat: -5.896, lng: 22.4166 },
+   Kolwezi: { lat: -10.7147, lng: 25.4667 },
+   Mbandaka: { lat: 0.0487, lng: 18.2603 },
 }
 
 /**

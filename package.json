@@ -1,7 +1,7 @@
 {
   "name": "travel-backend",
   "version": "1.0.0",
-  "description": "Travel & property booking platform — API",
+  "description": "Travel & property booking platform \u2014 API",
   "private": "true",
   "main": "./src/server.ts",
   "scripts": {
@@ -21,7 +21,10 @@
     "migrate:customer-passwords": "ts-node src/scripts/migrateCustomerPasswords.ts",
     "check:payments": "ts-node src/scripts/checkPayments.ts",
     "check:rbac": "ts-node src/scripts/checkRbac.ts",
-    "fix:geo": "ts-node src/scripts/fixInventoryGeo.ts"
+    "check:catalogue": "ts-node src/scripts/checkCatalogue.ts",
+    "fix:geo": "ts-node src/scripts/fixInventoryGeo.ts",
+    "qa:inventory": "ts-node src/scripts/addQaInventory.ts",
+    "firebase:env": "ts-node src/scripts/firebaseEnv.ts"
   },
   "author": "Anas Alam",
   "devDependencies": {

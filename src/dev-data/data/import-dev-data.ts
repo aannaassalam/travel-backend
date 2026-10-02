@@ -4,7 +4,10 @@ import mongoose from 'mongoose';
 // import AddressModel from '../../models/address/addressModel';
 
 // dotenv.config({ path: '../../../.env' });
-const DB: string = 'mongodb+srv://biswaruprx21:PG11lal6xMOE1FqI@cluster1.dvfjtgc.mongodb.net/maple_tree_tax?retryWrites=true&w=majority&appName=Cluster1'
+// §BUG-004: never commit credentials. Read the same env var the app connects
+// with (see src/config/db.config.ts). The compromised literal that was here must
+// be rotated on the Atlas cluster — removing it from source does not revoke it.
+const DB: string = process.env.MONGODB_URI || ''
 
 mongoose
   .connect(DB)

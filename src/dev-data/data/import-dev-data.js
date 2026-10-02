@@ -41,7 +41,9 @@ var mongoose_1 = require("mongoose");
 // import * as dotenv from 'dotenv';
 var addressModel_1 = require("../../models/address/addressModel");
 // dotenv.config({ path: '../../../.env' });
-var DB = 'mongodb+srv://biswaruprx21:PG11lal6xMOE1FqI@cluster1.dvfjtgc.mongodb.net/maple_tree_tax?retryWrites=true&w=majority&appName=Cluster1';
+// §BUG-004: never commit credentials. Read the same env var the app connects
+// with. The compromised literal removed here must be rotated on the Atlas cluster.
+var DB = process.env.MONGODB_URI || '';
 mongoose_1.default
     .connect(DB)
     .then(function () { return console.log('DB connection established!'); })

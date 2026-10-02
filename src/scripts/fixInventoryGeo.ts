@@ -12,6 +12,7 @@ const CENTRES: Record<string, { lat: number; lng: number }> = {
   Goma: { lat: -1.6585, lng: 29.2206 }, Bukavu: { lat: -2.5083, lng: 28.8608 },
   Matadi: { lat: -5.8167, lng: 13.45 }, Kisangani: { lat: 0.5153, lng: 25.19 },
   'Mbuji-Mayi': { lat: -6.136, lng: 23.5898 }, Kananga: { lat: -5.896, lng: 22.4166 },
+  Kolwezi: { lat: -10.7147, lng: 25.4667 }, Mbandaka: { lat: 0.0487, lng: 18.2603 },
 }
 const km = (a: any, b: any) => {
   const R = 6371, d = (x: number) => (x * Math.PI) / 180
@@ -28,7 +29,7 @@ const apply = process.argv.includes('--apply')
     const docs = await db.collection(col).find({}, { projection: { name:1, city:1, geo:1 } }).toArray() as any[]
     for (const d of docs) {
       const c = CENTRES[d.city]
-      if (!c) continue
+      if (!c) { console.log(`  ${col.padEnd(11)} ${String(d.city).padEnd(12)} unknown city — add it to CENTRES`); continue }
       const off = d.geo ? km(d.geo, c) : null
       if (off !== null && off <= 25) continue          // already sensible
       const j = () => (Math.random() - 0.5) * 0.055

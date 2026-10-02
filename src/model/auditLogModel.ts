@@ -20,7 +20,7 @@ export interface IAuditLogDocument extends Document {
 const auditLogSchema = new Schema<IAuditLogDocument>(
    {
       actorId: { type: Schema.Types.ObjectId, ref: 'AdminUser' },
-      actorEmail: { type: String, default: 'anonymous' },
+      actorEmail: { type: String, default: 'anonymous', index: true },
       action: { type: String, required: true, index: true },
       entityType: { type: String, index: true },
       entityId: { type: String, index: true },

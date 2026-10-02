@@ -77,6 +77,24 @@ const consentFields: FieldMap<any> = {
    acceptedAt: (c) => c.acceptedAt?.toISOString?.() ?? c.acceptedAt,
 }
 
+/**
+ * What the customer's "progress" is made of. Office-side entries — internal
+ * notes, stock released, a document withdrawn — are not theirs to read.
+ */
+const CUSTOMER_EVENTS = new Set([
+   'ORDER_CREATED',
+   'PAYMENT_STARTED',
+   'PAYMENT_RECEIVED',
+   'PAYMENT_FAILED',
+   'PAYMENT_METHOD_CHANGED',
+   'CASH_RECEIVED',
+   'STATUS_CONFIRMED',
+   'STATUS_COMPLETED',
+   'STATUS_CANCELLED',
+   'AUTO_CANCELLED',
+   'DOCUMENTS_ISSUED',
+])
+
 const timelineFields: FieldMap<any> = {
    at: (t) => t.at?.toISOString?.() ?? t.at,
    event: (t) => t.event,
@@ -138,7 +156,9 @@ export const presentOrder = (o: any) => {
          fileName: d.fileName,
          issuedAt: d.uploadedAt?.toISOString?.(),
       })),
-      timeline: (o.timeline ?? []).map((t: any) => present(t, timelineFields)),
+      timeline: (o.timeline ?? [])
+         .filter((t: any) => CUSTOMER_EVENTS.has(t.event))
+         .map((t: any) => present(t, timelineFields)),
       travelDate: o.travelDate?.toISOString?.(),
       createdAt: o.createdAt?.toISOString?.(),
    }

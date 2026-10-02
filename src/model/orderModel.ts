@@ -124,6 +124,12 @@ export interface IOrder extends Document {
    reference: string
    /** §4.6: set by the public checkout so a retried POST replays, never duplicates. */
    idempotencyKey?: string
+   /**
+    * §BUG-009: who the key belongs to — the signed-in customer id, else the
+    * normalised contact phone. A replay only returns this order to the SAME
+    * caller; another caller reusing the key is refused, never handed this order.
+    */
+   idempotencyScope?: string
    /** Rate-plan documents holding stock for this order, so payment commits exactly what was held. */
    heldRatePlanIds?: Types.ObjectId[]
    status: OrderStatus
@@ -187,6 +193,8 @@ const orderSchema = new Schema<IOrder>(
        * index would let exactly one of them exist and reject every one after.
        */
       idempotencyKey: { type: String, unique: true, sparse: true, index: true },
+      /** §BUG-009: scopes a replay to its original caller. */
+      idempotencyScope: { type: String },
       heldRatePlanIds: { type: [Schema.Types.ObjectId], default: undefined },
       status: {
          type: String,

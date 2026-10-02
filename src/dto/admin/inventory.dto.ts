@@ -3,6 +3,7 @@ import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
 import {
    availableCurrencies,
    baseAmount,
+   geoPoint,
    resolveLocalized,
    translationStatus,
 } from '../../model/shared.schema'
@@ -26,7 +27,7 @@ const hotelFields: FieldMap<IHotel> = {
    address: (h) => h.address,
    city: (h) => h.city,
    country: (h) => h.country,
-   geo: (h) => h.geo,
+   geo: (h) => geoPoint(h.geo),
    amenities: (h) => h.amenities,
    images: (h) => h.images,
    supplier: (h) => h.supplier,
@@ -117,7 +118,7 @@ const restaurantFields: FieldMap<IRestaurant> = {
    address: (r) => r.address,
    city: (r) => r.city,
    country: (r) => r.country,
-   geo: (r) => r.geo,
+   geo: (r) => geoPoint(r.geo),
    images: (r) => r.images,
    openingHours: (r) => r.openingHours,
    prepTimeMinutes: (r) => r.prepTimeMinutes,

@@ -44,6 +44,25 @@ export interface PricedItem {
 const label = (value: any): string =>
    typeof value === 'string' ? value : value?.fr || value?.en || 'Article'
 
+/**
+ * §BUG-008: server-side date guard. The client sends WHICH dates, never whether
+ * they are sane — a reversed range, a past date, or `endDate: "banana"` must be
+ * refused here, not priced. Throws 'INVALID_DATES', which createOrder maps to 400.
+ */
+const DAY_MS = 86_400_000
+const MAX_SPAN_DAYS = 365
+const validateDates = (startRaw: string, endRaw: string) => {
+   const start = new Date(startRaw).getTime()
+   const end = new Date(endRaw).getTime()
+   if (Number.isNaN(start) || Number.isNaN(end)) throw new Error('INVALID_DATES')
+   if (end <= start) throw new Error('INVALID_DATES')
+   // Start of today in server time: a same-day booking is valid, yesterday is not.
+   const today = new Date()
+   today.setHours(0, 0, 0, 0)
+   if (start < today.getTime()) throw new Error('INVALID_DATES')
+   if ((end - start) / DAY_MS > MAX_SPAN_DAYS) throw new Error('INVALID_DATES')
+}
+
 /** A currency is only offered when every component of the price was typed in it. */
 const intersectCurrencies = (a: Record<string, number>, b: Record<string, number>) => {
    const out: Record<string, number> = {}
@@ -58,6 +77,9 @@ export const priceListingItem = async (item: RequestedItem): Promise<PricedItem>
    })
    if (!listing) throw new Error('ITEM_UNAVAILABLE')
    if (listing.vertical === VERTICALS.PROPERTY) throw new Error('PROPERTY_IS_ENQUIRY_ONLY')
+
+   // §BUG-008: a dated product (car hire, dated activity) carries a range — guard it.
+   if (item.startDate && item.endDate) validateDates(item.startDate, item.endDate)
 
    // Nights for a dated product, otherwise a single unit. Same helper the
    // margin maths uses, so revenue and cost always span the same period.
@@ -99,6 +121,8 @@ export const priceStayItem = async (item: RequestedItem): Promise<PricedItem> =>
    if (!item.roomTypeId || !item.startDate || !item.endDate) {
       throw new Error('STAY_REQUIRES_ROOM_AND_DATES')
    }
+   // §BUG-008: reject invalid, reversed, past or absurdly long stays before pricing.
+   validateDates(item.startDate, item.endDate)
    const roomType = await RoomType.findById(item.roomTypeId)
    if (!roomType) throw new Error('ITEM_UNAVAILABLE')
 

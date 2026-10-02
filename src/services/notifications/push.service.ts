@@ -24,6 +24,21 @@ import { ACTIVE_DEVICE_MS, DeviceToken } from '../../model/deviceTokenModel'
  * used to be Node quoting the "file name" (the entire key) in its error.
  */
 const serviceAccount = (): Record<string, any> | null => {
+   /**
+    * The three fields firebase-admin actually uses, as separate variables.
+    * For hosts that cap the size of all environment properties together
+    * (Elastic Beanstalk: 4 KB) — the whole key file does not fit, these do.
+    * The private key's line breaks arrive as the two characters backslash-n.
+    */
+   const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env
+   if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
+      return {
+         projectId: FIREBASE_PROJECT_ID,
+         clientEmail: FIREBASE_CLIENT_EMAIL,
+         privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      }
+   }
+
    const value = (
       process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT_FILE
    )?.trim()

@@ -11,7 +11,7 @@ import {
    presentRoomTypes,
 } from '../../dto/admin/inventory.dto'
 import { Hotel, RatePlan, RoomType } from '../../model/hotelModel'
-import { baseAmount, parseMoney, resolveLocalized } from '../../model/shared.schema'
+import { baseAmount, parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
 import { getSettings } from '../../model/settingsModel'
 import {
    archiveDoc,
@@ -22,10 +22,48 @@ import {
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
+import { pick } from '../../utils/pick'
 import { sendResponse } from '../../utils/response'
 import { uniqueSlug } from '../../utils/uniqueSlug'
 
 const ENTITY = 'Hotel'
+
+/**
+ * §BUG-010: fields a caller may set. geo is parsed and written explicitly;
+ * slug, status, createdBy, rating and reviewCount are never taken from the body.
+ */
+const HOTEL_EDITABLE = [
+   'name',
+   'description',
+   'stars',
+   'address',
+   'city',
+   'country',
+   'amenities',
+   'images',
+   'supplier',
+   'checkInTime',
+   'checkOutTime',
+   'policies',
+] as const
+
+/** §BUG-010: `hotel` comes from the route, status/_id never from the body. */
+const ROOMTYPE_EDITABLE = [
+   'name',
+   'description',
+   'maxAdults',
+   'maxChildren',
+   'beds',
+   'amenities',
+   'images',
+   'sizeSqm',
+] as const
+
+/** Free-text search box: NUL stripped (the driver throws on it) and capped so a pasted paragraph never becomes a regex. */
+const searchTerm = (v: unknown) =>
+   typeof v === 'string' ? v.replace(/\0/g, '').trim().slice(0, 80) : ''
+const searchRx = (value: string) =>
+   new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
 
 export const listHotels = catchAsync(async (req: Request, res: Response) => {
    const { status, city, q } = req.query
@@ -33,11 +71,15 @@ export const listHotels = catchAsync(async (req: Request, res: Response) => {
    // Archived listings stay in the database forever but are out of the way.
    filter.status = status ? status : { $ne: LISTING_STATUS.ARCHIVED }
    if (city) filter.city = city
-   // Search every locale, not just the default one.
-   if (q) {
-      filter.$or = LOCALES.map((l) => ({
-         [`name.${l}`]: { $regex: String(q), $options: 'i' },
-      }))
+   // Search every locale, not just the default one — plus city and slug.
+   const term = searchTerm(q)
+   if (term) {
+      const rx = searchRx(term)
+      filter.$or = [
+         ...LOCALES.map((l) => ({ [`name.${l}`]: rx })),
+         { city: rx },
+         { slug: rx },
+      ]
    }
 
    const { items, nextCursor } = await paginate(Hotel, filter, req)
@@ -68,7 +110,8 @@ export const createHotel = catchAsync(async (req: Request, res: Response) => {
       req,
       Hotel,
       {
-         ...req.body,
+         ...pick(req.body, HOTEL_EDITABLE),
+         geo: parseGeo(req.body.geo),
          slug: await uniqueSlug(Hotel, [resolveLocalized(name), city]),
          createdBy: (req as any).admin._id,
       },
@@ -78,9 +121,13 @@ export const createHotel = catchAsync(async (req: Request, res: Response) => {
 })
 
 export const updateHotel = catchAsync(async (req: Request, res: Response) => {
-   const hotel = await updateDoc<any>(req, Hotel, req.params.id, req.body, {
-      entityType: ENTITY,
-   })
+   const hotel = await updateDoc<any>(
+      req,
+      Hotel,
+      req.params.id,
+      { ...pick(req.body, HOTEL_EDITABLE), geo: parseGeo(req.body.geo) },
+      { entityType: ENTITY }
+   )
    return sendResponse(res, 200, 'Hotel updated', { hotel: presentHotel(hotel) })
 })
 
@@ -171,7 +218,7 @@ export const createRoomType = catchAsync(async (req: Request, res: Response) => 
    const roomType = await createDoc<any>(
       req,
       RoomType,
-      { ...req.body, hotel: req.params.id },
+      { ...pick(req.body, ROOMTYPE_EDITABLE), hotel: req.params.id },
       { entityType: 'RoomType' }
    )
    return sendResponse(res, 201, 'Room type created', {
@@ -184,7 +231,7 @@ export const updateRoomType = catchAsync(async (req: Request, res: Response) => 
       req,
       RoomType,
       req.params.roomTypeId,
-      req.body,
+      pick(req.body, ROOMTYPE_EDITABLE),
       { entityType: 'RoomType' }
    )
    return sendResponse(res, 200, 'Room type updated', {
