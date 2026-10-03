@@ -17,7 +17,7 @@ import AdminUser from '../../model/adminUserModel'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
-import { sendEmail } from '../../utils/email_sms'
+import { emailConfigured, sendEmail } from '../../utils/email_sms'
 import { sendResponse } from '../../utils/response'
 
 /**
@@ -281,16 +281,6 @@ const generateTemporaryPassword = () =>
 const temporaryPasswordExpiry = () =>
    new Date(Date.now() + PASSWORD_POLICY.TEMP_PASSWORD_TTL_MS)
 
-/**
- * Without a mail transport the legacy sender still tries Gmail with no
- * credentials, which costs the request several seconds and can never succeed.
- */
-const emailConfigured = () =>
-   Boolean(
-      (process.env.AZURE_COMMUNICATION_SERVICES_CONNECTION_STRING &&
-         process.env.AZURE_SENDER_EMAIL) ||
-         (process.env.EMAIL_USERNAME && process.env.EMAIL_PASSWORD)
-   )
 
 /**
  * Best effort. `true` only when the send resolved, so the person who created

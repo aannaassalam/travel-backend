@@ -8,6 +8,7 @@
     "start": "node ./build/server.js",
     "dev": "tsc -p tsconfig.json && ts-node-dev --respawn --transpile-only ./src/server.ts",
     "build": "tsc -p tsconfig.json",
+    "bundle": "npm run build && rm -f deploy.zip && zip -qr deploy.zip build package.json package-lock.json Procfile .ebextensions .platform && echo \"deploy.zip ready — upload it in the Elastic Beanstalk console\"",
     "lint": "npx eslint . --fix",
     "clean": "rimraf coverage build tmp node_modules",
     "seed:admin": "ts-node src/scripts/seedAdmin.ts",
@@ -24,7 +25,8 @@
     "check:catalogue": "ts-node src/scripts/checkCatalogue.ts",
     "fix:geo": "ts-node src/scripts/fixInventoryGeo.ts",
     "qa:inventory": "ts-node src/scripts/addQaInventory.ts",
-    "firebase:env": "ts-node src/scripts/firebaseEnv.ts"
+    "firebase:env": "ts-node src/scripts/firebaseEnv.ts",
+    "email:test": "ts-node src/scripts/sendTestEmail.ts"
   },
   "author": "Anas Alam",
   "devDependencies": {

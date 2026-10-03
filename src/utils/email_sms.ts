@@ -1,151 +1,100 @@
 import msg91 from 'msg91'
 import nodemailer from 'nodemailer'
-import twilio from 'twilio'
-import catchAsync from './catchAsync'
 import AppError from './appError'
-import AzureEmailService from './azureEmailService'
 
 interface EmailOptions {
    email: string
    subject: string
    html: string
-   attachments?: any
-}
-interface SmsOptions {
-   to: string
-   body: string
+   text?: string
+   attachments?: nodemailer.SendMailOptions['attachments']
 }
 
-// Azure email service instance
-let azureEmailService: AzureEmailService | null = null;
+/**
+ * Outgoing mail over SMTP — the mailbox's own outgoing server, nothing else.
+ *
+ * EMAIL_HOST / EMAIL_PORT are the "outgoing server" and "SMTP port" of the
+ * mailbox; EMAIL_SECURE picks SSL/TLS (465) over STARTTLS (587) and is
+ * inferred from the port when unset. The incoming server and IMAP port are
+ * for reading mail and are deliberately not read: this API only sends.
+ */
+export const emailConfig = () => {
+   const host = process.env.EMAIL_HOST
+   const user = process.env.EMAIL_USERNAME
+   const pass = process.env.EMAIL_PASSWORD
+   if (!host || !user || !pass) return null
+   const port = Number(process.env.EMAIL_PORT) || 587
+   const secure =
+      process.env.EMAIL_SECURE === undefined || process.env.EMAIL_SECURE === ''
+         ? port === 465
+         : process.env.EMAIL_SECURE === 'true'
+   return {
+      host,
+      port,
+      secure,
+      user,
+      pass,
+      from: `"${process.env.EMAIL_FROM_NAME || 'Flexi Agency'}" <${process.env.EMAIL_FROM || user}>`,
+   }
+}
 
-// Initialize Azure email service if configuration is available
-const initializeAzureEmailService = (): AzureEmailService | null => {
-    if (azureEmailService) return azureEmailService;
-    
-    const connectionString = process.env.AZURE_COMMUNICATION_SERVICES_CONNECTION_STRING;
-    const senderAddress = process.env.AZURE_SENDER_EMAIL;
-    
-    if (connectionString && senderAddress) {
-        try {
-            azureEmailService = new AzureEmailService();
-            return azureEmailService;
-        } catch (error) {
-            console.error('Failed to initialize Azure email service:', error);
-            return null;
-        }
-    }
-    
-    return null;
-};
+export const emailConfigured = () => emailConfig() !== null
+
+// One pooled connection for the process, opened on first use.
+let transporter: nodemailer.Transporter | null = null
+const transport = () => {
+   const cfg = emailConfig()
+   if (!cfg) {
+      throw new AppError(
+         'Email is not configured: set EMAIL_HOST, EMAIL_PORT, EMAIL_USERNAME and EMAIL_PASSWORD',
+         500
+      )
+   }
+   transporter ??= nodemailer.createTransport({
+      host: cfg.host,
+      port: cfg.port,
+      secure: cfg.secure,
+      // On 587 insist on upgrading to TLS rather than ever sending the
+      // password in the clear.
+      requireTLS: !cfg.secure,
+      auth: { user: cfg.user, pass: cfg.pass },
+      pool: true,
+   })
+   return transporter
+}
+
+/** Connects and authenticates without sending — what `npm run email:test` calls first. */
+export const verifyEmailTransport = () => transport().verify()
 
 export const sendEmail = async (options: EmailOptions): Promise<void> => {
-   // Try Azure email service first
-   const azureService = initializeAzureEmailService();
-   if (azureService) {
-      try {
-         const success = await azureService.sendEmail({
-            to: options.email,
-            subject: options.subject,
-            htmlContent: options.html,
-            ...(options.attachments && { attachments: options.attachments }),
-         });
-         if (success) {
-            console.log('Email sent successfully via Azure Communication Services');
-            return;
-         }
-      } catch (error) {
-         console.warn('Azure email service failed, falling back to NodeMailer:', error);
-      }
-   }
-
-   // Fallback to NodeMailer
+   const cfg = emailConfig()
    try {
-      const transporter = nodemailer.createTransport({
-         service: 'gmail',
-         host: process.env.EMAIL_HOST as string,
-         auth: {
-            user: process.env.EMAIL_USERNAME,
-            pass: process.env.EMAIL_PASSWORD,
-         },
-         pool: true,
-         secure: false,
-         logger: false,
-      })
-
-      const mailOptions: nodemailer.SendMailOptions = {
-         from: `${process.env.EMAIL_FROM_NAME || 'Admin'} <${process.env.EMAIL_USERNAME}>`,
+      await transport().sendMail({
+         from: cfg?.from,
          to: options.email,
          subject: options.subject,
          html: options.html,
+         text: options.text,
          ...(options.attachments && { attachments: options.attachments }),
-      }
-
-      await transporter.sendMail(mailOptions)
-      console.log('Email sent successfully via NodeMailer');
+      })
    } catch (err: any) {
-      console.log('NodeMailer Error:', err.message || err);
-      
-      // Handle specific Gmail authentication errors
-      if (err.code === 'EAUTH') {
-         console.error('Gmail Authentication Error: Please check your email credentials');
-         console.error('Steps to fix Gmail authentication:');
-         console.error('1. Enable 2-factor authentication on your Gmail account');
-         console.error('2. Generate an App Password (not your regular password)');
-         console.error('3. Use the App Password in EMAIL_PASSWORD environment variable');
-         console.error('4. Make sure EMAIL_USERNAME is your full Gmail address');
-      }
-      
-      throw new AppError('Failed to send email via both Azure and Gmail services', 500);
+      if (err instanceof AppError) throw err
+      // Name the usual culprit; the password itself never reaches a log.
+      const hint =
+         err.code === 'EAUTH'
+            ? 'the mailbox refused the login — check EMAIL_USERNAME and EMAIL_PASSWORD'
+            : err.code === 'ECONNECTION' || err.code === 'ETIMEDOUT' || err.code === 'ESOCKET'
+              ? `could not reach ${cfg?.host}:${cfg?.port} — check EMAIL_HOST, EMAIL_PORT and EMAIL_SECURE`
+              : err.message || String(err)
+      console.error(`Email to ${options.email} failed: ${hint}`)
+      throw new AppError(`Email could not be sent: ${hint}`, 500)
    }
 }
 
-// Azure-specific email function
-export const azureSendMail = async (options: {
-   email: string;
-   subject: string;
-   html: string;
-   attachments?: Array<{
-      name: string;
-      contentType: string;
-      contentInBase64: string;
-   }>;
-}): Promise<boolean> => {
-   const azureService = initializeAzureEmailService();
-   if (!azureService) {
-      throw new Error('Azure Communication Services is not configured');
-   }
-
-   return await azureService.azureSendMail(options);
-};
-
-// Function to send SMS using Twilio
-// export async function sendSMS(options: SmsOptions): Promise<any> {
-//    try {
-//       const client = twilio(
-//          process.env.TWILIO_ACCOUNT_SID,
-//          process.env.TWILIO_AUTH_TOKEN
-//       )
-
-//       await client.messages.create({
-//          body: options.body,
-//          to: options.to,
-//          from: process.env.TWILIO_PHONE_NUMBER, // Your Twilio phone number
-//       })
-
-//       console.log('SMS sent successfully')
-//    } catch (error) {
-//       console.error('Error sending SMS:', error)
-//       return new Error('Failed to send SMS')
-//    }
-// }
-
-
-
 // Function to send SMS using msg91
 msg91.initialize({ authKey: process.env.MSG91_AUTH_KEY });
-// send otp through msg91 using templeId, mobile number 
-// otp will be send in the {#var#} 
+// send otp through msg91 using templeId, mobile number
+// otp will be send in the {#var#}
 export const sendSMS = async (mobileNumber: string, templateId: string, otp?: string): Promise<any> => {
    try {
       if (!mobileNumber || !templateId) {
@@ -161,4 +110,3 @@ export const sendSMS = async (mobileNumber: string, templateId: string, otp?: st
       return
    }
 }
-

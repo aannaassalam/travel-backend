@@ -4,6 +4,7 @@ import {
    OUT_OF_BAND_ALERTS,
 } from '../constants/admin.constants'
 import AuditLog from '../model/auditLogModel'
+import { emailConfigured, sendEmail } from '../utils/email_sms'
 
 /**
  * §2.2: every mutation writes an audit entry, enforced at the service layer
@@ -117,11 +118,11 @@ export const recordAudit = async (req: Request, input: AuditInput) => {
 
 /**
  * §14.2: alerts must go to a channel not reachable from the admin panel, so an
- * attacker inside the panel cannot suppress them.
- *
- * ponytail: logs to stderr until ALERT_EMAIL / ALERT_PHONE are configured —
- * swap in the existing azureEmailService + msg91 sender once §18 Q2 is answered
- * (which addresses these alerts should go to).
+ * attacker inside the panel cannot suppress them. Emailed to
+ * ADMIN_ALERT_EMAIL over the configured SMTP mailbox; the line always goes to
+ * stderr as well, so the server log is a second record. A failed send is
+ * logged, never thrown — the action that triggered the alert has already
+ * happened and must not fail because the mail did.
  */
 export const sendOutOfBandAlert = async (
    action: string,
@@ -129,10 +130,26 @@ export const sendOutOfBandAlert = async (
    ip: string
 ) => {
    const destination = process.env.ADMIN_ALERT_EMAIL
-   const line = `[SECURITY ALERT] ${action} by ${actor} from ${ip} at ${new Date().toISOString()}`
+   const when = new Date().toISOString()
+   const line = `[SECURITY ALERT] ${action} by ${actor} from ${ip} at ${when}`
    if (!destination) {
       console.error(`${line} — ADMIN_ALERT_EMAIL unset, alert not delivered`)
       return
    }
+   if (!emailConfigured()) {
+      console.error(`${line} — email not configured (EMAIL_HOST…), alert not delivered`)
+      return
+   }
    console.error(`${line} → ${destination}`)
+   try {
+      await sendEmail({
+         email: destination,
+         subject: `[Security alert] ${action} by ${actor}`,
+         html:
+            `<p><strong>${action}</strong> by ${actor} from IP ${ip} at ${when}.</p>` +
+            '<p>If this was not expected, sign out all other devices and change the password from the admin panel, then check the audit log.</p>',
+      })
+   } catch (err: any) {
+      console.error(`${line} — alert email failed: ${err.message || err}`)
+   }
 }
