@@ -147,6 +147,3 @@ dist
 *firebase-adminsdk*.json
 firebase-service-account*.json
 .env.minimal
-
-# Elastic Beanstalk bundle from `npm run bundle`
-deploy.zip

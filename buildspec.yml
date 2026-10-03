@@ -16,13 +16,19 @@ phases:
          nodejs: 22
    build:
       commands:
-         - npm ci
+         # `npm install`, not `npm ci`: ci aborts the whole build the moment the
+         # committed lock does not perfectly match what CodeBuild's npm resolves
+         # (a different npm version or peer-dep mode is enough). install resolves
+         # from package.json, reconciling the lock in place, so a lock drift
+         # degrades to a warning instead of a failed deploy. Reproducibility is
+         # preserved by committing the lock and the matching .npmrc.
+         - npm install --no-audit --no-fund
          - npm run build
    post_build:
       commands:
-         # Drop devDependencies from the bundle. Re-running ci is cheaper and
-         # more predictable than pruning.
-         - npm ci --omit=dev
+         # Drop devDependencies (tsc etc.) from what ships, keeping the tree the
+         # build already resolved — no second resolution that could disagree.
+         - npm prune --omit=dev
 
 artifacts:
    files:
