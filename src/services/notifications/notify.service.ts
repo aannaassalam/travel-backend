@@ -65,17 +65,25 @@ export const render = (body: string, vars: TemplateVars = {}) =>
    })
 
 /**
- * Messages that still go by SMS to someone who has the app.
+ * Messages that go by SMS even to someone who has the app.
  *
- * Push can be silenced per app, and missing either of these costs the
- * customer their booking: the cash deadline is the last warning before it is
- * cancelled, and a cancellation must reach them. Everything else goes by push
- * alone when push can reach them — which is where the Twilio saving comes from.
+ * Only order cancellations: a cancellation must reach the customer and push can
+ * be silenced per app. Cash-deadline reminders used to be here too, but the
+ * office chose push-first for them (2026-10-03): they now SMS only when push
+ * cannot reach the device, like every other event, which is where the Twilio
+ * saving comes from.
  */
 const SMS_EVEN_WITH_APP = new Set<string>([
-   NOTIFICATION_EVENTS.CASH_DEADLINE_REMINDER,
    NOTIFICATION_EVENTS.ORDER_CANCELLED,
 ])
+
+/**
+ * Whether to also send SMS after the push stage. SMS fires when push did not
+ * deliver, or for the few events that must reach the customer regardless of the
+ * app. Exported so the routing rule can be checked without dispatching anything.
+ */
+export const smsAfterPush = (event: string, pushed: boolean): boolean =>
+   !pushed || SMS_EVEN_WITH_APP.has(event)
 
 /**
  * The SMS wording, made fit for a notification.
@@ -159,7 +167,7 @@ export const notify = async ({
 
       // -------------------------------------------------------------- SMS
       const template = byChannel.get('SMS')
-      if (template && (!pushed || SMS_EVEN_WITH_APP.has(event))) {
+      if (template && smsAfterPush(event, pushed)) {
          const source =
             appendIfMissing && !template.body.includes(appendIfMissing.token)
                ? template.body + appendIfMissing.text

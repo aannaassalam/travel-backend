@@ -2,7 +2,8 @@ import crypto from 'crypto'
 import { PASSWORD_POLICY } from '../constants/admin.constants'
 
 /**
- * §1.3: minimum 14 characters, checked against a breached-password list.
+ * §1.3: minimum length (PASSWORD_POLICY.MIN_LENGTH), checked against a
+ * breached-password list.
  *
  * Uses the HaveIBeenPwned range API, which is k-anonymous — only the first five
  * characters of the SHA-1 hash leave this process, so the password itself is

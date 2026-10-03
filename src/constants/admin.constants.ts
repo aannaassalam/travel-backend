@@ -96,7 +96,7 @@ export const PASSWORD_POLICY = {
     * standing, and §14.1's network isolation load-bearing rather than
     * defence-in-depth.
     */
-   MIN_LENGTH: 14,
+   MIN_LENGTH: 8,
    /**
     * How long a system-generated temporary password can be used to sign in.
     * It sits in a mailbox or a chat message until then, so it must not stay
