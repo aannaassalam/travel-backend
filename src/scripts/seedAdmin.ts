@@ -25,7 +25,7 @@ import AdminUser from '../model/adminUserModel'
 import { validateAdminPassword } from '../utils/passwordPolicy'
 
 /**
- * §1.3 requires 14+ characters checked against a breached-password list. A
+ * §1.3 requires the minimum length. A
  * throwaway local credential should not force that policy to be weakened, so
  * the bypass is explicit, opt-in per run, and refuses to work outside
  * development. The policy itself is untouched — `npm run seed:admin` with no

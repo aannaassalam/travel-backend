@@ -88,7 +88,7 @@ export const SESSION_POLICY = {
 
 export const PASSWORD_POLICY = {
    /**
-    * §1.3: minimum 14 characters.
+    * §1.3: minimum password length.
     *
     * The guide also mandates TOTP 2FA; the client has decided against it, so
     * the password is the only authentication factor in this system. That makes
