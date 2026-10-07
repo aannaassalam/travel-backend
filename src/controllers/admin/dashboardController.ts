@@ -29,7 +29,14 @@ import { sendResponse } from '../../utils/response'
  */
 
 const DAY = 86400000
-const PERIODS = [7, 30, 90]
+/** The window when the dashboard is opened with no dates chosen: a month. */
+const DEFAULT_RANGE_DAYS = 30
+/**
+ * Upper bound on a hand-picked range. Every day in the window is one bucket in
+ * `series` and one point on the chart, so without a cap a careless pair of
+ * dates returns a payload nobody can read and scans years of orders per load.
+ */
+const MAX_RANGE_DAYS = 366
 const UNPAID_CASH = {
    paymentMethod: PAYMENT_METHOD.CASH,
    paymentStatus: { $in: [PAYMENT_STATUS.UNPAID, PAYMENT_STATUS.PENDING] },
@@ -58,20 +65,46 @@ const statusCounts = async (Model: any) => {
 
 export const getDashboard = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const days = req.query.days === undefined ? 30 : Number(req.query.days)
-      if (!PERIODS.includes(days)) {
-         return next(new AppError('days must be one of 7, 30, 90', 400))
-      }
       const now = new Date()
-      // Buckets are UTC days; today is the last one.
-      const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)))
-      const prevFrom = new Date(from.getTime() - days * DAY)
+      const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+
+      /**
+       * The window the two date pickers sent, snapped to whole UTC days so it
+       * lines up with the `series` buckets. Both ends are inclusive: picking
+       * the same day twice means that one day, not nothing.
+       */
+      const startOfDay = (value: unknown, label: string) => {
+         if (value === undefined || value === '') return null
+         const text = String(value)
+         if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+            throw new AppError(`${label} must be a date written as YYYY-MM-DD`, 400)
+         }
+         const ms = Date.parse(`${text}T00:00:00.000Z`)
+         if (Number.isNaN(ms)) throw new AppError(`${label} is not a real date`, 400)
+         return ms
+      }
+      const toStart = startOfDay(req.query.to, 'to') ?? today
+      const fromStart =
+         startOfDay(req.query.from, 'from') ?? toStart - (DEFAULT_RANGE_DAYS - 1) * DAY
+      if (fromStart > toStart) {
+         return next(new AppError('The start date must be on or before the end date', 400))
+      }
+      const days = Math.round((toStart - fromStart) / DAY) + 1
+      if (days > MAX_RANGE_DAYS) {
+         return next(
+            new AppError(`A range cannot be longer than ${MAX_RANGE_DAYS} days`, 400)
+         )
+      }
+      const from = new Date(fromStart)
+      // The last millisecond of the chosen end day, so that day counts in full.
+      const to = new Date(toStart + DAY - 1)
+      const prevFrom = new Date(fromStart - days * DAY)
       const in24h = new Date(now.getTime() + DAY)
       const settings = await getSettings()
       const riskCutoff = new Date(now.getTime() + settings.atRiskWindowDays * DAY)
 
       // Both windows in one bounded read; split in memory.
-      const paid = await Order.find({ ...PAID_ORDER, createdAt: { $gte: prevFrom } })
+      const paid = await Order.find({ ...PAID_ORDER, createdAt: { $gte: prevFrom, $lte: to } })
          .select('total items createdAt')
          .lean()
       const current = paid.filter((o) => o.createdAt >= from)
@@ -144,9 +177,9 @@ export const getDashboard = catchAsync(
          [pastNights],
          [listingRisk],
       ] = await Promise.all([
-         Customer.countDocuments({ createdAt: { $gte: from } }),
+         Customer.countDocuments({ createdAt: { $gte: from, $lte: to } }),
          Customer.countDocuments({ createdAt: { $gte: prevFrom, $lt: from } }),
-         Enquiry.countDocuments({ stage: 'WON', updatedAt: { $gte: from } }),
+         Enquiry.countDocuments({ stage: 'WON', updatedAt: { $gte: from, $lte: to } }),
          Enquiry.countDocuments({ stage: 'WON', updatedAt: { $gte: prevFrom, $lt: from } }),
          Order.aggregate([
             { $match: UNPAID_CASH },
@@ -158,7 +191,7 @@ export const getDashboard = catchAsync(
                $match: {
                   paymentMethod: PAYMENT_METHOD.CASH,
                   paymentStatus: PAYMENT_STATUS.PAID,
-                  paidAt: { $gte: from },
+                  paidAt: { $gte: from, $lte: to },
                },
             },
             { $group: { _id: null, amount: { $sum: '$total' } } },
@@ -230,7 +263,7 @@ export const getDashboard = catchAsync(
       const body: Record<string, any> = {
          currency: settings.baseCurrency,
          dataAsOf: now.toISOString(),
-         period: { days, from: from.toISOString(), to: now.toISOString() },
+         period: { days, from: from.toISOString(), to: to.toISOString() },
          headline: {
             revenue: delta(revenue, prevRevenue),
             bookings: delta(current.length, previous.length),
