@@ -1,7 +1,7 @@
 import { Types } from 'mongoose'
 import { CURRENCIES, BASE_CURRENCY, VERTICALS } from '../../constants/domain.constants'
 import { Listing } from '../../model/listingModel'
-import { RatePlan, RoomType } from '../../model/hotelModel'
+import { Hotel, RatePlan, RoomType } from '../../model/hotelModel'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
 import { nightsBetween } from './inventory.service'
 
@@ -123,8 +123,13 @@ export const priceStayItem = async (item: RequestedItem): Promise<PricedItem> =>
    }
    // §BUG-008: reject invalid, reversed, past or absurdly long stays before pricing.
    validateDates(item.startDate, item.endDate)
-   const roomType = await RoomType.findById(item.roomTypeId)
+   // The room has to be live, and so does its hotel — the same rule a dish and
+   // its restaurant follow below. Without it a deactivated or archived hotel
+   // left the catalogue but stayed bookable by anyone still holding a room id.
+   const roomType = await RoomType.findOne({ _id: item.roomTypeId, status: 'PUBLISHED' })
    if (!roomType) throw new Error('ITEM_UNAVAILABLE')
+   const hotel = await Hotel.exists({ _id: roomType.hotel, status: 'PUBLISHED' })
+   if (!hotel) throw new Error('ITEM_UNAVAILABLE')
 
    const dates = nightsBetween(new Date(item.startDate), new Date(item.endDate))
    if (!dates.length) throw new Error('STAY_REQUIRES_AT_LEAST_ONE_NIGHT')

@@ -18,6 +18,7 @@ import { getSettings } from '../../model/settingsModel'
 import {
    archiveDoc,
    createDoc,
+   deactivateDoc,
    paginate,
    updateDoc,
 } from '../../services/adminCrud.service'
@@ -281,11 +282,18 @@ export const publishListing = catchAsync(
       if (blockers.length) {
          return next(new AppError(`Cannot publish: ${blockers.join('; ')}`, 400))
       }
+      /**
+       * Publishing is also how an inactive or expired listing comes back, so it
+       * has to stick. A sell-by date the panel can no longer show or change
+       * would have the nightly job expire the listing again a few hours later;
+       * one already in the past can only be a leftover, and goes.
+       */
+      const stale = listing.validUntil && listing.validUntil.getTime() < Date.now()
       const updated = await updateDoc<IListing>(
          req,
          Listing,
          req.params.id,
-         { status: LISTING_STATUS.PUBLISHED },
+         { status: LISTING_STATUS.PUBLISHED, ...(stale ? { validUntil: null } : {}) },
          { entityType: ENTITY }
       )
       return sendResponse(res, 200, 'Listing published', {
@@ -293,6 +301,16 @@ export const publishListing = catchAsync(
       })
    }
 )
+
+/** Off the website and unbookable, but still in the list — publish to undo. */
+export const deactivateListing = catchAsync(async (req: Request, res: Response) => {
+   const listing = await deactivateDoc<IListing>(req, Listing, req.params.id, {
+      entityType: ENTITY,
+   })
+   return sendResponse(res, 200, 'Listing deactivated', {
+      listing: presentListing(listing),
+   })
+})
 
 export const archiveListing = catchAsync(async (req: Request, res: Response) => {
    const listing = await archiveDoc<IListing>(req, Listing, req.params.id, {
@@ -323,7 +341,8 @@ export const duplicateListing = catchAsync(
          fr: `${resolveLocalized(source.title)} (copie)`,
       }
       copy.slug = await uniqueSlug(Listing, [resolveLocalized(copy.title), copy.city])
-      copy.status = LISTING_STATUS.DRAFT
+      // A clone always starts inactive — never silently publish a copy.
+      copy.status = LISTING_STATUS.INACTIVE
       copy.quantitySold = 0
       copy.quantityHeld = 0
 
@@ -402,7 +421,7 @@ export const expandRecurrence = catchAsync(
                `${source.title}-${source.city}-${date.toISOString().slice(0, 10)}`,
                { lower: true, strict: true }
             )
-            copy.status = LISTING_STATUS.DRAFT
+            copy.status = LISTING_STATUS.INACTIVE
             copy.quantitySold = 0
             copy.quantityHeld = 0
             return copy
@@ -419,182 +438,6 @@ export const expandRecurrence = catchAsync(
 
       return sendResponse(res, 201, `${created.length} departure(s) created`, {
          created: created.length,
-      })
-   }
-)
-
-/**
- * §5.1 / §2.2: bulk CSV import per vertical, with a downloadable template, a
- * DRY-RUN validation report carrying row-level errors, then commit.
- *
- * Essential for launch loading and for the spreadsheets the client already has
- * (§18 Q7). Dry-run is the default — committing requires an explicit flag, so a
- * malformed file can never half-load a catalogue.
- */
-const CSV_COLUMNS = [
-   'title_fr',
-   'title_en',
-   'city',
-   'description_fr',
-   'description_en',
-   'cost_price_usd',
-   'sell_price_usd',
-   // Optional explicit prices. Blank means "not sold in that currency" — never
-   // a conversion.
-   'sell_price_cdf',
-   'sell_price_eur',
-   'quantity',
-   'valid_from',
-   'supplier',
-] as const
-
-export const csvTemplate = catchAsync(async (req: Request, res: Response) => {
-   const vertical = String(req.query.vertical || 'BUS')
-   const example =
-      vertical === 'PROPERTY'
-         ? 'Villa 4 chambres,4-bedroom villa,Kinshasa,Belle villa à Gombe,Fine villa in Gombe,0,250000,,,1,,Agence Gombe'
-         : 'Kinshasa → Lubumbashi,Kinshasa → Lubumbashi,Kinshasa,Départ quotidien 08h00,Daily 08:00 departure,45,70,196000,64,40,2026-09-01,Transco'
-   res.set('Content-Type', 'text/csv')
-   res.set('Content-Disposition', `attachment; filename="${vertical.toLowerCase()}-template.csv"`)
-   return res.send(`${CSV_COLUMNS.join(',')}\n${example}\n`)
-})
-
-/** Minimal RFC-4180 parse: handles quoted fields containing commas. */
-const parseCsv = (text: string): Record<string, string>[] => {
-   const rows: string[][] = []
-   let field = ''
-   let row: string[] = []
-   let inQuotes = false
-   for (let i = 0; i < text.length; i++) {
-      const c = text[i]
-      if (inQuotes) {
-         if (c === '"' && text[i + 1] === '"') { field += '"'; i++ }
-         else if (c === '"') inQuotes = false
-         else field += c
-      } else if (c === '"') inQuotes = true
-      else if (c === ',') { row.push(field); field = '' }
-      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = '' }
-      else if (c !== '\r') field += c
-   }
-   if (field || row.length) { row.push(field); rows.push(row) }
-
-   const [header, ...body] = rows.filter((r) => r.some((c) => c.trim()))
-   if (!header) return []
-   return body.map((r) =>
-      Object.fromEntries(header.map((h, i) => [h.trim(), (r[i] ?? '').trim()]))
-   )
-}
-
-const usdToMinor = (v: string) => Math.round(Number(v || 0) * 100)
-
-export const importListingsCsv = catchAsync(
-   async (req: Request, res: Response, next: NextFunction) => {
-      const { vertical, csv, commit } = req.body
-      if (!vertical || !Object.values(VERTICALS).includes(vertical)) {
-         return next(new AppError('A valid vertical is required', 400))
-      }
-      if (vertical === VERTICALS.HOTEL) {
-         return next(new AppError('Hotel import uses the calendar, not this endpoint', 400))
-      }
-      if (!csv || typeof csv !== 'string') {
-         return next(new AppError('csv content is required', 400))
-      }
-
-      const rows = parseCsv(csv)
-      if (!rows.length) return next(new AppError('No data rows found', 400))
-      if (rows.length > 1000) {
-         return next(new AppError('Import is limited to 1000 rows per file', 400))
-      }
-
-      const isProperty = vertical === VERTICALS.PROPERTY
-      const errors: { row: number; field: string; message: string }[] = []
-      const prepared: any[] = []
-
-      rows.forEach((r, idx) => {
-         const rowNo = idx + 2 // +1 for header, +1 for 1-based
-         const push = (field: string, message: string) =>
-            errors.push({ row: rowNo, field, message })
-
-         if (!r.title_fr) push('title_fr', 'French title is required')
-         if (!r.city) push('city', 'City is required')
-         if (!r.description_fr) push('description_fr', 'French description is required')
-
-         const cost = usdToMinor(r.cost_price_usd)
-         const sell = usdToMinor(r.sell_price_usd)
-         if (!isProperty) {
-            if (!cost) push('cost_price_usd', 'Cost price is required — margin reporting depends on it')
-            if (!sell) push('sell_price_usd', 'Sell price is required')
-            if (sell && cost && sell <= cost) {
-               push('sell_price_usd', 'Sell price must be above cost price')
-            }
-            if (!Number(r.quantity)) push('quantity', 'Quantity must be above zero')
-         }
-
-         // Older spreadsheets still carry a valid_until column; it is ignored.
-         prepared.push({
-            vertical,
-            title: { fr: r.title_fr, en: r.title_en || '' },
-            city: r.city,
-            description: { fr: r.description_fr, en: r.description_en || '' },
-            costPrice: { USD: cost },
-            sellPrice: {
-               USD: sell,
-               // Only set when the column carries a value — an empty cell must
-               // not become a zero price.
-               ...(r.sell_price_cdf ? { CDF: usdToMinor(r.sell_price_cdf) } : {}),
-               ...(r.sell_price_eur ? { EUR: usdToMinor(r.sell_price_eur) } : {}),
-            },
-            quantityTotal: Number(r.quantity) || 0,
-            validFrom: r.valid_from ? new Date(r.valid_from) : undefined,
-            supplier: r.supplier || undefined,
-            status: LISTING_STATUS.DRAFT,
-            slug: slugify(`${r.title_fr}-${r.city}-${Date.now()}-${idx}`, {
-               lower: true,
-               strict: true,
-            }),
-            createdBy: (req as any).admin._id,
-         })
-      })
-
-      // Dry run by default — report first, commit only when asked.
-      if (!commit) {
-         return sendResponse(res, 200, 'Validation report', {
-            dryRun: true,
-            rows: rows.length,
-            validRows: rows.length - new Set(errors.map((e) => e.row)).size,
-            errors,
-            canCommit: errors.length === 0,
-         })
-      }
-      if (errors.length) {
-         return next(
-            new AppError('Fix the reported errors before committing', 400)
-         )
-      }
-
-      // §2.2: transactional — all rows land or none do.
-      const session = await Listing.startSession()
-      let created = 0
-      try {
-         await session.withTransaction(async () => {
-            const docs = await Listing.insertMany(prepared, { session })
-            created = docs.length
-         })
-      } catch (err: any) {
-         await session.endSession()
-         return next(new AppError(`Import failed and was rolled back: ${err.message}`, 400))
-      }
-      await session.endSession()
-
-      await recordAudit(req, {
-         action: AUDIT_ACTIONS.CREATE,
-         entityType: ENTITY,
-         after: { imported: created, vertical },
-         reason: `CSV import of ${created} ${vertical} listings`,
-      })
-
-      return sendResponse(res, 201, `${created} listing(s) imported as drafts`, {
-         created,
       })
    }
 )

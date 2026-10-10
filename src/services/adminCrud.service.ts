@@ -1,6 +1,7 @@
 import { Request } from 'express'
 import { Model } from 'mongoose'
 import { AUDIT_ACTIONS } from '../constants/admin.constants'
+import { LISTING_STATUS } from '../constants/domain.constants'
 import AppError from '../utils/appError'
 import { recordAudit } from './auditLog.service'
 
@@ -106,6 +107,40 @@ export const archiveDoc = async <T>(
       before,
       after: doc.toObject(),
       reason: req.body.reason,
+   })
+   return doc as T
+}
+
+/**
+ * Take a record off the website without archiving it. Publishing brings it
+ * back, and unlike an archived record it stays in the admin lists — one click
+ * from live again. Whatever it was (published, sold out, expired) it ends up
+ * INACTIVE; nothing else on it changes.
+ */
+export const deactivateDoc = async <T>(
+   req: Request,
+   model: Model<any>,
+   id: string,
+   { entityType }: CrudOptions
+): Promise<T> => {
+   const doc = await model.findById(id)
+   if (!doc) throw new AppError(`${entityType} not found`, 404)
+   if ((doc as any).status === LISTING_STATUS.ARCHIVED) {
+      // Archived is a separate decision; deactivating must not quietly undo it.
+      throw new AppError('This record is archived, so there is nothing to deactivate', 409)
+   }
+
+   const before = doc.toObject()
+   ;(doc as any).status = LISTING_STATUS.INACTIVE
+   await doc.save()
+
+   await recordAudit(req, {
+      action: AUDIT_ACTIONS.UPDATE,
+      entityType,
+      entityId: id,
+      before,
+      after: doc.toObject(),
+      reason: req.body?.reason ?? 'Deactivated',
    })
    return doc as T
 }

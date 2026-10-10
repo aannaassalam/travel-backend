@@ -3,12 +3,14 @@ import cron from 'node-cron'
 import { AUDIT_ACTIONS } from '../constants/admin.constants'
 import {
    FULFILMENT_STATUS,
+   LEGACY_INACTIVE_STATUSES,
    LISTING_STATUS,
    ORDER_STATUS,
    PAYMENT_STATUS,
 } from '../constants/domain.constants'
-import { RatePlan } from '../model/hotelModel'
+import { Hotel, RatePlan, RoomType } from '../model/hotelModel'
 import { Listing } from '../model/listingModel'
+import { MenuItem, Restaurant } from '../model/restaurantModel'
 import AuditLog from '../model/auditLogModel'
 import { Customer } from '../model/customerModel.admin'
 import { Order } from '../model/orderModel'
@@ -177,17 +179,54 @@ export const purgePassportData = async () => {
    return purged
 }
 
+/**
+ * DRAFT and PAUSED became one status, INACTIVE. Records written before that
+ * still carry the old words, and the schema enum no longer lists them — so the
+ * next edit to one would fail validation on a field nobody touched.
+ *
+ * Run on every boot rather than as a migration someone has to remember: it is
+ * five indexed updates that match nothing after the first time.
+ *
+ * Room types are the exception. They never had a publish step — the panel
+ * always sent them as live and a hardening change began dropping that — so a
+ * leftover one is a room the office believed was on sale. It goes to PUBLISHED;
+ * its hotel's own status still decides whether a customer can see it.
+ */
+export const normaliseLegacyStatuses = async () => {
+   const legacy = { status: { $in: [...LEGACY_INACTIVE_STATUSES] } }
+   const inactive = { $set: { status: LISTING_STATUS.INACTIVE } }
+   const [hotels, restaurants, listings, dishes, rooms] = await Promise.all([
+      Hotel.updateMany(legacy, inactive),
+      Restaurant.updateMany(legacy, inactive),
+      Listing.updateMany(legacy, inactive),
+      MenuItem.updateMany(legacy, inactive),
+      RoomType.updateMany(legacy, { $set: { status: LISTING_STATUS.PUBLISHED } }),
+   ])
+   const changed = {
+      hotels: hotels.modifiedCount,
+      restaurants: restaurants.modifiedCount,
+      listings: listings.modifiedCount,
+      menuItems: dishes.modifiedCount,
+      roomTypes: rooms.modifiedCount,
+   }
+   if (Object.values(changed).some(Boolean)) {
+      console.log('Inventory statuses normalised to INACTIVE/PUBLISHED:', JSON.stringify(changed))
+      await systemAudit('INVENTORY_STATUS_NORMALISED', changed)
+   }
+   return changed
+}
+
 /** §5.1 scheduled publish / unpublish. */
 export const applyScheduledPublishing = async () => {
    const now = new Date()
    const [published, unpublished] = await Promise.all([
       Listing.updateMany(
-         { publishAt: { $lte: now }, status: LISTING_STATUS.DRAFT },
+         { publishAt: { $lte: now }, status: LISTING_STATUS.INACTIVE },
          { $set: { status: LISTING_STATUS.PUBLISHED }, $unset: { publishAt: 1 } }
       ),
       Listing.updateMany(
          { unpublishAt: { $lte: now }, status: LISTING_STATUS.PUBLISHED },
-         { $set: { status: LISTING_STATUS.PAUSED }, $unset: { unpublishAt: 1 } }
+         { $set: { status: LISTING_STATUS.INACTIVE }, $unset: { unpublishAt: 1 } }
       ),
    ])
    return { published: published.modifiedCount, unpublished: unpublished.modifiedCount }
@@ -203,7 +242,7 @@ export const expireStaleListings = async () => {
    const r = await Listing.updateMany(
       {
          $or: [{ validUntil: { $lt: now } }, { 'attributes.departsAt': { $lt: now } }],
-         status: { $in: [LISTING_STATUS.PUBLISHED, LISTING_STATUS.DRAFT] },
+         status: { $in: [LISTING_STATUS.PUBLISHED, LISTING_STATUS.INACTIVE] },
       },
       { $set: { status: LISTING_STATUS.EXPIRED } }
    )

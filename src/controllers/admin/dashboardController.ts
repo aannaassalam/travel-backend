@@ -299,8 +299,7 @@ export const getDashboard = catchAsync(
          },
          inventory: {
             published: countStatus(LISTING_STATUS.PUBLISHED),
-            draft: countStatus(LISTING_STATUS.DRAFT),
-            paused: countStatus(LISTING_STATUS.PAUSED),
+            inactive: countStatus(LISTING_STATUS.INACTIVE),
             atRiskValue: (futureNights?.value ?? 0) + (listingRisk?.value ?? 0),
             spoilageValue: pastNights?.value ?? 0,
             sellThroughRate: pastNights?.allotment

@@ -134,6 +134,8 @@ export const AUDIT_ACTIONS = {
    PASSPORT_UNMASKED: 'PASSPORT_UNMASKED',
    CUSTOMER_EXPORTED: 'CUSTOMER_EXPORTED',
    FINANCIAL_EXPORTED: 'FINANCIAL_EXPORTED',
+   /** Cost prices and supplier names leaving as a file (§14.4). */
+   INVENTORY_EXPORTED: 'INVENTORY_EXPORTED',
 } as const
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS]

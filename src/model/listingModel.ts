@@ -158,7 +158,7 @@ const listingSchema = new Schema<IListing>(
       status: {
          type: String,
          enum: Object.values(LISTING_STATUS),
-         default: LISTING_STATUS.DRAFT,
+         default: LISTING_STATUS.INACTIVE,
          index: true,
       },
       city: { type: String, required: true, trim: true, index: true },
@@ -221,6 +221,13 @@ listingSchema.methods.publishBlockers = function (): string[] {
       if (this.quantityTotal <= 0) b.push('Quantity must be above zero')
       // validUntil is no longer managed from the panel, so it must not block:
       // a record that still carries an old date could never be published.
+   }
+
+   // A departure that has already left cannot go back on sale; the nightly job
+   // would only expire it again. A flight keeps its time on the first segment.
+   const departs = this.attributes?.departsAt ?? this.attributes?.segments?.[0]?.departsAt
+   if (departs && new Date(departs).getTime() < Date.now()) {
+      b.push('The departure date has passed — set a new date first')
    }
 
    if (this.vertical === VERTICALS.FLIGHT && !this.attributes?.segments?.length) {

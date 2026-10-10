@@ -16,6 +16,7 @@ import { getSettings } from '../../model/settingsModel'
 import {
    archiveDoc,
    createDoc,
+   deactivateDoc,
    paginate,
    updateDoc,
 } from '../../services/adminCrud.service'
@@ -162,6 +163,16 @@ export const publishHotel = catchAsync(
    }
 )
 
+/** Off the website and unbookable, but still in the list — publish to undo. */
+export const deactivateHotel = catchAsync(async (req: Request, res: Response) => {
+   const hotel = await deactivateDoc<any>(req, Hotel, req.params.id, {
+      entityType: ENTITY,
+   })
+   return sendResponse(res, 200, 'Hotel deactivated', {
+      hotel: presentHotel(hotel),
+   })
+})
+
 export const archiveHotel = catchAsync(async (req: Request, res: Response) => {
    const hotel = await archiveDoc<any>(req, Hotel, req.params.id, {
       entityType: ENTITY,
@@ -186,13 +197,16 @@ export const duplicateHotel = catchAsync(
       delete copy.__v
       delete copy.createdAt
       delete copy.updatedAt
+      // Earned by the original, not by a copy nobody has stayed in.
+      delete copy.rating
+      copy.reviewCount = 0
       copy.name = req.body.name || {
          ...source.name,
          fr: `${resolveLocalized(source.name)} (copie)`,
       }
       copy.slug = await uniqueSlug(Hotel, [resolveLocalized(copy.name), copy.city])
-      // A clone always starts as a draft — never silently publish a copy.
-      copy.status = LISTING_STATUS.DRAFT
+      // A clone always starts inactive — never silently publish a copy.
+      copy.status = LISTING_STATUS.INACTIVE
 
       const hotel = await createDoc<any>(req, Hotel, copy, { entityType: ENTITY })
 
@@ -218,7 +232,15 @@ export const createRoomType = catchAsync(async (req: Request, res: Response) => 
    const roomType = await createDoc<any>(
       req,
       RoomType,
-      { ...pick(req.body, ROOMTYPE_EDITABLE), hotel: req.params.id },
+      {
+         ...pick(req.body, ROOMTYPE_EDITABLE),
+         hotel: req.params.id,
+         // Decided here, never taken from the body (§BUG-010). A room type has
+         // no publish step of its own, so it is live once saved; whether a
+         // customer sees it is the hotel's status, and whether it can be
+         // booked is the calendar's.
+         status: LISTING_STATUS.PUBLISHED,
+      },
       { entityType: 'RoomType' }
    )
    return sendResponse(res, 201, 'Room type created', {

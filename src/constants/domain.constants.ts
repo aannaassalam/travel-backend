@@ -31,14 +31,29 @@ export const MENU_SECTIONS = {
 export type MenuSection = (typeof MENU_SECTIONS)[keyof typeof MENU_SECTIONS]
 
 /** §5.1 persistent status column. */
+/**
+ * Where a piece of inventory stands. The office chooses between two:
+ *
+ *   INACTIVE   created, or taken down again — not on the website, not bookable
+ *   PUBLISHED  on the website and bookable
+ *
+ * The other three are outcomes, never choices. EXPIRED is set by the nightly
+ * job once a departure has passed; SOLD_OUT keeps a full listing visible but
+ * unbookable; ARCHIVED is this system's delete (§5.1 — nothing is ever removed,
+ * because orders point at the inventory they sold).
+ *
+ * INACTIVE replaced an older DRAFT / PAUSED pair that meant the same thing to
+ * the person looking at it. `normaliseLegacyStatuses` rewrites those on boot.
+ */
 export const LISTING_STATUS = {
-   DRAFT: 'DRAFT',
+   INACTIVE: 'INACTIVE',
    PUBLISHED: 'PUBLISHED',
-   PAUSED: 'PAUSED',
    EXPIRED: 'EXPIRED',
    SOLD_OUT: 'SOLD_OUT',
    ARCHIVED: 'ARCHIVED',
 } as const
+/** What the DRAFT / PAUSED pair was stored as, for the one-off rewrite. */
+export const LEGACY_INACTIVE_STATUSES = ['DRAFT', 'PAUSED'] as const
 export type ListingStatus = (typeof LISTING_STATUS)[keyof typeof LISTING_STATUS]
 
 /**

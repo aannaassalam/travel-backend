@@ -29,7 +29,7 @@ if (process.env.EGRESS_IPV4_FIRST !== 'false') {
 import { RESPONSES } from './constants/constants'
 import connectDb from './config/db.config'
 import app from './app'
-import { startScheduledJobs } from './services/scheduledJobs.service'
+import { normaliseLegacyStatuses, startScheduledJobs } from './services/scheduledJobs.service'
 
 const PORT = process.env.PORT || 3001
 
@@ -51,6 +51,13 @@ const PORT = process.env.PORT || 3001
 async function bootstrap() {
    const dbConnection = await connectDb()
    
+
+   // Before anything is served: a record still saying DRAFT or PAUSED fails
+   // validation on its next save. Never fatal — a hiccup here must not keep
+   // the API down, and the next boot tries again.
+   await normaliseLegacyStatuses().catch((e) =>
+      console.error('Could not normalise legacy inventory statuses:', e.message)
+   )
 
    // §6.1/§14.5/§5.1: cash release, passport purge, scheduled publishing.
    startScheduledJobs()

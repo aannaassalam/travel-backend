@@ -96,7 +96,7 @@ const run = async () => {
          name: { fr: 'Lodge du Lac de Goma', en: 'Goma Lakeside Lodge' },
          slug: 'goma-lakeside-lodge',
          city: 'Goma',
-         status: LISTING_STATUS.DRAFT,
+         status: LISTING_STATUS.INACTIVE,
          stars: 3,
          description: { fr: '' },
          images: [],

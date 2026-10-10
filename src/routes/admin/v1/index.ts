@@ -5,6 +5,7 @@ import { auditLogSummary, listAuditLogs } from '../../../controllers/admin/audit
 import * as customers from '../../../controllers/admin/customerController'
 import { getDashboard } from '../../../controllers/admin/dashboardController'
 import * as hotels from '../../../controllers/admin/hotelController'
+import * as inventoryCsv from '../../../controllers/admin/inventoryCsvController'
 import * as listings from '../../../controllers/admin/listingController'
 import * as locations from '../../../controllers/admin/locationController'
 import * as ops from '../../../controllers/admin/opsController'
@@ -68,6 +69,8 @@ router.post('/hotels', requirePermission('inventory:write'), hotels.createHotel)
 router.get('/hotels/:id', requirePermission('inventory:read'), hotels.getHotel)
 router.patch('/hotels/:id', requirePermission('inventory:write'), hotels.updateHotel)
 router.post('/hotels/:id/publish', requirePermission('inventory:write'), hotels.publishHotel)
+// Off the website, still in the list; publish brings it back.
+router.post('/hotels/:id/deactivate', requirePermission('inventory:write'), hotels.deactivateHotel)
 // Archive, never delete (§5.1) — there is deliberately no DELETE route.
 router.post('/hotels/:id/archive', requirePermission('inventory:write'), hotels.archiveHotel)
 router.post('/hotels/:id/duplicate', requirePermission('inventory:write'), hotels.duplicateHotel)
@@ -103,6 +106,16 @@ router.post(
    requirePermission('inventory:write'),
    restaurants.publishRestaurant
 )
+router.post(
+   '/restaurants/:id/deactivate',
+   requirePermission('inventory:write'),
+   restaurants.deactivateRestaurant
+)
+router.post(
+   '/restaurants/:id/duplicate',
+   requirePermission('inventory:write'),
+   restaurants.duplicateRestaurant
+)
 // Archive, never delete (§5.1) — there is deliberately no DELETE route.
 router.post(
    '/restaurants/:id/archive',
@@ -125,20 +138,42 @@ router.post(
    requirePermission('inventory:write'),
    restaurants.archiveMenuItem
 )
+// A dish's status moves only through these — never a PATCH body (§BUG-010).
+router.post(
+   '/restaurants/:id/menu/:menuItemId/publish',
+   requirePermission('inventory:write'),
+   restaurants.publishMenuItem
+)
+router.post(
+   '/restaurants/:id/menu/:menuItemId/deactivate',
+   requirePermission('inventory:write'),
+   restaurants.deactivateMenuItem
+)
 
 // --- Inventory: flights, bus, cars, activities, properties (§5.2) ----------
 router.get('/listings', requirePermission('inventory:read'), boundPagination, listings.listListings)
 router.post('/listings', requirePermission('inventory:write'), listings.createListing)
-router.get('/listings/csv-template', requirePermission('inventory:read'), listings.csvTemplate)
-// §2.2: bulk endpoints are transactional and dry-runnable.
-router.post('/listings/import', requirePermission('inventory:write'), listings.importListingsCsv)
 router.get('/listings/:id', requirePermission('inventory:read'), listings.getListing)
 router.patch('/listings/:id', requirePermission('inventory:write'), listings.updateListing)
 router.post('/listings/:id/publish', requirePermission('inventory:write'), listings.publishListing)
+router.post('/listings/:id/deactivate', requirePermission('inventory:write'), listings.deactivateListing)
 router.post('/listings/:id/archive', requirePermission('inventory:write'), listings.archiveListing)
 router.post('/listings/:id/duplicate', requirePermission('inventory:write'), listings.duplicateListing)
 // §5.2 bus recurrence — or the same trip gets hand-entered 90 times.
 router.post('/listings/:id/expand-recurrence', requirePermission('inventory:write'), listings.expandRecurrence)
+
+// --- Inventory as spreadsheets: template, export, import (§5.1, §2.2) --------
+// `:group` is HOTEL, RESTAURANT, FLIGHT, BUS, CAR, ACTIVITY or PROPERTY. Reading
+// the template or an export is inventory:read, like the lists they mirror —
+// the list already shows cost prices. Import writes, and is dry-run by default.
+router.get(
+   '/inventory/:group/import-columns',
+   requirePermission('inventory:read'),
+   inventoryCsv.importColumns
+)
+router.get('/inventory/:group/template', requirePermission('inventory:read'), inventoryCsv.template)
+router.get('/inventory/:group/export', requirePermission('inventory:read'), inventoryCsv.exportCsv)
+router.post('/inventory/:group/import', requirePermission('inventory:write'), inventoryCsv.importCsv)
 
 // --- Bookings (§6) ----------------------------------------------------------
 router.get('/orders', requirePermission('orders:read'), boundPagination, orders.listOrders)

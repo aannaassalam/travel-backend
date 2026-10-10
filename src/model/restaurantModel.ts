@@ -88,7 +88,7 @@ const restaurantSchema = new Schema<IRestaurant>(
       status: {
          type: String,
          enum: Object.values(LISTING_STATUS),
-         default: LISTING_STATUS.DRAFT,
+         default: LISTING_STATUS.INACTIVE,
          index: true,
       },
       cuisines: { type: [String], default: [] },
@@ -187,7 +187,7 @@ const menuItemSchema = new Schema<IMenuItem>(
       status: {
          type: String,
          enum: Object.values(LISTING_STATUS),
-         default: LISTING_STATUS.DRAFT,
+         default: LISTING_STATUS.INACTIVE,
          index: true,
       },
    },

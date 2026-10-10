@@ -55,7 +55,7 @@ const hotelSchema = new Schema<IHotel>(
       status: {
          type: String,
          enum: Object.values(LISTING_STATUS),
-         default: LISTING_STATUS.DRAFT,
+         default: LISTING_STATUS.INACTIVE,
          index: true,
       },
       stars: { type: Number, min: 0, max: 5, default: 0 },
@@ -133,7 +133,9 @@ const roomTypeSchema = new Schema<IRoomType>(
       status: {
          type: String,
          enum: Object.values(LISTING_STATUS),
-         default: LISTING_STATUS.DRAFT,
+         // A room type has no publish step of its own — the hotel's status is
+         // what decides whether customers see it — so it is live once saved.
+         default: LISTING_STATUS.PUBLISHED,
       },
    },
    { timestamps: true, optimisticConcurrency: true }

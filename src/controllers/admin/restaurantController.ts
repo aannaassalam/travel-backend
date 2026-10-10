@@ -8,8 +8,14 @@ import {
    presentRestaurants,
 } from '../../dto/admin/inventory.dto'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
-import { parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
-import { archiveDoc, createDoc, paginate, updateDoc } from '../../services/adminCrud.service'
+import { baseAmount, parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
+import {
+   archiveDoc,
+   createDoc,
+   deactivateDoc,
+   paginate,
+   updateDoc,
+} from '../../services/adminCrud.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { pick } from '../../utils/pick'
@@ -196,6 +202,84 @@ export const archiveRestaurant = catchAsync(async (req: Request, res: Response) 
    })
 })
 
+/**
+ * Off the website, but still in the list — publish to undo. The menu is left
+ * exactly as it is: the public menu is only ever reached through a published
+ * restaurant, and checkout refuses a dish whose restaurant is not live, so
+ * nothing has to be unpicked (or remembered and restored) on the dishes.
+ */
+export const deactivateRestaurant = catchAsync(async (req: Request, res: Response) => {
+   const restaurant = await deactivateDoc<any>(req, Restaurant, req.params.id, {
+      entityType: ENTITY,
+   })
+   return sendResponse(res, 200, 'Restaurant deactivated', {
+      restaurant: presentRestaurant(restaurant),
+   })
+})
+
+/**
+ * §5.1 clone, as hotels and listings have. A second branch, or the same
+ * kitchen in another town, is an existing restaurant with a different address —
+ * and the menu comes along, or the copy is an empty shell that takes an
+ * afternoon to refill.
+ */
+export const duplicateRestaurant = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const source = await Restaurant.findById(req.params.id)
+      if (!source) return next(new AppError('Restaurant not found', 404))
+
+      const copy = source.toObject({ virtuals: false }) as any
+      delete copy._id
+      delete copy.__v
+      delete copy.createdAt
+      delete copy.updatedAt
+      // Earned by the original, not by a copy that has served nobody.
+      delete copy.rating
+      copy.reviewCount = 0
+      copy.name = {
+         ...source.name,
+         fr: `${resolveLocalized(source.name)} (copie)`,
+      }
+      copy.slug = await uniqueSlug(Restaurant, [resolveLocalized(copy.name), copy.city])
+      // A clone always starts inactive — never silently publish a copy.
+      copy.status = LISTING_STATUS.INACTIVE
+      // Fresh zone ids: an order keeps the id of the zone it was delivered to,
+      // and two restaurants must not answer to the same one.
+      copy.deliveryZones = (copy.deliveryZones ?? []).map(
+         ({ _id, id, ...zone }: any) => zone
+      )
+      copy.createdBy = (req as any).admin._id
+
+      const restaurant = await createDoc<any>(req, Restaurant, copy, {
+         entityType: ENTITY,
+      })
+
+      // Dishes keep their own status, so a copy of a working menu is one
+      // publish away from live; the restaurant being inactive keeps it unseen.
+      const dishes = await MenuItem.find({
+         restaurant: source._id,
+         status: { $ne: LISTING_STATUS.ARCHIVED },
+      })
+      if (dishes.length) {
+         await MenuItem.insertMany(
+            dishes.map((dish) => {
+               const d = dish.toObject({ virtuals: false }) as any
+               delete d._id
+               delete d.__v
+               delete d.createdAt
+               delete d.updatedAt
+               d.restaurant = restaurant._id
+               return d
+            })
+         )
+      }
+
+      return sendResponse(res, 201, 'Restaurant duplicated', {
+         restaurant: presentRestaurant(restaurant),
+      })
+   }
+)
+
 // --- Menu items -------------------------------------------------------------
 
 export const createMenuItem = catchAsync(
@@ -238,6 +322,57 @@ export const archiveMenuItem = catchAsync(async (req: Request, res: Response) =>
    })
    return sendResponse(res, 200, 'Menu item archived', { item: presentMenuItem(item) })
 })
+
+/** The dish, only if it belongs to the restaurant named in the URL. */
+const ownDish = (req: Request) =>
+   MenuItem.findOne({ _id: req.params.menuItemId, restaurant: req.params.id })
+
+/**
+ * Puts a dish on the menu customers see.
+ *
+ * Its own endpoint because status is never taken from a PATCH body (§BUG-010).
+ * Before this existed that rule left the panel's publish button doing nothing:
+ * every new dish stayed unseen, and a restaurant needs one published dish to go
+ * live, so no restaurant added through the panel could ever be published.
+ */
+export const publishMenuItem = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const dish = await ownDish(req)
+      if (!dish) return next(new AppError('Menu item not found', 404))
+      if (dish.status === LISTING_STATUS.ARCHIVED) {
+         return next(new AppError('An archived dish cannot be published', 409))
+      }
+
+      const blockers: string[] = []
+      if (!dish.name?.fr) blockers.push('French name is required')
+      if (!(baseAmount(dish.sellPrice) > 0)) blockers.push('A USD sell price is required')
+      if (blockers.length) {
+         return next(new AppError(`Cannot publish: ${blockers.join('; ')}`, 400))
+      }
+
+      const item = await updateDoc<any>(
+         req,
+         MenuItem,
+         req.params.menuItemId,
+         { status: LISTING_STATUS.PUBLISHED },
+         { entityType: MENU_ENTITY }
+      )
+      return sendResponse(res, 200, 'Menu item published', { item: presentMenuItem(item) })
+   }
+)
+
+/** Takes a dish off the menu without archiving it. */
+export const deactivateMenuItem = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      if (!(await ownDish(req))) return next(new AppError('Menu item not found', 404))
+      const item = await deactivateDoc<any>(req, MenuItem, req.params.menuItemId, {
+         entityType: MENU_ENTITY,
+      })
+      return sendResponse(res, 200, 'Menu item deactivated', {
+         item: presentMenuItem(item),
+      })
+   }
+)
 
 // ---------------------------------------------------------------------------
 
