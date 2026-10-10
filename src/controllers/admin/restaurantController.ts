@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 
+import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LISTING_STATUS, LOCALES, MENU_SECTIONS } from '../../constants/domain.constants'
 import {
    presentMenuItem,
@@ -16,6 +17,7 @@ import {
    paginate,
    updateDoc,
 } from '../../services/adminCrud.service'
+import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { pick } from '../../utils/pick'
@@ -272,6 +274,14 @@ export const duplicateRestaurant = catchAsync(
                return d
             })
          )
+         // One entry for the menu — a line per dish would bury the signal.
+         await recordAudit(req, {
+            action: AUDIT_ACTIONS.CREATE,
+            entityType: MENU_ENTITY,
+            entityId: restaurant._id.toString(),
+            after: { copiedFrom: source.slug, dishes: dishes.length },
+            reason: `Menu copied with the restaurant (${dishes.length} dishes)`,
+         })
       }
 
       return sendResponse(res, 201, 'Restaurant duplicated', {

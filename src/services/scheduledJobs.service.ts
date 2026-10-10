@@ -219,6 +219,13 @@ export const normaliseLegacyStatuses = async () => {
 /** §5.1 scheduled publish / unpublish. */
 export const applyScheduledPublishing = async () => {
    const now = new Date()
+   // A "publish at" that has passed on something already published has done
+   // its work. Left on the record it would bring the listing back ten minutes
+   // after its own scheduled take-down.
+   await Listing.updateMany(
+      { publishAt: { $lte: now }, status: LISTING_STATUS.PUBLISHED },
+      { $unset: { publishAt: 1 } }
+   )
    const [published, unpublished] = await Promise.all([
       Listing.updateMany(
          { publishAt: { $lte: now }, status: LISTING_STATUS.INACTIVE },
@@ -241,7 +248,18 @@ export const expireStaleListings = async () => {
    const now = new Date()
    const r = await Listing.updateMany(
       {
-         $or: [{ validUntil: { $lt: now } }, { 'attributes.departsAt': { $lt: now } }],
+         $or: [
+            { validUntil: { $lt: now } },
+            { 'attributes.departsAt': { $lt: now } },
+            // A flight entered before departures were mirrored onto the listing
+            // keeps its time on the first leg only. Read exactly as
+            // `publishBlockers` reads it, so the two can never disagree about
+            // whether something has left.
+            {
+               'attributes.departsAt': null,
+               'attributes.segments.0.departsAt': { $lt: now },
+            },
+         ],
          status: { $in: [LISTING_STATUS.PUBLISHED, LISTING_STATUS.INACTIVE] },
       },
       { $set: { status: LISTING_STATUS.EXPIRED } }
@@ -307,18 +325,25 @@ export const startScheduledJobs = () => {
       } catch (e: any) {
          console.error('Scheduled job (10m) failed:', e.message)
       }
+      // Here rather than nightly, and in a try of its own: a flight that left
+      // at 08:00 was on sale until 02:15 the next morning, and a failure in
+      // any job above must not keep it there.
+      try {
+         await expireStaleListings()
+      } catch (e: any) {
+         console.error('Scheduled job (expiry) failed:', e.message)
+      }
    })
 
-   // Nightly at 02:15: retention, expiry and reconciliation.
+   // Nightly at 02:15: retention and reconciliation.
    cron.schedule('15 2 * * *', async () => {
       try {
          await purgePassportData()
-         await expireStaleListings()
          await reconcileInventoryDrift()
       } catch (e: any) {
          console.error('Scheduled job (nightly) failed:', e.message)
       }
    })
 
-   console.log('Scheduled jobs started (cash reminders + release, purge, publishing, reconciliation)')
+   console.log('Scheduled jobs started (cash reminders + release, purge, publishing, expiry, reconciliation)')
 }

@@ -230,8 +230,21 @@ listingSchema.methods.publishBlockers = function (): string[] {
       b.push('The departure date has passed — set a new date first')
    }
 
-   if (this.vertical === VERTICALS.FLIGHT && !this.attributes?.segments?.length) {
-      b.push('At least one flight segment is required')
+   if (this.vertical === VERTICALS.FLIGHT) {
+      const legs: any[] = this.attributes?.segments ?? []
+      if (!legs.length) b.push('At least one flight segment is required')
+      // Every leg, and both of its times: the website prints all of them. It is
+      // what a spreadsheet import insists on, so a flight made in the panel
+      // cannot go on sale half-filled either.
+      else if (
+         legs.some(
+            (s) => !s.carrier || !s.origin || !s.destination || !s.departsAt || !s.arrivesAt
+         )
+      ) {
+         b.push(
+            'Each flight needs its airline, both airport codes, and its departure and arrival times'
+         )
+      }
    }
    if (this.vertical === VERTICALS.BUS && !this.attributes?.operator) {
       b.push('Operator is required')

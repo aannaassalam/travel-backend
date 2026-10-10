@@ -77,6 +77,12 @@ export const priceListingItem = async (item: RequestedItem): Promise<PricedItem>
    })
    if (!listing) throw new Error('ITEM_UNAVAILABLE')
    if (listing.vertical === VERTICALS.PROPERTY) throw new Error('PROPERTY_IS_ENQUIRY_ONLY')
+   // A flight or bus that has left is not for sale, whatever its status still
+   // says: the job that marks it expired runs every ten minutes, not every
+   // second. The same reading of "departed" as publishBlockers.
+   const attrs = listing.attributes as any
+   const departs = attrs?.departsAt ?? attrs?.segments?.[0]?.departsAt
+   if (departs && new Date(departs).getTime() < Date.now()) throw new Error('ITEM_UNAVAILABLE')
 
    // §BUG-008: a dated product (car hire, dated activity) carries a range — guard it.
    if (item.startDate && item.endDate) validateDates(item.startDate, item.endDate)

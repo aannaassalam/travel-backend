@@ -35,6 +35,10 @@ import { sendResponse } from '../../utils/response'
  */
 
 const MAX_IMPORT_ROWS = 1000
+/** Characters of CSV an import will read at all. See `parseCsv` for why. */
+const MAX_IMPORT_CHARS = 5_000_000
+/** The widest template has about thirty columns. */
+const MAX_IMPORT_COLUMNS = 200
 /** Far above any catalogue here; a bound, so an export is never unbounded (§2.2). */
 const MAX_EXPORT_ROWS = 5000
 
@@ -179,7 +183,7 @@ const supplier = (example: string) =>
 
 const VALID_FROM = col('valid_from', 'On sale from', 'datetime', 'validFrom',
    (c) => stamp(new Date(c.departs.getTime() - 30 * DAY)),
-   'Optional. The first day it can be booked.')
+   'Optional. The date the service starts — used when you repeat it or copy it with new dates.')
 
 /** In every export, read by no import. */
 const REFERENCE: Column[] = [
@@ -240,6 +244,9 @@ const flight = (doc: any, fail: Fail) => {
          fail('return_departs_at', 'A return flight needs its departure time')
       } else if (out.departsAt && back.departsAt <= out.departsAt) {
          fail('return_departs_at', 'Must be after the outbound departure')
+      }
+      if (!back.arrivesAt) {
+         fail('return_arrives_at', 'A return flight needs its arrival time')
       }
       if (back.departsAt && back.arrivesAt && back.arrivesAt <= back.departsAt) {
          fail('return_arrives_at', 'Must be after the return departure')
@@ -364,7 +371,8 @@ const GROUPS: Record<string, GroupSpec> = {
       file: 'flights',
       base: { vertical: VERTICALS.FLIGHT },
       columns: [
-         ...titled('Kinshasa → Lubumbashi, aller simple', 'Kinshasa → Lubumbashi, one way'),
+         // A return, because the example row fills the three return columns.
+         ...titled('Kinshasa ⇄ Lubumbashi, aller-retour', 'Kinshasa ⇄ Lubumbashi, return'),
          SERVICED_CITY,
          ...described(
             'Vol direct, un bagage en soute inclus.',
@@ -382,7 +390,7 @@ const GROUPS: Record<string, GroupSpec> = {
             (c) => stamp(c.departs), 'Date and time of departure.', { required: true }),
          col('arrives_at', 'Arrives', 'datetime', 'attributes.segments.0.arrivesAt',
             (c) => stamp(new Date(c.departs.getTime() + 2.5 * 3600000)),
-            'Date and time of arrival.'),
+            'Date and time of arrival.', { required: true }),
          col('return_flight_number', 'Return flight number', 'text',
             'attributes.segments.1.flightNumber', '8Z 102',
             'Fill the three return columns for a return ticket; leave them blank for one way.',
@@ -593,40 +601,55 @@ const setPath = (obj: any, path: string, value: unknown) => {
 }
 
 /**
- * NUL would make the driver throw; a leading apostrophe before = + - @ is the
- * formula guard an export put there (see `inert`), not part of the value.
+ * NUL would make the driver throw; an apostrophe before = + - @ where a cell
+ * could be taken to start is the formula guard an export put there (see
+ * `inert`, which this mirrors), not part of the value.
  */
 const clean = (v: unknown) =>
    String(v ?? '')
       .replace(/\0/g, '')
       .trim()
-      .replace(/^'(?=[=+\-@])/, '')
+      .replace(/(^|[,;\t])'(?=[=+\-@\t\r])|([\n\r])'(?=[=+@])/g, '$1$2')
 
 /**
+ * A number as a spreadsheet wrote it, as the plain `1250.50` it means — or
+ * null when it is not a number at all.
+ *
  * `1 234,50` and `1,234.50` are the same amount written by two spreadsheets.
  * Which one a comma means depends on the file. Where cells are split by `;`
  * it is the decimal mark, as French Excel writes it. Anywhere else it groups
- * thousands — unless it is plainly a decimal (`45,5`, `45,50`), which is what
- * someone typing by hand into any file means by it.
+ * thousands — unless it is plainly a decimal, which is what someone typing by
+ * hand into any file means by it: one or two digits after it (`45,5`,
+ * `45,50`), or four and more (`-4,3217`, a map pin as French Google Sheets
+ * writes it into a comma file). Groups of thousands are always three.
  */
-const toNumber = (raw: string, decimalComma: boolean): number | null => {
+const plainNumber = (raw: string, decimalComma: boolean): string | null => {
    // \s covers the no-break spaces French formatting groups digits with.
    let t = raw.replace(/\s/g, '')
-   if (decimalComma || /^-?\d+,\d{1,2}$/.test(t)) {
+   if (decimalComma || /^-?\d+,(\d{1,2}|\d{4,})$/.test(t)) {
       if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.')
    } else {
       t = t.replace(/,/g, '')
    }
-   return /^-?\d+(\.\d+)?$/.test(t) ? Number(t) : null
+   return /^-?\d+(\.\d+)?$/.test(t) ? t : null
 }
 
+/** Digits after the decimal point, as written. */
+const decimalsOf = (plain: string) => (plain.split('.')[1] ?? '').length
+
+/** Which way round a file writes 03/05/2027. */
+type SlashOrder = 'DMY' | 'MDY'
+const SLASH_DATE = /^(\d{1,2})[/.-](\d{1,2})[/.-]\d{4}(?:\s|$)/
+
 /**
- * `2026-12-24 08:00`, `2026-12-24T08:00` or `24/12/2026 08:00`, the time
- * optional. Day comes first when the year is last, as it is written here.
- * Read as UTC, like every other date in the system, so a file means the same
- * thing whichever server opens it.
+ * `2026-12-24T08:00`, `2026-12-24 08:00` or `24/12/2026 08:00`, the time
+ * optional. Read as UTC, like every other date in the system, so a file means
+ * the same thing whichever server opens it.
+ *
+ * A slash date is day-first unless the file as a whole says otherwise — see
+ * `slashOrderOf`.
  */
-const toDate = (raw: string): Date | null => {
+const toDate = (raw: string, order: SlashOrder = 'DMY'): Date | null => {
    const t = raw.trim().replace('T', ' ')
    const time = '(?:\\s+(\\d{1,2}):(\\d{2})(?::\\d{2}(?:\\.\\d+)?)?)?Z?'
    let m = t.match(new RegExp(`^(\\d{4})-(\\d{1,2})-(\\d{1,2})${time}$`))
@@ -636,6 +659,7 @@ const toDate = (raw: string): Date | null => {
       m = t.match(new RegExp(`^(\\d{1,2})[/.-](\\d{1,2})[/.-](\\d{4})${time}$`))
       if (!m) return null
       ;[, d, mo, y] = m
+      if (order === 'MDY') [d, mo] = [mo, d]
    }
    const [h, mi] = [Number(m[4] ?? 0), Number(m[5] ?? 0)]
    if (h > 23 || mi > 59) return null
@@ -663,10 +687,15 @@ const between = (n: number, c: Column): string | null => {
    return null
 }
 
+interface Reading {
+   decimalComma: boolean
+   slashOrder: SlashOrder
+}
+
 const readCell = (
    c: Column,
    raw: string,
-   decimalComma: boolean
+   { decimalComma, slashOrder }: Reading
 ): { value?: unknown; error?: string } => {
    switch (c.kind) {
       case 'text': {
@@ -674,27 +703,43 @@ const readCell = (
          return { value: c.upper ? text.toUpperCase() : text }
       }
       case 'int': {
-         const n = toNumber(raw, decimalComma)
+         const plain = plainNumber(raw, decimalComma)
+         // `1.000` is a thousand to half the world and one to the other half,
+         // and a count has no business carrying three decimals either way.
+         if (plain !== null && decimalsOf(plain) === 3) {
+            return { error: 'Write the number without a thousands separator, like 1000' }
+         }
+         const n = plain === null ? null : Number(plain)
          if (n === null || !Number.isInteger(n)) return { error: 'Must be a whole number' }
          const out = between(n, c)
          return out ? { error: out } : { value: n }
       }
       case 'decimal': {
-         const n = toNumber(raw, decimalComma)
-         if (n === null) return { error: 'Must be a number' }
-         const out = between(n, c)
-         return out ? { error: out } : { value: n }
+         const plain = plainNumber(raw, decimalComma)
+         if (plain === null) return { error: 'Must be a number' }
+         const out = between(Number(plain), c)
+         return out ? { error: out } : { value: Number(plain) }
       }
       case 'money': {
-         const n = toNumber(raw, decimalComma)
-         if (n === null || n < 0) return { error: 'Must be an amount, like 45.50' }
-         const out = between(n, c)
+         const plain = plainNumber(raw, decimalComma)
+         if (plain === null || Number(plain) < 0) {
+            return { error: 'Must be an amount, like 45.50' }
+         }
+         // Money has two decimals at most. A third means a thousands mark was
+         // taken for the decimal point — 250.000 read as 250 — and a price a
+         // thousand times too small is not one to import on a guess.
+         if (decimalsOf(plain) > 2) {
+            return {
+               error: 'Write the amount without a thousands separator, like 250000 or 250000.50',
+            }
+         }
+         const out = between(Number(plain), c)
          // Minor units on the record, exactly as the panel's price boxes store them.
-         return out ? { error: out } : { value: Math.round(n * 100) }
+         return out ? { error: out } : { value: Math.round(Number(plain) * 100) }
       }
       case 'datetime': {
-         const d = toDate(raw)
-         return d ? { value: d } : { error: 'Must be a date, like 2026-12-24 08:00' }
+         const d = toDate(raw, slashOrder)
+         return d ? { value: d } : { error: 'Must be a date, like 2026-12-24T08:00' }
       }
       case 'time': {
          const m = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/)
@@ -737,8 +782,16 @@ const readCell = (
 /**
  * A cell that starts with = + - or @ is run as a formula by a spreadsheet.
  * Text never should be, whoever typed it — prefixed, it is shown as written.
+ *
+ * "Starts" as the program opening the file sees it. One set to split on `;`
+ * reads `Toyota;=SUM(…)` out of a comma file as two cells, the second of them
+ * a formula, so the guard also goes after anything that could pass for a
+ * separator there. After a line break it leaves the dash alone: `- ` bullets
+ * are how policies and inclusions are written, and an apostrophe on each line
+ * of every one would be a worse file.
  */
-const inert = (s: string) => (/^[=+\-@\t\r]/.test(s) ? `'${s}` : s)
+const inert = (s: string) =>
+   s.replace(/(^|[,;\t])(?=[=+\-@\t\r])|([\n\r])(?=[=+@])/g, "$1$2'")
 
 type Delimiter = ',' | ';'
 
@@ -762,17 +815,20 @@ const writeCell = (c: Column, doc: any, delimiter: Delimiter): string => {
          return inert((v as string[]).join(' | '))
       case 'bool':
          return v ? 'yes' : 'no'
-      case 'phone':
-      case 'time':
       case 'enum':
+         // The schema only ever lets one of a fixed set of words in here.
          return String(v)
       default:
+         // Text — and phone and time, which are free strings on the record
+         // however strictly an import reads them. Guarded, a phone number
+         // also survives a spreadsheet instead of turning into 2.4381E+11.
          return inert(String(v))
    }
 }
 
 const exampleOf = (c: Column, ctx: TemplateContext, delimiter: Delimiter = ',') => {
-   const text = typeof c.example === 'function' ? c.example(ctx) : c.example
+   // What the database supplies (a city's name) is as untrusted as any cell.
+   const text = typeof c.example === 'function' ? inert(c.example(ctx)) : c.example
    return c.kind === 'money' || c.kind === 'decimal' ? localNumber(text, delimiter) : text
 }
 
@@ -830,18 +886,66 @@ const normaliseHeader = (h: string) =>
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '')
 
-/** RFC 4180, with the separator worked out rather than assumed. */
+/**
+ * RFC 4180, with the separator worked out rather than assumed.
+ *
+ * Bounded while it reads, not afterwards. Building every row of a large file
+ * and counting them at the end costs around thirty bytes of heap a character:
+ * a few megabytes of short lines is a gigabyte, and the process that would run
+ * out is the one serving the public site. So blank lines are counted but never
+ * kept, and the row limit stops the read the moment it is passed.
+ */
 const parseCsv = (input: string) => {
-   let text = input.replace(/^\uFEFF/, '')
+   // One kind of line ending from here on. Excel's "CSV (Macintosh)" ends rows
+   // with a bare CR, which would otherwise run every row into the header.
+   let text = input.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
    // Excel's own hint line, when someone saved the file with one.
-   const hint = text.match(/^sep=(.)\r?\n/i)
+   const hint = text.match(/^sep=(.)\n/i)
    if (hint) text = text.slice(hint[0].length)
    const separator = hint ? hint[1] : detectSeparator(text)
 
-   const rows: string[][] = []
+   let header: string[] | null = null
+   const records: { rowNo: number; cells: Record<string, string> }[] = []
    let field = ''
    let row: string[] = []
    let inQuotes = false
+   // Numbered as the spreadsheet numbers them, blank rows included.
+   let rowNo = 0
+
+   const endRow = () => {
+      row.push(field)
+      field = ''
+      const cells = row
+      row = []
+      rowNo += 1
+      if (!cells.some((c) => c.trim())) return
+      if (!header) {
+         // Every row is keyed by every header, so the width is bounded as well:
+         // a hundred thousand names over a thousand one-cell rows is half a
+         // megabyte of file and several gigabytes of objects.
+         // Trailing blanks are a spreadsheet's doing (a stray space far to the
+         // right), not columns, and are dropped before they are counted.
+         let width = cells.length
+         while (width && !cells[width - 1].trim()) width -= 1
+         if (width > MAX_IMPORT_COLUMNS) {
+            throw new AppError(
+               'That file has far more columns than any template. Start again from the template.',
+               400
+            )
+         }
+         header = cells.slice(0, width).map(normaliseHeader)
+         return
+      }
+      if (records.length >= MAX_IMPORT_ROWS) {
+         throw new AppError(`An import is limited to ${MAX_IMPORT_ROWS} rows per file`, 400)
+      }
+      const names = header
+      records.push({
+         rowNo,
+         cells: Object.fromEntries(names.map((h, i) => [h, cells[i] ?? ''])),
+      })
+   }
+
    for (let i = 0; i < text.length; i++) {
       const c = text[i]
       if (inQuotes) {
@@ -850,36 +954,62 @@ const parseCsv = (input: string) => {
             i++
          } else if (c === '"') inQuotes = false
          else field += c
-      } else if (c === '"') inQuotes = true
+      }
+      // A quote opens a quoted cell only at the start of one. Anywhere else it
+      // is a character — a 55" screen — which is how a spreadsheet reads it,
+      // and what stops one stray mark swallowing every row after it.
+      else if (c === '"' && field === '') inQuotes = true
       else if (c === separator) {
          row.push(field)
          field = ''
-      } else if (c === '\n') {
-         row.push(field)
-         rows.push(row)
-         row = []
-         field = ''
-      } else if (c !== '\r') field += c
+      } else if (c === '\n') endRow()
+      else field += c
    }
-   if (field || row.length) {
-      row.push(field)
-      rows.push(row)
+   if (inQuotes) {
+      throw new AppError(
+         'A quoted cell in that file is never closed. Look for a stray " at the start of a cell.',
+         400
+      )
    }
+   if (field || row.length) endRow()
 
-   const header = (rows[0] ?? []).map(normaliseHeader)
-   const records = rows
-      .slice(1)
-      // Numbered as the spreadsheet numbers them: the header is row 1.
-      .map((cells, i) => ({ rowNo: i + 2, cells }))
-      .filter((r) => r.cells.some((c) => c.trim()))
-      .map((r) => ({
-         rowNo: r.rowNo,
-         cells: Object.fromEntries(header.map((h, i) => [h, r.cells[i] ?? ''])) as Record<
-            string,
-            string
-         >,
-      }))
-   return { header: header.filter(Boolean), records, decimalComma: separator === ';' }
+   return {
+      header: ((header ?? []) as string[]).filter(Boolean),
+      records,
+      decimalComma: separator === ';',
+   }
+}
+
+/**
+ * 03/05/2027 is the 3rd of May in Kinshasa and the 5th of March in New York,
+ * and a spreadsheet writes whichever its own settings say. No single cell can
+ * settle that, but a whole file usually can: one date whose "month" is above
+ * twelve gives the order away for every other date in it.
+ */
+const slashOrderOf = (
+   records: { cells: Record<string, string> }[],
+   columns: Column[]
+): { order: SlashOrder; conflict: boolean; sample?: string; settled: boolean } => {
+   const dated = columns.filter((c) => c.kind === 'datetime')
+   let dayFirst = false
+   let monthFirst = false
+   let sample: string | undefined
+   for (const { cells } of records) {
+      for (const c of dated) {
+         const cell = clean(cells[c.key])
+         const m = cell.match(SLASH_DATE)
+         if (!m) continue
+         sample ??= cell
+         if (Number(m[1]) > 12) dayFirst = true
+         if (Number(m[2]) > 12) monthFirst = true
+      }
+   }
+   return {
+      order: monthFirst && !dayFirst ? 'MDY' : 'DMY',
+      conflict: dayFirst && monthFirst,
+      sample,
+      settled: dayFirst || monthFirst,
+   }
 }
 
 // --- Request plumbing ------------------------------------------------------
@@ -986,27 +1116,35 @@ export const exportCsv = catchAsync(async (req: Request, res: Response) => {
 /**
  * POST /inventory/:group/import  { csv, commit? }
  *
- * Without `commit` this validates and reports, writing nothing.
+ * Without `commit: true` this validates and reports, writing nothing.
  */
 export const importCsv = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const { group, spec } = groupOf(req)
-      const { csv, commit } = req.body ?? {}
+      const { csv } = req.body ?? {}
+      // Exactly true. A caller that sends the string "false" has not asked.
+      const commit = req.body?.commit === true
       if (!csv || typeof csv !== 'string') {
          return next(new AppError('Choose a CSV file to import', 400))
+      }
+      // A thousand generous rows fit several times over. Past this it is the
+      // wrong file, and reading it would cost far more memory than its size.
+      if (csv.length > MAX_IMPORT_CHARS) {
+         return next(
+            new AppError(
+               `That file is too large to import. An import is limited to ${MAX_IMPORT_ROWS} rows.`,
+               413
+            )
+         )
       }
 
       const { header, records, decimalComma } = parseCsv(csv)
       if (!records.length) {
          return next(new AppError('That file has no rows under its header', 400))
       }
-      if (records.length > MAX_IMPORT_ROWS) {
-         return next(
-            new AppError(`An import is limited to ${MAX_IMPORT_ROWS} rows per file`, 400)
-         )
-      }
 
       const errors: { row: number; field: string; message: string }[] = []
+      const notes: string[] = []
       const importable = spec.columns.filter((c) => !c.readOnly)
       const known = new Set(spec.columns.map((c) => c.key))
       const ignoredColumns = header.filter((h) => !known.has(h))
@@ -1019,6 +1157,25 @@ export const importCsv = catchAsync(
       missing.forEach((key) =>
          errors.push({ row: 1, field: key, message: 'This column is missing from the file' })
       )
+
+      // Which way round this file writes its dates, said out loud whenever it
+      // had to be assumed — a departure on the wrong day is found by a customer.
+      const dates = slashOrderOf(records, importable)
+      if (dates.conflict) {
+         errors.push({
+            row: 1,
+            field: 'dates',
+            message:
+               'Some dates in this file are day first and others month first. Write them all one way, or as 2026-12-24T08:00.',
+         })
+      } else if (dates.order === 'MDY') {
+         notes.push(`Dates like ${dates.sample} were read month first, as this file writes them.`)
+      } else if (dates.sample && !dates.settled) {
+         notes.push(
+            `Dates like ${dates.sample} were read day first (day/month/year). If that is not what you meant, write them as 2026-12-24T08:00.`
+         )
+      }
+      const reading: Reading = { decimalComma, slashOrder: dates.order }
 
       // ponytail: every slug in the collection, read once, to skip what is
       // already here and hand out unique new ones in a single pass. Fine at
@@ -1056,7 +1213,7 @@ export const importCsv = catchAsync(
                if (c.required && !missing.has(c.key)) fail(c.key, `${c.label} is required`)
                continue
             }
-            const read = readCell(c, raw, decimalComma)
+            const read = readCell(c, raw, reading)
             if (read.error) fail(c.key, read.error)
             else setPath(doc, c.path, read.value)
          }
@@ -1086,6 +1243,7 @@ export const importCsv = catchAsync(
          validRows: toCreate.length,
          skipped,
          errors,
+         notes,
          ignoredColumns,
          canCommit: errors.length === 0 && toCreate.length > 0,
       }

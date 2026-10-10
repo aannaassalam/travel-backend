@@ -207,17 +207,32 @@ export const duplicateHotel = catchAsync(
       copy.slug = await uniqueSlug(Hotel, [resolveLocalized(copy.name), copy.city])
       // A clone always starts inactive — never silently publish a copy.
       copy.status = LISTING_STATUS.INACTIVE
+      copy.createdBy = (req as any).admin._id
 
       const hotel = await createDoc<any>(req, Hotel, copy, { entityType: ENTITY })
 
       // Room types come along, otherwise the clone is useless for hotels.
-      const sourceRooms = await RoomType.find({ hotel: source._id })
+      // Archived ones stay behind: they were deleted from the original.
+      const sourceRooms = await RoomType.find({
+         hotel: source._id,
+         status: { $ne: LISTING_STATUS.ARCHIVED },
+      })
       for (const room of sourceRooms) {
          const r = room.toObject() as any
          delete r._id
          delete r.__v
          r.hotel = hotel._id
          await RoomType.create(r)
+      }
+      if (sourceRooms.length) {
+         // One entry for the rooms — written, so audited (§2.2).
+         await recordAudit(req, {
+            action: AUDIT_ACTIONS.CREATE,
+            entityType: 'RoomType',
+            entityId: hotel._id.toString(),
+            after: { copiedFrom: source.slug, roomTypes: sourceRooms.length },
+            reason: `Room types copied with the hotel (${sourceRooms.length})`,
+         })
       }
 
       return sendResponse(res, 201, 'Hotel duplicated', {

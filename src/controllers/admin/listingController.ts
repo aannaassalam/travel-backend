@@ -288,12 +288,21 @@ export const publishListing = catchAsync(
        * would have the nightly job expire the listing again a few hours later;
        * one already in the past can only be a leftover, and goes.
        */
-      const stale = listing.validUntil && listing.validUntil.getTime() < Date.now()
+      const past = (d?: Date | null) => Boolean(d && d.getTime() < Date.now())
       const updated = await updateDoc<IListing>(
          req,
          Listing,
          req.params.id,
-         { status: LISTING_STATUS.PUBLISHED, ...(stale ? { validUntil: null } : {}) },
+         {
+            status: LISTING_STATUS.PUBLISHED,
+            ...(past(listing.validUntil) ? { validUntil: null } : {}),
+            // It is published now, so a pending "publish at" has nothing left
+            // to do — and would publish it again after a later deactivation.
+            publishAt: null,
+            // Same leftover in the other direction: a take-down time that has
+            // already passed would undo this publish at the next ten-minute run.
+            ...(past(listing.unpublishAt) ? { unpublishAt: null } : {}),
+         },
          { entityType: ENTITY }
       )
       return sendResponse(res, 200, 'Listing published', {
@@ -302,11 +311,19 @@ export const publishListing = catchAsync(
    }
 )
 
-/** Off the website and unbookable, but still in the list — publish to undo. */
+/**
+ * Off the website and unbookable, but still in the list — publish to undo.
+ * Someone taking it down by hand outranks a schedule: a "publish at" left on
+ * the record would otherwise put it back on sale within ten minutes.
+ */
 export const deactivateListing = catchAsync(async (req: Request, res: Response) => {
-   const listing = await deactivateDoc<IListing>(req, Listing, req.params.id, {
-      entityType: ENTITY,
-   })
+   const listing = await deactivateDoc<IListing>(
+      req,
+      Listing,
+      req.params.id,
+      { entityType: ENTITY },
+      { publishAt: undefined }
+   )
    return sendResponse(res, 200, 'Listing deactivated', {
       listing: presentListing(listing),
    })
@@ -336,6 +353,15 @@ export const duplicateListing = catchAsync(
       // A sell-by date belongs to the departure it was set for, and the panel
       // has no way to change it on the copy.
       delete copy.validUntil
+      // Nor does a copy inherit the original's schedule: a "publish at" already
+      // in the past would put it on sale minutes after it was made.
+      delete copy.publishAt
+      delete copy.unpublishAt
+      copy.createdBy = (req as any).admin._id
+      // Earned by the original, not by a copy nobody has bought — and the
+      // panel has no way to correct a score that came along by mistake.
+      delete copy.rating
+      copy.reviewCount = 0
       copy.title = req.body.title || {
          ...source.title,
          fr: `${resolveLocalized(source.title)} (copie)`,
@@ -413,6 +439,9 @@ export const expandRecurrence = catchAsync(
             delete copy._id
             delete copy.__v
             delete copy.id
+            // Each departure is published by hand, not by the source's schedule.
+            delete copy.publishAt
+            delete copy.unpublishAt
             copy.validFrom = date
             copy.validUntil = source.validUntil
                ? new Date(date.getTime() + (source.validUntil.getTime() - start.getTime()))

@@ -115,13 +115,15 @@ export const archiveDoc = async <T>(
  * Take a record off the website without archiving it. Publishing brings it
  * back, and unlike an archived record it stays in the admin lists — one click
  * from live again. Whatever it was (published, sold out, expired) it ends up
- * INACTIVE; nothing else on it changes.
+ * INACTIVE. Nothing else on it changes, bar what `also` names — a schedule
+ * that would put it straight back on sale, say.
  */
 export const deactivateDoc = async <T>(
    req: Request,
    model: Model<any>,
    id: string,
-   { entityType }: CrudOptions
+   { entityType }: CrudOptions,
+   also: Record<string, unknown> = {}
 ): Promise<T> => {
    const doc = await model.findById(id)
    if (!doc) throw new AppError(`${entityType} not found`, 404)
@@ -132,6 +134,7 @@ export const deactivateDoc = async <T>(
 
    const before = doc.toObject()
    ;(doc as any).status = LISTING_STATUS.INACTIVE
+   Object.entries(also).forEach(([k, v]) => ((doc as any)[k] = v))
    await doc.save()
 
    await recordAudit(req, {

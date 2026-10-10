@@ -226,11 +226,36 @@ app.all('*', (req: Request, res: Response, next: NextFunction) => {
 
 app.use(globalErrorHandler)
 
+/**
+ * How much text one request may put through the HTML filter. xss() is
+ * quadratic on a tag carrying thousands of attributes: 200 KB of that froze the
+ * whole process for over a minute, and this runs before any login check. Past
+ * the budget a string is not parsed at all — its angle brackets are escaped,
+ * which leaves no tag standing and costs a single pass.
+ */
+const HTML_FILTER_BUDGET = 10_000
+
+const escapeAngles = (s: string) => s.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+/**
+ * A spreadsheet is not HTML. Filtered, every < and > in it became an entity
+ * whose `;` split the cell in a French file, and `->` was stored as `-&gt;`.
+ * Nothing renders what an import stores as HTML, so it is read as written.
+ */
+const isSpreadsheetUpload = (req: Request, key: string) =>
+   key === 'csv' && /^\/admin\/v1\/inventory\/[^/]+\/import\/?$/.test(req.path)
+
 // Middleware to sanitize XSS
 function sanitizeXSS(req: Request, res: Response, next: NextFunction) {
+   let budget = HTML_FILTER_BUDGET
    for (const key in req.body) {
-      if (typeof req.body[key] === 'string') {
-         req.body[key] = xss(req.body[key])
+      const value = req.body[key]
+      if (typeof value !== 'string' || isSpreadsheetUpload(req, key)) continue
+      if (value.length <= budget) {
+         budget -= value.length
+         req.body[key] = xss(value)
+      } else {
+         req.body[key] = escapeAngles(value)
       }
    }
    next()
