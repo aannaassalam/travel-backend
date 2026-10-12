@@ -292,7 +292,8 @@ export const boundPagination = (
    res: Response,
    next: NextFunction
 ) => {
-   const requested = Number(req.query.limit) || 25
+   // Whole numbers only: a `limit=1.5` reaches the driver as a float and is refused.
+   const requested = Math.floor(Number(req.query.limit)) || 25
    req.query.limit = String(Math.min(Math.max(requested, 1), MAX_PAGE_SIZE))
    next()
 }

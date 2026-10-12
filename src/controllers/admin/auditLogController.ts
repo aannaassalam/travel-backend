@@ -2,6 +2,7 @@ import { Request, Response } from 'express'
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { presentAuditLogs } from '../../dto/admin/auditLog.dto'
 import AuditLog from '../../model/auditLogModel'
+import { paginate } from '../../services/adminCrud.service'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
 
@@ -39,9 +40,6 @@ const endOfDay = (v: string) => {
  */
 export const listAuditLogs = catchAsync(async (req: Request, res: Response) => {
    const { action, entityType, entityId, ip, from, to, actorEmail, q, risky } = req.query
-   const limit = Number(req.query.limit) // already bounded by boundPagination
-   const cursor = req.query.cursor as string | undefined
-
    const filter: Record<string, any> = {}
    if (action) filter.action = action
    else if (risky === '1' || risky === 'true') filter.action = { $in: RISKY_ACTIONS }
@@ -58,19 +56,11 @@ export const listAuditLogs = catchAsync(async (req: Request, res: Response) => {
       const term = rx(str(q)!)
       filter.$or = [{ actorEmail: term }, { entityId: term }, { reason: term }, { action: term }]
    }
-   // Cursor pagination (§2.2) — `_id` descending doubles as the cursor.
-   if (cursor) filter._id = { $lt: cursor }
-
-   const logs = await AuditLog.find(filter)
-      .sort({ _id: -1 })
-      .limit(limit + 1)
-
-   const hasMore = logs.length > limit
-   const page = hasMore ? logs.slice(0, limit) : logs
-
+   // Bounded and paged like every other list (§2.2), newest first.
+   const { items, ...paging } = await paginate(AuditLog, filter, req)
    return sendResponse(res, 200, 'OK', {
-      items: presentAuditLogs(page),
-      nextCursor: hasMore ? page[page.length - 1]._id.toString() : null,
+      items: presentAuditLogs(items as any),
+      ...paging,
    })
 })
 

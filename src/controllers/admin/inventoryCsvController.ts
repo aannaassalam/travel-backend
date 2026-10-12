@@ -183,7 +183,7 @@ const supplier = (example: string) =>
 
 const VALID_FROM = col('valid_from', 'On sale from', 'datetime', 'validFrom',
    (c) => stamp(new Date(c.departs.getTime() - 30 * DAY)),
-   'Optional. The date the service starts — used when you repeat it or copy it with new dates.')
+   'Optional. The date the service starts.')
 
 /** In every export, read by no import. */
 const REFERENCE: Column[] = [
@@ -601,15 +601,22 @@ const setPath = (obj: any, path: string, value: unknown) => {
 }
 
 /**
- * NUL would make the driver throw; an apostrophe before = + - @ where a cell
- * could be taken to start is the formula guard an export put there (see
- * `inert`, which this mirrors), not part of the value.
+ * NUL would make the driver throw; one apostrophe before = + - @ where a cell
+ * could be taken to start is the formula guard an export put there, not part
+ * of the value. Exactly one comes off, as exactly one went on (see `inert`),
+ * so an export read back in is the text that was exported.
+ *
+ * ponytail: a file typed by hand cannot say which it means, so its own `;'-`
+ * comes in as `;-`. Vanishingly rare in names and descriptions; if it ever
+ * matters, have exports mark their guard with a character no keyboard types.
  */
 const clean = (v: unknown) =>
    String(v ?? '')
       .replace(/\0/g, '')
       .trim()
-      .replace(/(^|[,;\t])'(?=[=+\-@\t\r])|([\n\r])'(?=[=+@])/g, '$1$2')
+      // `inert` backwards: the guard at the start, then the ones inside.
+      .replace(/^'(?='*[=+\-@\t\r])/, '')
+      .replace(/([,;\t])'(?='*[=+\-@\t\r])|([\n\r])'(?='*[=+@])/g, '$1$2')
 
 /**
  * A number as a spreadsheet wrote it, as the plain `1250.50` it means — or
@@ -789,9 +796,17 @@ const readCell = (
  * separator there. After a line break it leaves the dash alone: `- ` bullets
  * are how policies and inclusions are written, and an apostrophe on each line
  * of every one would be a worse file.
+ *
+ * The guard goes in front of any apostrophes already there, so a value that
+ * really begins `'=` leaves as `''=` and `clean` hands back the original.
  */
 const inert = (s: string) =>
-   s.replace(/(^|[,;\t])(?=[=+\-@\t\r])|([\n\r])(?=[=+@])/g, "$1$2'")
+   s
+      .replace(/([,;\t])(?='*[=+\-@\t\r])|([\n\r])(?='*[=+@])/g, "$1$2'")
+      // The start on its own, after the rest: taken in the same pass, a value
+      // beginning with a tab was guarded as a start and the tab then skipped
+      // as a separator, so `<tab>=1+1` still ran once split on tabs.
+      .replace(/^(?='*[=+\-@\t\r])/, "'")
 
 type Delimiter = ',' | ';'
 

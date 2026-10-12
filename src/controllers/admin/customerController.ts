@@ -38,11 +38,11 @@ export const listCustomers = catchAsync(async (req: Request, res: Response) => {
          { email: rx },
       ]
    }
-   const { items, nextCursor } = await paginate(Customer, filter, req)
+   const { items, ...paging } = await paginate(Customer, filter, req)
    return sendResponse(res, 200, 'OK', {
       // Phones masked in the list (§8) — a screenshot must not be a database.
       items: presentCustomerList(items as any),
-      nextCursor,
+      ...paging,
    })
 })
 

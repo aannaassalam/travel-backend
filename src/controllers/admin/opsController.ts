@@ -3,6 +3,7 @@ import { isValidObjectId } from 'mongoose'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { PAYMENT_STATUS } from '../../constants/domain.constants'
+import { POLICY_DEFAULTS } from '../../constants/policy.defaults'
 import {
    Enquiry,
    ENQUIRY_STAGES,
@@ -13,6 +14,7 @@ import {
    NOTIFICATION_CHANNELS,
    TEMPLATE_VARIABLES,
 } from '../../model/enquiryModel'
+import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import SettingsModel, { getSettings, PolicyVersion } from '../../model/settingsModel'
 import { geoPoint, parseGeo } from '../../model/shared.schema'
@@ -22,6 +24,7 @@ import { money, notify, pushBody, render } from '../../services/notifications/no
 import { sendSms, smsConfigured } from '../../services/notifications/sms.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
+import { dayRange } from '../../utils/dayRange'
 import { FieldMap, maskPhone, present, presentList } from '../../utils/present'
 import { sendResponse } from '../../utils/response'
 import { forReader } from '../../middleware/adminAuth'
@@ -111,6 +114,10 @@ export const listEnquiries = catchAsync(async (req: Request, res: Response) => {
    if (req.query.stage) filter.stage = req.query.stage
    if (req.query.kind) filter.kind = req.query.kind
    if (req.query.overdue === '1') Object.assign(filter, overdueFilter(settings.enquirySlaHours))
+   // "Received between": the two date boxes above the list. Merged, because
+   // the overdue filter may already hold createdAt to before its cut-off.
+   const received = dayRange(req.query.from, req.query.to)
+   if (received) filter.createdAt = { ...(filter.createdAt ?? {}), ...received }
 
    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
    if (q) {
@@ -127,10 +134,10 @@ export const listEnquiries = catchAsync(async (req: Request, res: Response) => {
       filter.$or = or
    }
 
-   const { items, nextCursor } = await paginate(Enquiry, filter, req)
+   const { items, ...paging } = await paginate(Enquiry, filter, req)
    return sendResponse(res, 200, 'OK', {
       items: (items as any[]).map((e) => withSla(e, settings.enquirySlaHours)),
-      nextCursor,
+      ...paging,
       slaHours: settings.enquirySlaHours,
    })
 })
@@ -314,9 +321,27 @@ export const listPayments = catchAsync(async (req: Request, res: Response) => {
    const filter: Record<string, any> = {
       paymentStatus: { $ne: PAYMENT_STATUS.UNPAID },
    }
-   const { items, nextCursor } = await paginate(Order, filter, req, {
-      populate: 'customer',
-   })
+   // The search box: an order reference, or the customer's name. A name is
+   // matched word by word, so "anas alam" finds Anas Alam although no single
+   // field holds both.
+   const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 80) : ''
+   if (q) {
+      const words = q.split(/\s+/).filter(Boolean).slice(0, 5)
+      const customers = await Customer.find({
+         $and: words.map((w) => ({ $or: [{ firstName: rx(w) }, { lastName: rx(w) }] })),
+      })
+         .select('_id')
+         .limit(200)
+      filter.$or = [{ reference: rx(q) }, { customer: { $in: customers.map((c) => c._id) } }]
+   }
+   const [{ items, ...paging }, paid] = await Promise.all([
+      paginate(Order, filter, req, { populate: 'customer' }),
+      // Summed over everything the search matches, not the page on screen.
+      Order.aggregate([
+         { $match: { ...filter, paymentStatus: PAYMENT_STATUS.PAID } },
+         { $group: { _id: null, total: { $sum: '$total' } } },
+      ]),
+   ])
 
    return sendResponse(res, 200, 'OK', {
       items: (items as any[]).map((o) => ({
@@ -335,7 +360,8 @@ export const listPayments = catchAsync(async (req: Request, res: Response) => {
          paidAt: o.paidAt,
          createdAt: o.createdAt,
       })),
-      nextCursor,
+      ...paging,
+      collected: paid[0]?.total ?? 0,
    })
 })
 
@@ -357,6 +383,9 @@ export const listPolicies = catchAsync(async (_req: Request, res: Response) => {
    const policies = await PolicyVersion.find().sort({ _id: -1 })
    return sendResponse(res, 200, 'OK', {
       items: presentList(policies, policyFields),
+      // What the website shows for a text nobody has published yet, so the
+      // editor can open on it instead of on an empty box.
+      builtIn: POLICY_DEFAULTS,
    })
 })
 
@@ -397,8 +426,11 @@ export const setPolicyLive = catchAsync(
       const version = await PolicyVersion.findById(req.params.id)
       if (!version) return next(new AppError('Policy version not found', 404))
 
-      // Exactly one live version per kind+locale.
+      // Exactly one live version per kind+locale. Not this one itself: taken
+      // down here and then "set live" again, nothing would be written the
+      // second time, and the policy would be left with no live text at all.
       const siblings = await PolicyVersion.find({
+         _id: { $ne: version._id },
          kind: version.kind,
          locale: version.locale,
          isLive: true,

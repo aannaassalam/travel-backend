@@ -18,6 +18,7 @@ import {
    createDoc,
    deactivateDoc,
    paginate,
+   sortBy,
    updateDoc,
 } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
@@ -83,10 +84,15 @@ export const listHotels = catchAsync(async (req: Request, res: Response) => {
       ]
    }
 
-   const { items, nextCursor } = await paginate(Hotel, filter, req)
+   const { items, ...paging } = await paginate(
+      Hotel,
+      filter,
+      req,
+      sortBy(req.query.sort, { name: 'name.fr' })
+   )
    return sendResponse(res, 200, 'OK', {
       items: presentHotels(items as any),
-      nextCursor,
+      ...paging,
    })
 })
 

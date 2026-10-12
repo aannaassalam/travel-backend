@@ -70,6 +70,7 @@ const QUEUE_FILTERS: Record<string, () => Record<string, any>> = {
          $lte: new Date(Date.now() + 48 * 60 * 60 * 1000),
       },
    }),
+   completed: () => ({ status: ORDER_STATUS.COMPLETED }),
    cancellations: () => ({ status: ORDER_STATUS.CANCELLED }),
    all: () => ({}),
 }
@@ -117,26 +118,30 @@ export const listOrders = catchAsync(
 
       const sort =
          queue === 'cash-pending'
-            ? ({ cashDeadline: 1 } as const) // §6.1: deadline ascending
+            ? ({ cashDeadline: 1, _id: 1 } as const) // §6.1: deadline ascending; _id settles ties across pages
             : ({ _id: -1 } as const)
 
-      const { items, nextCursor } = await paginate(Order, filter, req, {
+      const { items, ...paging } = await paginate(Order, filter, req, {
          sort: sort as any,
          populate: 'customer',
       })
       return sendResponse(res, 200, 'OK', {
          items: presentOrderList(items as any),
-         nextCursor,
+         ...paging,
       })
    }
 )
 
-/** Counts for the queue tabs and the dashboard action panel. */
+/**
+ * Counts for the queue tabs and the dashboard action panel: one per tab, "all"
+ * included, so the number on a tab is the number of rows behind it.
+ */
 export const queueCounts = catchAsync(async (_req: Request, res: Response) => {
    const entries = await Promise.all(
-      Object.entries(QUEUE_FILTERS)
-         .filter(([k]) => k !== 'all')
-         .map(async ([key, build]) => [key, await Order.countDocuments(build())])
+      Object.entries(QUEUE_FILTERS).map(async ([key, build]) => [
+         key,
+         await Order.countDocuments(build()),
+      ])
    )
    return sendResponse(res, 200, 'OK', Object.fromEntries(entries))
 })

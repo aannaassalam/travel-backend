@@ -42,10 +42,14 @@ export const getPolicy = catchAsync(
       // Newest wins if an operator ever manages to leave two live for a locale;
       // `setPolicyLive` prevents it, but the public page must still render.
       const byLocale: Record<string, string> = {}
+      const ids: Record<string, string> = {}
       const sorted = [...versions].sort(
          (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
       )
-      for (const v of sorted) byLocale[v.locale] = v.body
+      for (const v of sorted) {
+         byLocale[v.locale] = v.body
+         ids[v.locale] = v._id.toString()
+      }
 
       const newest = sorted[sorted.length - 1]
 
@@ -58,6 +62,10 @@ export const getPolicy = catchAsync(
             label: newest.label,
             effectiveFrom: newest.createdAt.toISOString().slice(0, 10),
             bodies: byLocale,
+            // Which version each body is. Checkout sends back the one it showed,
+            // so an order is never filed against a sentence the customer did
+            // not have in front of them.
+            versions: ids,
          },
       })
    }

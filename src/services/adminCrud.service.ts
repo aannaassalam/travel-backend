@@ -149,32 +149,95 @@ export const deactivateDoc = async <T>(
 }
 
 /**
- * §2.2: cursor pagination, and no endpoint returns unbounded results. The cap
- * is applied here rather than trusted from the query string.
+ * §2.2: no endpoint returns unbounded results. The cap is applied here rather
+ * than trusted from the query string.
+ *
+ * Numbered pages (`?page=2`) are what the panel's lists use: they need a total
+ * to draw "page 2 of 6", and an order other than newest-first. A `cursor` is
+ * still honoured for the callers that scroll instead (the enquiries board).
  */
+export interface Page<T> {
+   items: T[]
+   /** Everything the filter matches, not just this page. */
+   total: number
+   page: number
+   pageSize: number
+   pages: number
+   nextCursor: string | null
+}
+
+/** A whole number between 1 and `max`; anything else (text, 0, 1e400) is `fallback` or the nearest bound. */
+const whole = (raw: unknown, fallback: number, max: number) =>
+   Math.min(Math.max(Math.floor(Number(raw)) || fallback, 1), max)
+
+// Far past any list here, and keeps `skip` a number the driver accepts.
+const MAX_PAGE = 100_000
+
 export const paginate = async <T>(
    model: Model<any>,
    filter: Record<string, any>,
    req: Request,
-   opts: { sort?: Record<string, 1 | -1>; populate?: string } = {}
-): Promise<{ items: T[]; nextCursor: string | null }> => {
-   const limit = Math.min(Number(req.query.limit) || 25, MAX_PAGE_SIZE)
+   opts: {
+      sort?: Record<string, 1 | -1>
+      populate?: string
+      /** For sorting text the way a person would: accents and case ignored. */
+      collation?: { locale: string; strength?: number }
+   } = {}
+): Promise<Page<T>> => {
+   const limit = whole(req.query.limit, 25, MAX_PAGE_SIZE)
    const cursor = req.query.cursor as string | undefined
+   const page = cursor ? 1 : whole(req.query.page, 1, MAX_PAGE)
    const query = { ...filter }
    if (cursor) query._id = { $lt: cursor }
 
+   // ponytail: skip() walks the rows it skips. Fine for a back office paging
+   // through thousands; move the deep pages to a range query if a list ever
+   // reaches the hundreds of thousands.
    let q = model
       .find(query)
       .sort(opts.sort || { _id: -1 })
+      .skip((page - 1) * limit)
       .limit(limit + 1)
+   if (opts.collation) q = q.collation(opts.collation)
    if (opts.populate) q = q.populate(opts.populate)
 
-   const docs = await q
+   // Counted under the same collation as the rows are read: it also decides
+   // how text in the filter compares, and a total reached by other rules is
+   // how a page shows six rows under "0 results".
+   let count = model.countDocuments(filter)
+   if (opts.collation) count = count.collation(opts.collation)
+   const [docs, total] = await Promise.all([q, count])
    const hasMore = docs.length > limit
-   const page = hasMore ? docs.slice(0, limit) : docs
+   const items = hasMore ? docs.slice(0, limit) : docs
 
    return {
-      items: page as T[],
-      nextCursor: hasMore ? page[page.length - 1]._id.toString() : null,
+      items: items as T[],
+      total,
+      page,
+      pageSize: limit,
+      pages: Math.max(1, Math.ceil(total / limit)),
+      nextCursor: hasMore ? items[items.length - 1]._id.toString() : null,
+   }
+}
+
+/**
+ * `?sort=name` (A to Z) or `?sort=-name` (Z to A), for the columns a list
+ * allows. Anything else keeps the list's own order. French collation at
+ * strength 1, so "École" files under E and case is ignored.
+ */
+export const sortBy = (raw: unknown, fields: Record<string, string>) => {
+   const key = typeof raw === 'string' ? raw : ''
+   const descending = key.startsWith('-')
+   const name = descending ? key.slice(1) : key
+   // Own keys only: `?sort=constructor` must not find Object's.
+   if (!Object.hasOwn(fields, name)) return {}
+   const path = fields[name]
+   // ponytail: no index carries this collation, so a sorted list is matched and
+   // ordered without one. Right for a catalogue of thousands; give name.fr and
+   // title.fr a collated index if one ever reaches the hundreds of thousands.
+   return {
+      // _id settles ties, so a row never appears on two pages.
+      sort: { [path]: descending ? -1 : 1, _id: 1 } as Record<string, 1 | -1>,
+      collation: { locale: 'fr', strength: 1 },
    }
 }

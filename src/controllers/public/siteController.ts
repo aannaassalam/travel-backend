@@ -1,5 +1,6 @@
 import { Request, Response } from 'express'
 import { getSettings } from '../../model/settingsModel'
+import { getSiteContent, SITE_SECTION_NAMES } from '../../model/siteContentModel'
 import { geoPoint } from '../../model/shared.schema'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -50,5 +51,27 @@ export const getSiteContact = catchAsync(async (_req: Request, res: Response) =>
          officeHours: primary?.hours ?? '',
          offices,
       },
+   })
+})
+
+/**
+ * GET /api/v1/site/content            every section
+ * GET /api/v1/site/content?section=footer   one of them
+ *
+ * The words and pictures the office edits from the panel: home banner, About,
+ * Contact, Help and footer. Every language travels in one payload, as legal
+ * texts do — the visitor switches language without another request.
+ *
+ * One section on its own exists for the footer: it is on every page, and a
+ * visitor on a metered connection should not download the whole Help page to
+ * read three lines.
+ */
+export const getSiteContentPublic = catchAsync(async (req: Request, res: Response) => {
+   // `updatedAt` stays behind: when the office last edited is not the public's business.
+   // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   const { updatedAt, ...content } = await getSiteContent()
+   const only = SITE_SECTION_NAMES.find((name) => name === req.query.section)
+   return sendResponse(res, 200, 'OK', {
+      content: only ? { [only]: content[only] } : content,
    })
 })

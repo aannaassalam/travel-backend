@@ -229,6 +229,16 @@ listingSchema.methods.publishBlockers = function (): string[] {
    if (departs && new Date(departs).getTime() < Date.now()) {
       b.push('The departure date has passed — set a new date first')
    }
+   // The spreadsheet import refuses this row by row; the form has no such
+   // check, and the website would print the journey as "-1 h".
+   const journeys: any[] = [this.attributes ?? {}, ...(this.attributes?.segments ?? [])]
+   if (
+      journeys.some(
+         (j) => j.departsAt && j.arrivesAt && new Date(j.arrivesAt) <= new Date(j.departsAt)
+      )
+   ) {
+      b.push('An arrival time is not after its departure')
+   }
 
    if (this.vertical === VERTICALS.FLIGHT) {
       const legs: any[] = this.attributes?.segments ?? []

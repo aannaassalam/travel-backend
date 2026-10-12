@@ -229,28 +229,38 @@ app.use(globalErrorHandler)
 /**
  * How much text one request may put through the HTML filter. xss() is
  * quadratic on a tag carrying thousands of attributes: 200 KB of that froze the
- * whole process for over a minute, and this runs before any login check. Past
- * the budget a string is not parsed at all — its angle brackets are escaped,
- * which leaves no tag standing and costs a single pass.
+ * whole process for over a minute, and this runs before any login check or
+ * rate limit. Past the budget a string is not parsed at all — its angle
+ * brackets are escaped, which leaves no tag standing and costs a single pass.
+ *
+ * Sized by that worst case, not by what a field might hold: 2,000 characters
+ * of it cost about 20 ms, where 10,000 cost half a second. Nothing here is
+ * ever rendered as HTML, so text over the budget reads exactly the same.
  */
-const HTML_FILTER_BUDGET = 10_000
+const HTML_FILTER_BUDGET = 2_000
 
 const escapeAngles = (s: string) => s.replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 /**
- * A spreadsheet is not HTML. Filtered, every < and > in it became an entity
- * whose `;` split the cell in a French file, and `->` was stored as `-&gt;`.
- * Nothing renders what an import stores as HTML, so it is read as written.
+ * Two fields are plain text that nothing ever renders as HTML, so they are
+ * stored as written.
+ *
+ * A spreadsheet: filtered, every < and > in it became an entity whose `;`
+ * split the cell in a French file, and `->` was stored as `-&gt;`.
+ *
+ * A legal text: "enfants < 12 ans" in the terms was printed on the website as
+ * "enfants &lt; 12 ans", and that is also the wording kept with each order.
  */
-const isSpreadsheetUpload = (req: Request, key: string) =>
-   key === 'csv' && /^\/admin\/v1\/inventory\/[^/]+\/import\/?$/.test(req.path)
+const storedAsWritten = (req: Request, key: string) =>
+   (key === 'csv' && /^\/admin\/v1\/inventory\/[^/]+\/import\/?$/.test(req.path)) ||
+   (key === 'body' && /^\/admin\/v1\/policies\/?$/.test(req.path))
 
 // Middleware to sanitize XSS
 function sanitizeXSS(req: Request, res: Response, next: NextFunction) {
    let budget = HTML_FILTER_BUDGET
    for (const key in req.body) {
       const value = req.body[key]
-      if (typeof value !== 'string' || isSpreadsheetUpload(req, key)) continue
+      if (typeof value !== 'string' || storedAsWritten(req, key)) continue
       if (value.length <= budget) {
          budget -= value.length
          req.body[key] = xss(value)

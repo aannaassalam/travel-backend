@@ -248,6 +248,50 @@ export const createOrder = catchAsync(
       }
       const method = PAYMENT_METHOD.CASH
 
+      // The locale the customer is actually being served, used for the consent
+      // snapshot here and the customer record below.
+      const wanted = ['fr', 'en'].includes(locale) ? locale : 'fr'
+
+      // --- 0. Consent evidence (§2.2) ----------------------------------------
+      /**
+       * Read from the live policy version rather than a constant, so the text
+       * captured is provably the text the content section had published. The
+       * id is stored alongside the snapshot: the snapshot is what defends a
+       * chargeback, the id is what ties it to the immutable version record.
+       * Settled before anything is priced or held, so a refusal here leaves no
+       * seat to give back.
+       */
+      // Newest first, as the public policy endpoint picks: the two must name
+      // the same version even if two were ever left live for one language.
+      const live = (lang: string) =>
+         PolicyVersion.findOne({ kind: 'NO_REFUND', locale: lang, isLive: true }).sort({
+            createdAt: -1,
+         })
+      const policy = (await live(wanted)) ?? (await live('fr'))
+      if (!policy) {
+         return next(
+            new AppError('No published no-refund policy — cannot take an order', 503)
+         )
+      }
+      /**
+       * The website says which version it had on screen when the box was
+       * ticked. If the office has published another since — or the page could
+       * not load the text and showed something else — what is about to be
+       * recorded as "the text shown" was not shown. Refused, with the current
+       * text in the answer: the public policy endpoint is cached for minutes,
+       * and a customer told to read the new sentence must not be handed the
+       * old one again. Optional: the mobile app does not send it yet.
+       */
+      const shown = req.body?.policyVersionId
+      if (shown !== undefined && String(shown) !== policy._id.toString()) {
+         return res.status(409).json({
+            status: 'fail',
+            message: 'The no-refund policy has been updated. Please read it again.',
+            code: 'POLICY_CHANGED',
+            policy: { versionId: policy._id.toString(), locale: policy.locale, body: policy.body },
+         })
+      }
+
       // --- 1. Re-price from the database ------------------------------------
       let priced: PricedItem[]
       try {
@@ -373,10 +417,6 @@ export const createOrder = catchAsync(
       }
 
       try {
-         // The locale the customer is actually being served, used for both the
-         // customer record and the consent snapshot below.
-         const wanted = ['fr', 'en'].includes(locale) ? locale : 'fr'
-
          // --- 3. Customer, merged on the canonical phone (§7.2) --------------
          /**
           * `firstName` / `lastName` — the schema has no `name` field, and its
@@ -436,20 +476,6 @@ export const createOrder = catchAsync(
                409,
                'ACCOUNT_EXISTS'
             )
-         }
-
-         // --- 4. Consent evidence (§2.2) ------------------------------------
-         /**
-          * Read from the live policy version rather than a constant, so the text
-          * captured is provably the text the content section had published. The
-          * id is stored alongside the snapshot: the snapshot is what defends a
-          * chargeback, the id is what ties it to the immutable version record.
-          */
-         const policy =
-            (await PolicyVersion.findOne({ kind: 'NO_REFUND', locale: wanted, isLive: true })) ??
-            (await PolicyVersion.findOne({ kind: 'NO_REFUND', locale: 'fr', isLive: true }))
-         if (!policy) {
-            throw new AppError('No published no-refund policy — cannot take an order', 503)
          }
 
          const { chargedCurrency, chargedTotal, fxRate, totalUsd } = settle(

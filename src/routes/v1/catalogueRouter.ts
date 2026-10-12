@@ -13,7 +13,7 @@ import {
    getRestaurant,
    searchRestaurants,
 } from '../../controllers/public/restaurantController'
-import { getSiteContact } from '../../controllers/public/siteController'
+import { getSiteContact, getSiteContentPublic } from '../../controllers/public/siteController'
 import { createEnquiry } from '../../controllers/public/enquiryController'
 import { getPolicy } from '../../controllers/public/policyController'
 import { listLocations, listRoutes } from '../../controllers/public/locationController'
@@ -104,6 +104,9 @@ router.get('/restaurants/:slug', cacheable(300), getRestaurant)
 // Contact details change about once a year, so a long cache; the admin edit
 // is not expected to appear on the site within the minute.
 router.get('/site/contact', cacheable(900), getSiteContact)
+// The site's editable wording. A shorter cache than contact details: someone
+// who has just changed a headline is waiting to see it.
+router.get('/site/content', cacheable(300), getSiteContentPublic)
 
 router.get('/policies/:kind', cacheable(900), getPolicy)
 

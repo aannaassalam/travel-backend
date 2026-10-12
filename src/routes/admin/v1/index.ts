@@ -9,6 +9,7 @@ import * as inventoryCsv from '../../../controllers/admin/inventoryCsvController
 import * as listings from '../../../controllers/admin/listingController'
 import * as locations from '../../../controllers/admin/locationController'
 import * as ops from '../../../controllers/admin/opsController'
+import * as siteContent from '../../../controllers/admin/siteContentController'
 import * as restaurants from '../../../controllers/admin/restaurantController'
 import * as orders from '../../../controllers/admin/orderController'
 import {
@@ -235,6 +236,20 @@ router.get('/policies', requirePermission('content:read'), ops.listPolicies)
 // Editing creates a NEW version; there is deliberately no PATCH on policy text.
 router.post('/policies', requirePermission('content:write'), ops.createPolicyVersion)
 router.post('/policies/:id/publish', requirePermission('content:write'), ops.setPolicyLive)
+
+// --- Content: the website's own wording and pictures ------------------------
+router.get('/site-content', requirePermission('content:read'), siteContent.getContent)
+router.put('/site-content/:section', requirePermission('content:write'), siteContent.saveSection)
+// Permission first, so nobody without content:write can make the server buffer
+// an upload; then pinned to the website's own public folder.
+router.post(
+   '/site-content/images',
+   requirePermission('content:write'),
+   uploadMiddleware,
+   handleUploadErrors,
+   siteContent.siteImagesOnly,
+   uploadFiles
+)
 
 // --- Notifications (§11) ----------------------------------------------------
 router.get('/notifications/templates', requirePermission('notifications:read'), ops.listTemplates)

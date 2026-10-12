@@ -20,6 +20,7 @@ import {
    createDoc,
    deactivateDoc,
    paginate,
+   sortBy,
    updateDoc,
 } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
@@ -130,10 +131,15 @@ export const listListings = catchAsync(async (req: Request, res: Response) => {
       ]
    }
 
-   const { items, nextCursor } = await paginate(Listing, filter, req)
+   const { items, ...paging } = await paginate(
+      Listing,
+      filter,
+      req,
+      sortBy(req.query.sort, { name: 'title.fr' })
+   )
    return sendResponse(res, 200, 'OK', {
       items: presentList(items as any, listingFields),
-      nextCursor,
+      ...paging,
    })
 })
 
@@ -273,6 +279,49 @@ export const updateListing = catchAsync(
    }
 )
 
+/** A scheduled take-down still to come, with a "publish at" after it. */
+const returnsLater = (l: IListing) =>
+   Boolean(
+      l.unpublishAt &&
+         l.publishAt &&
+         l.unpublishAt.getTime() > Date.now() &&
+         l.publishAt.getTime() > l.unpublishAt.getTime()
+   )
+
+/**
+ * A copy made for another date leaves on that date: every departure and
+ * arrival on it moves by the same amount — the listing's own pair and each
+ * flight leg. Left behind, every repeat of a service carried the first one's
+ * time, and all of them stopped selling the moment the first had left.
+ */
+const shiftTimes = (attributes: any, ms: number) => {
+   if (!attributes || !ms) return attributes
+   const move = (d: unknown) => (d ? new Date(new Date(d as any).getTime() + ms) : d)
+   return {
+      ...attributes,
+      departsAt: move(attributes.departsAt),
+      arrivesAt: move(attributes.arrivesAt),
+      segments: (attributes.segments ?? []).map((leg: any) => ({
+         ...leg,
+         departsAt: move(leg.departsAt),
+         arrivesAt: move(leg.arrivesAt),
+      })),
+   }
+}
+
+/**
+ * The day a listing's dates are counted from: the day it leaves, or its start
+ * date when it has no departure (a car, an activity). The day only — a start
+ * date typed with a time of day would otherwise move a 06:30 bus to 22:30 on
+ * every copy.
+ */
+const anchorDay = (l: IListing): Date | null => {
+   const attrs = l.attributes as any
+   const from = attrs?.departsAt ?? attrs?.segments?.[0]?.departsAt ?? l.validFrom
+   const day = from ? new Date(from) : null
+   return day && !Number.isNaN(day.getTime()) ? new Date(day.toISOString().slice(0, 10)) : null
+}
+
 export const publishListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const listing = await Listing.findById(req.params.id)
@@ -298,7 +347,9 @@ export const publishListing = catchAsync(
             ...(past(listing.validUntil) ? { validUntil: null } : {}),
             // It is published now, so a pending "publish at" has nothing left
             // to do — and would publish it again after a later deactivation.
-            publishAt: null,
+            // Kept only when it is the way back from a take-down still ahead
+            // ("down at 22:00, up again at 23:00").
+            ...(returnsLater(listing) ? {} : { publishAt: null }),
             // Same leftover in the other direction: a take-down time that has
             // already passed would undo this publish at the next ten-minute run.
             ...(past(listing.unpublishAt) ? { unpublishAt: null } : {}),
@@ -372,21 +423,15 @@ export const duplicateListing = catchAsync(
       copy.quantitySold = 0
       copy.quantityHeld = 0
 
-      // "Duplicate with new dates" — shift the whole validity window.
+      // "Duplicate with new dates" — the copy leaves on the new day, at the
+      // same times of day as the original.
       if (req.body.validFrom) {
-         copy.validFrom = new Date(req.body.validFrom)
+         const from = new Date(req.body.validFrom)
+         copy.validFrom = from
          if (req.body.validUntil) copy.validUntil = new Date(req.body.validUntil)
-         if (copy.attributes?.departsAt && source.validFrom) {
-            const shift =
-               new Date(req.body.validFrom).getTime() - source.validFrom.getTime()
-            copy.attributes.departsAt = new Date(
-               new Date(copy.attributes.departsAt).getTime() + shift
-            )
-            if (copy.attributes.arrivesAt) {
-               copy.attributes.arrivesAt = new Date(
-                  new Date(copy.attributes.arrivesAt).getTime() + shift
-               )
-            }
+         const anchor = anchorDay(source)
+         if (anchor && !Number.isNaN(from.getTime())) {
+            copy.attributes = shiftTimes(copy.attributes, from.getTime() - anchor.getTime())
          }
       }
 
@@ -398,6 +443,9 @@ export const duplicateListing = catchAsync(
       })
    }
 )
+
+const DAY = 86_400_000
+const MAX_RECURRENCE_DAYS = 366
 
 /**
  * §5.2 bus recurrence: "repeat daily/weekly until date", or the same trip gets
@@ -412,44 +460,65 @@ export const expandRecurrence = catchAsync(
       if (!frequency || !until) {
          return next(new AppError('frequency and until are required', 400))
       }
+      const start = anchorDay(source) || new Date(new Date().toISOString().slice(0, 10))
       const end = new Date(until)
-      const start = source.validFrom || new Date()
-      if (end <= start) return next(new AppError('until must be after the start', 400))
-
-      const dates: Date[] = []
-      for (
-         let d = new Date(start);
-         d <= end && dates.length <= 366;
-         d.setUTCDate(d.getUTCDate() + 1)
-      ) {
-         if (d.getTime() === start.getTime()) continue // the source itself
-         if (frequency === 'WEEKLY' && !(daysOfWeek || []).includes(d.getUTCDay())) {
-            continue
-         }
-         dates.push(new Date(d))
+      const days = Math.floor((end.getTime() - start.getTime()) / DAY)
+      if (!(days >= 1)) return next(new AppError('until must be after the start', 400))
+      // A year of departures at a time; the bound is also what keeps a date in
+      // the year 275760 from being walked day by day.
+      if (days > MAX_RECURRENCE_DAYS) {
+         return next(new AppError('until is more than a year after the start', 400))
       }
-      if (!dates.length) {
+      const weekdays = (Array.isArray(daysOfWeek) ? daysOfWeek : []).map(Number)
+
+      const title = resolveLocalized(source.title)
+      const wanted: { date: Date; slug: string }[] = []
+      for (let n = 1; n <= days; n++) {
+         const date = new Date(start.getTime() + n * DAY)
+         if (frequency === 'WEEKLY' && !weekdays.includes(date.getUTCDay())) continue
+         wanted.push({
+            date,
+            slug: slugify(`${title}-${source.city}-${date.toISOString().slice(0, 10)}`, {
+               lower: true,
+               strict: true,
+            }),
+         })
+      }
+      if (!wanted.length) {
          return next(new AppError('That pattern produces no additional dates', 400))
+      }
+      // Asked again with a later "until", only the new days are added: the ones
+      // already made keep whatever was changed on them since.
+      const have = new Set(
+         await Listing.distinct('slug', { slug: { $in: wanted.map((w) => w.slug) } })
+      )
+      const missing = wanted.filter((w) => !have.has(w.slug))
+      if (!missing.length) {
+         return next(new AppError('Those departures already exist', 409))
       }
 
       const base = source.toObject() as any
       const created = await Listing.insertMany(
-         dates.map((date) => {
+         missing.map(({ date, slug }) => {
             const copy = { ...base }
             delete copy._id
             delete copy.__v
             delete copy.id
+            delete copy.createdAt
+            delete copy.updatedAt
             // Each departure is published by hand, not by the source's schedule.
             delete copy.publishAt
             delete copy.unpublishAt
+            // Earned by the original, not by a departure nobody has taken yet.
+            delete copy.rating
+            copy.reviewCount = 0
+            copy.createdBy = (req as any).admin._id
+            copy.attributes = shiftTimes(base.attributes, date.getTime() - start.getTime())
             copy.validFrom = date
             copy.validUntil = source.validUntil
                ? new Date(date.getTime() + (source.validUntil.getTime() - start.getTime()))
                : undefined
-            copy.slug = slugify(
-               `${source.title}-${source.city}-${date.toISOString().slice(0, 10)}`,
-               { lower: true, strict: true }
-            )
+            copy.slug = slug
             copy.status = LISTING_STATUS.INACTIVE
             copy.quantitySold = 0
             copy.quantityHeld = 0
@@ -467,6 +536,7 @@ export const expandRecurrence = catchAsync(
 
       return sendResponse(res, 201, `${created.length} departure(s) created`, {
          created: created.length,
+         alreadyThere: wanted.length - missing.length,
       })
    }
 )

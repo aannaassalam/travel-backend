@@ -216,27 +216,54 @@ export const normaliseLegacyStatuses = async () => {
    return changed
 }
 
-/** §5.1 scheduled publish / unpublish. */
+/**
+ * §5.1 scheduled publish / unpublish.
+ *
+ * In three steps, in this order, so that a window the job arrives late for
+ * still ends the way its dates asked.
+ */
 export const applyScheduledPublishing = async () => {
    const now = new Date()
-   // A "publish at" that has passed on something already published has done
-   // its work. Left on the record it would bring the listing back ten minutes
-   // after its own scheduled take-down.
+   const due = { $lte: now }
+   const { PUBLISHED, INACTIVE } = LISTING_STATUS
+   // Each date does its work once and is then cleared. One left behind acts
+   // again later: a passed "publish at" brings a listing back ten minutes after
+   // a take-down, a passed "unpublish at" takes it down ten minutes after its
+   // next publication.
+
+   // 1. Both dates passed, the take-down last: the window is over, so the
+   //    publish date has nothing left to do. (The other order — "down at
+   //    22:00, up again at 23:00" — is a way back, and step 3 honours it.)
    await Listing.updateMany(
-      { publishAt: { $lte: now }, status: LISTING_STATUS.PUBLISHED },
+      {
+         status: { $in: [PUBLISHED, INACTIVE] },
+         publishAt: due,
+         unpublishAt: due,
+         $expr: { $gte: ['$unpublishAt', '$publishAt'] },
+      },
       { $unset: { publishAt: 1 } }
    )
-   const [published, unpublished] = await Promise.all([
-      Listing.updateMany(
-         { publishAt: { $lte: now }, status: LISTING_STATUS.INACTIVE },
-         { $set: { status: LISTING_STATUS.PUBLISHED }, $unset: { publishAt: 1 } }
-      ),
-      Listing.updateMany(
-         { unpublishAt: { $lte: now }, status: LISTING_STATUS.PUBLISHED },
-         { $set: { status: LISTING_STATUS.INACTIVE }, $unset: { unpublishAt: 1 } }
-      ),
-   ])
-   return { published: published.modifiedCount, unpublished: unpublished.modifiedCount }
+   // 2. Take down what is due; on something already off sale the date is spent.
+   const unpublished = await Listing.updateMany(
+      { unpublishAt: due, status: PUBLISHED },
+      { $set: { status: INACTIVE }, $unset: { unpublishAt: 1 } }
+   )
+   await Listing.updateMany({ unpublishAt: due, status: INACTIVE }, { $unset: { unpublishAt: 1 } })
+   // 3. Put on sale what is due — one at a time, and only what the Publish
+   //    button itself would accept. A listing with no photo, no cost price or
+   //    a flight with no times stays inactive and is looked at again next run.
+   //    On something already on sale the date is spent.
+   await Listing.updateMany({ publishAt: due, status: PUBLISHED }, { $unset: { publishAt: 1 } })
+   let published = 0
+   for (const listing of await Listing.find({ publishAt: due, status: INACTIVE })) {
+      if (listing.publishBlockers().length) continue
+      const r = await Listing.updateOne(
+         { _id: listing._id, status: INACTIVE },
+         { $set: { status: PUBLISHED }, $unset: { publishAt: 1 } }
+      )
+      published += r.modifiedCount
+   }
+   return { published, unpublished: unpublished.modifiedCount }
 }
 
 /**
