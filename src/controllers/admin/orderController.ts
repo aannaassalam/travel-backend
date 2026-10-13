@@ -16,7 +16,7 @@ import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import { notifyOrder } from '../../services/notifications/notify.service'
 import { releaseListing, releaseStay } from '../../services/orders/inventory.service'
 import { Order } from '../../model/orderModel'
-import { paginate } from '../../services/adminCrud.service'
+import { customerNameSort, paginate, sortBy } from '../../services/adminCrud.service'
 import { forReader } from '../../middleware/adminAuth'
 import { recordAudit } from '../../services/auditLog.service'
 import { storage } from '../../services/storage'
@@ -121,8 +121,20 @@ export const listOrders = catchAsync(
             ? ({ cashDeadline: 1, _id: 1 } as const) // §6.1: deadline ascending; _id settles ties across pages
             : ({ _id: -1 } as const)
 
+      // A column header pressed in the panel overrides the queue's own order.
+      const asked = sortBy(req.query.sort, {
+         reference: 'reference',
+         customer: customerNameSort,
+         status: 'status',
+         payment: 'paymentStatus',
+         documents: 'fulfilmentStatus',
+         total: 'total',
+         deadline: 'cashDeadline',
+         travel: 'travelDate',
+      })
       const { items, ...paging } = await paginate(Order, filter, req, {
          sort: sort as any,
+         ...asked,
          populate: 'customer',
       })
       return sendResponse(res, 200, 'OK', {

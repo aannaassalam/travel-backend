@@ -1,7 +1,8 @@
 import { Request } from 'express'
 import { Model } from 'mongoose'
 import { AUDIT_ACTIONS } from '../constants/admin.constants'
-import { LISTING_STATUS } from '../constants/domain.constants'
+import { LISTING_STATUS, ORDER_STATUS } from '../constants/domain.constants'
+import { Order } from '../model/orderModel'
 import AppError from '../utils/appError'
 import { recordAudit } from './auditLog.service'
 
@@ -84,8 +85,8 @@ export const updateDoc = async <T>(
 }
 
 /**
- * §5.1 / §15: never hard delete. Archive instead — historical orders must
- * resolve to their listing forever. There is deliberately no deleteDoc here.
+ * Archive: the record leaves the lists and the website and stays in the
+ * database. Still the everyday way to retire something.
  */
 export const archiveDoc = async <T>(
    req: Request,
@@ -182,10 +183,14 @@ export const paginate = async <T>(
       populate?: string
       /** For sorting text the way a person would: accents and case ignored. */
       collation?: { locale: string; strength?: number }
+      /** A value worked out per row to order by (see `sortBy`); `sort` then names it. */
+      computed?: ComputedSort
    } = {}
 ): Promise<Page<T>> => {
    const limit = whole(req.query.limit, 25, MAX_PAGE_SIZE)
-   const cursor = req.query.cursor as string | undefined
+   // "Everything before this id" is only a place in the list when the list is
+   // in id order; a sorted list is paged by number.
+   const cursor = opts.sort ? undefined : (req.query.cursor as string | undefined)
    const page = cursor ? 1 : whole(req.query.page, 1, MAX_PAGE)
    const query = { ...filter }
    if (cursor) query._id = { $lt: cursor }
@@ -193,13 +198,40 @@ export const paginate = async <T>(
    // ponytail: skip() walks the rows it skips. Fine for a back office paging
    // through thousands; move the deep pages to a range query if a list ever
    // reaches the hundreds of thousands.
-   let q = model
-      .find(query)
-      .sort(opts.sort || { _id: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit + 1)
-   if (opts.collation) q = q.collation(opts.collation)
-   if (opts.populate) q = q.populate(opts.populate)
+   let q: any
+   if (opts.computed) {
+      // A margin, a number of delivery zones, a customer's name on an order:
+      // nothing stored orders these, so the page is picked by an aggregation
+      // that works the value out — ids only — and the rows are then read the
+      // ordinary way, so every list still hands the same documents to its DTO.
+      const pipeline: any[] = [
+         // aggregate() does not cast a filter to the schema; find() does.
+         { $match: model.find(filter).cast(model) },
+         ...(opts.computed.lookup ? [{ $lookup: opts.computed.lookup }] : []),
+         { $addFields: { [COMPUTED_SORT]: opts.computed.value } },
+         { $sort: opts.sort },
+         { $skip: (page - 1) * limit },
+         { $limit: limit + 1 },
+         { $project: { _id: 1 } },
+      ]
+      let picked = model.aggregate(pipeline)
+      if (opts.collation) picked = picked.collation(opts.collation)
+      const ids = (await picked).map((d: any) => d._id)
+      const place = new Map(ids.map((id: any, i: number) => [String(id), i]))
+      let rows = model.find({ _id: { $in: ids } })
+      if (opts.populate) rows = rows.populate(opts.populate)
+      q = rows.then((found: any[]) =>
+         found.sort((a, b) => place.get(String(a._id))! - place.get(String(b._id))!)
+      )
+   } else {
+      q = model
+         .find(query)
+         .sort(opts.sort || { _id: -1 })
+         .skip((page - 1) * limit)
+         .limit(limit + 1)
+      if (opts.collation) q = q.collation(opts.collation)
+      if (opts.populate) q = q.populate(opts.populate)
+   }
 
    // Counted under the same collation as the rows are read: it also decides
    // how text in the filter compares, and a total reached by other rules is
@@ -216,28 +248,143 @@ export const paginate = async <T>(
       page,
       pageSize: limit,
       pages: Math.max(1, Math.ceil(total / limit)),
-      nextCursor: hasMore ? items[items.length - 1]._id.toString() : null,
+      nextCursor: hasMore && !opts.sort ? items[items.length - 1]._id.toString() : null,
    }
 }
 
+/** The name the worked-out value travels under inside the aggregation. */
+const COMPUTED_SORT = '__sortValue'
+
+/** A value worked out per row to order a list by, when nothing stored does. */
+export interface ComputedSort {
+   /** An aggregation expression, in terms of the document ("$field"). */
+   value: any
+   /** Another collection to join first, when the value lives on a linked record. */
+   lookup?: { from: string; localField: string; foreignField: string; as: string }
+}
+
 /**
- * `?sort=name` (A to Z) or `?sort=-name` (Z to A), for the columns a list
- * allows. Anything else keeps the list's own order. French collation at
- * strength 1, so "École" files under E and case is ignored.
+ * What one sortable column orders by: a stored path, several stored paths in
+ * turn (first name, then last name), or a value worked out per row.
  */
-export const sortBy = (raw: unknown, fields: Record<string, string>) => {
+export type SortKey = string | string[] | ComputedSort
+
+/**
+ * `?sort=name` (first to last) or `?sort=-name` (last to first), for the
+ * columns a list allows — every column its table shows. Anything else keeps
+ * the list's own order. French collation at strength 1, so "École" files under
+ * E and case is ignored.
+ */
+export const sortBy = (raw: unknown, fields: Record<string, SortKey>) => {
    const key = typeof raw === 'string' ? raw : ''
    const descending = key.startsWith('-')
    const name = descending ? key.slice(1) : key
    // Own keys only: `?sort=constructor` must not find Object's.
    if (!Object.hasOwn(fields, name)) return {}
-   const path = fields[name]
+   const by = fields[name]
+   const direction = descending ? -1 : 1
+   const computed = typeof by === 'string' || Array.isArray(by) ? undefined : by
+   const paths = computed ? [COMPUTED_SORT] : typeof by === 'string' ? [by] : (by as string[])
    // ponytail: no index carries this collation, so a sorted list is matched and
    // ordered without one. Right for a catalogue of thousands; give name.fr and
    // title.fr a collated index if one ever reaches the hundreds of thousands.
    return {
-      // _id settles ties, so a row never appears on two pages.
-      sort: { [path]: descending ? -1 : 1, _id: 1 } as Record<string, 1 | -1>,
+      sort: {
+         ...Object.fromEntries(paths.map((path) => [path, direction])),
+         // _id settles ties, so a row never appears on two pages.
+         _id: 1,
+      } as Record<string, 1 | -1>,
       collation: { locale: 'fr', strength: 1 },
+      computed,
    }
+}
+
+/** How many of the languages a record is fully translated into (name and description both), as the lists' Translations column counts it. */
+export const translatedCount = (name: string, locales: readonly string[]) => ({
+   $sum: locales.map((l) => ({
+      $cond: [
+         {
+            $and: [
+               { $gt: [{ $strLenCP: { $convert: { input: `$${name}.${l}`, to: 'string', onError: '', onNull: '' } } }, 0] },
+               { $gt: [{ $strLenCP: { $convert: { input: `$description.${l}`, to: 'string', onError: '', onNull: '' } } }, 0] },
+            ],
+         },
+         1,
+         0,
+      ],
+   })),
+})
+
+/** A linked customer's name ("first last"), for ordering orders and payments by it. */
+export const customerNameSort: ComputedSort = {
+   lookup: { from: 'platform_customers', localField: 'customer', foreignField: '_id', as: '__customer' },
+   value: {
+      $concat: [
+         { $ifNull: [{ $first: '$__customer.firstName' }, ''] },
+         ' ',
+         { $ifNull: [{ $first: '$__customer.lastName' }, ''] },
+      ],
+   },
+}
+
+/**
+ * Removes a record for good — the owner's call: an admin has to be able to
+ * clear out what was created by mistake, not only hide it.
+ *
+ * What makes that safe to offer is spread over three places. The route: a
+ * delete permission of its own, and the admin's password re-entered minutes
+ * ago. The controller: nothing is left pointing at what goes (orders hold
+ * their own copy of what they sold; what cannot stand alone goes with it).
+ * And here: the audit log keeps the record as it was, so it can be read back.
+ */
+export const deleteDoc = async <T>(
+   req: Request,
+   model: Model<any>,
+   filter: Record<string, any>,
+   {
+      entityType,
+      snapshot,
+      reason,
+   }: CrudOptions & {
+      /** What the audit log keeps, when that should not be the whole record (personal data). */
+      snapshot?: (doc: any) => unknown
+      reason?: string
+   }
+): Promise<T> => {
+   const doc = await model.findOne(filter)
+   if (!doc) throw new AppError(`${entityType} not found`, 404)
+   const before = doc.toObject()
+   await doc.deleteOne()
+   await recordAudit(req, {
+      action: AUDIT_ACTIONS.PURGE,
+      entityType,
+      entityId: String(doc._id),
+      before: snapshot ? snapshot(before) : before,
+      reason,
+   })
+   return before as T
+}
+
+/**
+ * Bookings still in progress that name a record about to be deleted. They are
+ * not harmed — an order line is a copy of what was sold — but the admin should
+ * know before the item behind them goes: the first attempt is refused with
+ * the count, and `?confirm=1` goes ahead.
+ */
+export const confirmOverOpenBookings = async (
+   req: Request,
+   match: Record<string, any>,
+   what: string
+) => {
+   if (req.query.confirm === '1') return
+   const open = await Order.countDocuments({
+      status: { $in: [ORDER_STATUS.DRAFT, ORDER_STATUS.SUBMITTED, ORDER_STATUS.CONFIRMED] },
+      ...match,
+   })
+   if (!open) return
+   throw new AppError(
+      `${open} booking${open === 1 ? '' : 's'} in progress ${open === 1 ? 'is' : 'are'} for ${what}. ${open === 1 ? 'It keeps its' : 'They keep their'} own copy of the details and will not change. Delete it anyway?`,
+      409,
+      'OPEN_BOOKINGS'
+   )
 }

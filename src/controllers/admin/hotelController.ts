@@ -15,10 +15,13 @@ import { baseAmount, parseGeo, parseMoney, resolveLocalized } from '../../model/
 import { getSettings } from '../../model/settingsModel'
 import {
    archiveDoc,
+   confirmOverOpenBookings,
+   deleteDoc,
    createDoc,
    deactivateDoc,
    paginate,
    sortBy,
+   translatedCount,
    updateDoc,
 } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
@@ -43,6 +46,7 @@ const HOTEL_EDITABLE = [
    'country',
    'amenities',
    'images',
+   'videoUrl',
    'supplier',
    'checkInTime',
    'checkOutTime',
@@ -88,7 +92,15 @@ export const listHotels = catchAsync(async (req: Request, res: Response) => {
       Hotel,
       filter,
       req,
-      sortBy(req.query.sort, { name: 'name.fr' })
+      // One key per column of the panel's hotels table.
+      sortBy(req.query.sort, {
+         name: 'name.fr',
+         city: 'city',
+         status: 'status',
+         translations: { value: translatedCount('name', LOCALES) },
+         supplier: 'supplier',
+         updated: 'updatedAt',
+      })
    )
    return sendResponse(res, 200, 'OK', {
       items: presentHotels(items as any),
@@ -434,3 +446,38 @@ export const bulkUpdateCalendar = catchAsync(
       })
    }
 )
+
+/**
+ * DELETE /hotels/:id — for good, with what cannot stand without it: its room
+ * types and every night's price and allotment. Bookings keep their own copy
+ * of the stay they sold.
+ */
+export const deleteHotel = catchAsync(async (req: Request, res: Response) => {
+   await confirmOverOpenBookings(req, { 'items.listingId': req.params.id }, 'this hotel')
+   const hotel = await Hotel.findById(req.params.id)
+   if (!hotel) throw new AppError(`${ENTITY} not found`, 404)
+   const rooms = await RoomType.find({ hotel: hotel._id }).lean()
+   // The rooms first: stopped half way, what is left is a hotel that can be
+   // deleted again — not rooms and prices belonging to nothing.
+   const { deletedCount: nights } = await RatePlan.deleteMany({ hotel: hotel._id })
+   await RoomType.deleteMany({ hotel: hotel._id })
+   await deleteDoc(req, Hotel, { _id: hotel._id }, {
+      entityType: ENTITY,
+      snapshot: (before) => ({ ...before, roomTypes: rooms }),
+      reason: `Deleted with ${rooms.length} room type(s) and ${nights} nightly price(s)`,
+   })
+   return sendResponse(res, 200, 'Hotel deleted', {})
+})
+
+/** DELETE /hotels/:id/room-types/:roomTypeId — the room type and its nightly prices. */
+export const deleteRoomType = catchAsync(async (req: Request, res: Response) => {
+   const own = { _id: req.params.roomTypeId, hotel: req.params.id }
+   await confirmOverOpenBookings(req, { 'items.roomTypeId': req.params.roomTypeId }, 'this room type')
+   if (!(await RoomType.exists(own))) throw new AppError('RoomType not found', 404)
+   const { deletedCount: nights } = await RatePlan.deleteMany({ roomType: req.params.roomTypeId })
+   await deleteDoc(req, RoomType, own, {
+      entityType: 'RoomType',
+      reason: `Deleted with ${nights} nightly price(s)`,
+   })
+   return sendResponse(res, 200, 'Room type deleted', {})
+})

@@ -681,3 +681,39 @@ export const resetUserPassword = catchAsync(async (req: Request, res: Response) 
       emailed,
    })
 })
+
+/**
+ * DELETE /users/:id — a staff account, for good. Deactivating stays the way to
+ * switch one off and keep it; this is for the account that should not exist.
+ *
+ * The same rules as any other change to an account (loadTarget: not one's own,
+ * not the break-glass account, not one with more access than the caller), and
+ * never the last active super admin. The audit log names its actors by e-mail
+ * address, so past entries read the same afterwards.
+ */
+export const deleteUser = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const actor = actorOf(req)
+      const target = await loadTarget(actor, req.params.id)
+      if (losesActiveSuper(target, { role: target.role, isActive: false })) {
+         const others = await AdminUser.countDocuments({
+            _id: { $ne: target._id },
+            role: ADMIN_ROLES.SUPER_ADMIN,
+            isActive: true,
+         })
+         if (others === 0) return next(refuse('LAST_SUPER_ADMIN'))
+      }
+      const before = userAudit(target)
+      // The sessions go with the document; a token still held resolves to no
+      // account on its next request.
+      await target.deleteOne()
+      await recordAudit(req, {
+         action: AUDIT_ACTIONS.ADMIN_ACCESS_CHANGED,
+         entityType: 'AdminUser',
+         entityId: String(target._id),
+         before,
+         reason: 'user deleted',
+      })
+      return sendResponse(res, 200, 'User deleted', {})
+   }
+)

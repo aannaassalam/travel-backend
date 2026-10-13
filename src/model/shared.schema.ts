@@ -6,6 +6,7 @@ import {
    LOCALES,
 } from '../constants/domain.constants'
 import AppError from '../utils/appError'
+import { isOwnPublicFile } from '../utils/ownFile'
 
 /**
  * Building blocks shared by every sellable thing: localised text and money.
@@ -31,6 +32,33 @@ export const localizedField = (opts: { required?: boolean } = {}) => ({
    en: { type: String, default: '', trim: true },
    pt: { type: String, default: '', trim: true },
    es: { type: String, default: '', trim: true },
+})
+
+/** Where the admin's video upload stores its files, and what it stores them as. */
+export const VIDEO_FOLDER = 'videos'
+const VIDEO_EXTENSION = '\\.(mp4|webm)'
+
+/**
+ * The optional video of a hotel, restaurant or listing: the address the
+ * panel's video upload answered with, and no other — it goes into a <video>
+ * on a page every visitor loads. A blank clears it.
+ */
+export const videoField = () => ({
+   type: String,
+   set: (v: unknown) => {
+      const text = v === null || v === undefined ? '' : String(v).trim()
+      return text || undefined
+   },
+   validate: {
+      // Judged when it is set, not on every later save of the record: if the
+      // storage ever moves to another address, a video stored under the old
+      // one must not make its hotel impossible to edit until someone removes it.
+      validator: function (this: any, v: string) {
+         if (!v || this?.isModified?.('videoUrl') === false) return true
+         return isOwnPublicFile(v, VIDEO_FOLDER, VIDEO_EXTENSION, false)
+      },
+      message: 'Video: upload the video from the form',
+   },
 })
 
 /**

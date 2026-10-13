@@ -24,7 +24,8 @@ import {
  */
 
 const ROOT = path.resolve(process.env.STORAGE_ROOT || 'storage')
-const PUBLIC_BASE = process.env.STORAGE_PUBLIC_URL || '/uploads'
+// No trailing slash: addresses are built as `<base>/<key>`.
+const PUBLIC_BASE = (process.env.STORAGE_PUBLIC_URL || '/uploads').replace(/\/+$/, '')
 
 const signingSecret = () => {
    const s = process.env.STORAGE_SIGNING_SECRET || process.env.ADMIN_JWT_SECRET
@@ -60,7 +61,7 @@ export class LocalDiskStorage implements StorageAdapter {
       const full = resolveSafe(opts.visibility, key)
 
       await fs.promises.mkdir(path.dirname(full), { recursive: true })
-      await fs.promises.writeFile(full, input.buffer)
+      await fs.promises.writeFile(full, input.buffer!)
 
       return {
          key,

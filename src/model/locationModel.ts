@@ -78,7 +78,9 @@ const locationSchema = new Schema<ILocation>(
       sortOrder: { type: Number, default: 0 },
       image: { type: String, trim: true },
    },
-   { timestamps: true }
+   // Two renames of one place at the same moment: the second is refused (409)
+   // instead of leaving the place under one name and its hotels under the other.
+   { timestamps: true, optimisticConcurrency: true }
 )
 
 locationSchema.index({ isActive: 1, sortOrder: 1, name: 1 })

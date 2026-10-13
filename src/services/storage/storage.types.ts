@@ -16,10 +16,19 @@
  * otherwise one forgotten flag publishes a passport scan.
  */
 
+import type { Readable } from 'stream'
+
 export type Visibility = 'public' | 'private'
 
 export interface UploadInput {
-   buffer: Buffer
+   /**
+    * The bytes: in memory, or — for a file too large to hold there, a video —
+    * as a stream that is passed on while it arrives, `size` bytes of it
+    * exactly. One of the two. Only S3 takes a stream: a video is never kept
+    * on this server.
+    */
+   buffer?: Buffer
+   stream?: Readable
    originalName: string
    mimeType: string
    size: number

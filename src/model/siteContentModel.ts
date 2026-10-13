@@ -3,6 +3,7 @@ import mongoose, { Schema } from 'mongoose'
 import { LOCALES } from '../constants/domain.constants'
 import { SITE_CONTENT_DEFAULTS } from '../constants/siteContent.defaults'
 import AppError from '../utils/appError'
+import { isOwnPublicFile } from '../utils/ownFile'
 import { Localized } from './shared.schema'
 
 /**
@@ -132,24 +133,14 @@ const readText = (raw: unknown, field: Text, required = true): Localized => {
 /**
  * A picture uploaded through the panel, or none. Exactly what the upload on
  * that screen hands back — our storage, the website's own folder, a generated
- * name — and nothing else. The address goes into a page every visitor loads,
- * so "starts with our storage" is not enough: that also covers the private
- * documents folder and anything a quote or a second slash can be made to mean.
+ * name — and nothing else (see `isOwnPublicFile`).
  */
-const SITE_PICTURE = /^\/(public\/)?site\/[0-9a-f-]{36}(\.[a-z0-9]{1,5})?$/
 const readImage = (raw: unknown, field: Image): string => {
    if (raw === undefined || raw === null || raw === '') return ''
-   const ours = [process.env.STORAGE_PUBLIC_URL, '/uploads']
-      .filter(Boolean)
-      .map((prefix) => (prefix as string).replace(/\/$/, ''))
-   const prefix =
-      typeof raw === 'string' && raw.length <= 500
-         ? ours.find((p) => raw.startsWith(`${p}/`))
-         : undefined
-   if (prefix === undefined || !SITE_PICTURE.test((raw as string).slice(prefix.length))) {
+   if (!isOwnPublicFile(raw, 'site', '(\\.[a-z0-9]{1,5})?')) {
       throw new AppError(`${field.label}: upload the picture from this screen`, 400)
    }
-   return raw as string
+   return raw
 }
 
 const readList = (raw: unknown, field: List): unknown[] => {

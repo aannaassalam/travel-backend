@@ -48,6 +48,8 @@ const listingFields: FieldMap<IListing> = {
    country: (l) => l.country,
    geo: (l) => geoPoint(l.geo),
    images: (l) => l.images ?? [],
+   // The address of the uploaded video, in our own storage (see `videoField`).
+   videoUrl: (l) => l.videoUrl,
    /**
     * Per-currency integer minor units. Explicit prices, not conversions — the
     * customer is charged what the administrator typed. Sell only: cost never
@@ -133,6 +135,7 @@ const hotelFields: FieldMap<HotelWithRooms> = {
    geo: (h) => geoPoint(h.geo),
    amenities: (h) => h.amenities ?? [],
    images: (h) => h.images ?? [],
+   videoUrl: (h) => h.videoUrl,
    checkInTime: (h) => h.checkInTime,
    checkOutTime: (h) => h.checkOutTime,
    policies: (h) => h.policies,
@@ -200,6 +203,7 @@ const restaurantFields: FieldMap<RestaurantWithMenu> = {
    country: (r) => r.country,
    geo: (r) => geoPoint(r.geo),
    images: (r) => r.images ?? [],
+   videoUrl: (r) => r.videoUrl,
    openingHours: (r) => r.openingHours,
    prepTimeMinutes: (r) => r.prepTimeMinutes,
    phone: (r) => r.phone,

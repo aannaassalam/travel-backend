@@ -33,6 +33,8 @@ const MIME: Record<string, string> = {
    '.webp': 'image/webp',
    '.avif': 'image/avif',
    '.pdf': 'application/pdf',
+   '.mp4': 'video/mp4',
+   '.webm': 'video/webm',
 }
 
 const SKIP_COLLECTIONS = ['auditlogs']

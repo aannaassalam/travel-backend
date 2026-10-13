@@ -2,7 +2,7 @@ import { Request, Response } from 'express'
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { presentAuditLogs } from '../../dto/admin/auditLog.dto'
 import AuditLog from '../../model/auditLogModel'
-import { paginate } from '../../services/adminCrud.service'
+import { paginate, sortBy } from '../../services/adminCrud.service'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
 
@@ -17,6 +17,8 @@ const RISKY_ACTIONS = [
    AUDIT_ACTIONS.SESSIONS_REVOKED,
    AUDIT_ACTIONS.ADMIN_ACCESS_CHANGED,
    AUDIT_ACTIONS.PASSWORD_CHANGED,
+   // Records removed for good.
+   AUDIT_ACTIONS.PURGE,
 ]
 
 const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
@@ -57,7 +59,19 @@ export const listAuditLogs = catchAsync(async (req: Request, res: Response) => {
       filter.$or = [{ actorEmail: term }, { entityId: term }, { reason: term }, { action: term }]
    }
    // Bounded and paged like every other list (§2.2), newest first.
-   const { items, ...paging } = await paginate(AuditLog, filter, req)
+   const { items, ...paging } = await paginate(
+      AuditLog,
+      filter,
+      req,
+      sortBy(req.query.sort, {
+         when: 'createdAt',
+         what: 'action',
+         who: 'actorEmail',
+         on: ['entityType', 'entityId'],
+         details: 'reason',
+         ip: 'ip',
+      })
+   )
    return sendResponse(res, 200, 'OK', {
       items: presentAuditLogs(items as any),
       ...paging,

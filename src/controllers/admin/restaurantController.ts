@@ -12,10 +12,13 @@ import { MenuItem, Restaurant } from '../../model/restaurantModel'
 import { baseAmount, parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
 import {
    archiveDoc,
+   confirmOverOpenBookings,
+   deleteDoc,
    createDoc,
    deactivateDoc,
    paginate,
    sortBy,
+   translatedCount,
    updateDoc,
 } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
@@ -37,6 +40,7 @@ const RESTAURANT_EDITABLE = [
    'city',
    'country',
    'images',
+   'videoUrl',
    'openingHours',
    'prepTimeMinutes',
    'phone',
@@ -98,7 +102,15 @@ export const listRestaurants = catchAsync(async (req: Request, res: Response) =>
       Restaurant,
       filter,
       req,
-      sortBy(req.query.sort, { name: 'name.fr' })
+      // One key per column of the panel's restaurants table.
+      sortBy(req.query.sort, {
+         name: 'name.fr',
+         city: 'city',
+         status: 'status',
+         translations: { value: translatedCount('name', LOCALES) },
+         zones: { value: { $size: { $ifNull: ['$deliveryZones', []] } } },
+         updated: 'updatedAt',
+      })
    )
    return sendResponse(res, 200, 'OK', {
       items: presentRestaurants(items as any),
@@ -413,3 +425,30 @@ const parseZones = (input: any) => {
          isActive: z.isActive !== false,
       }))
 }
+
+/** DELETE /restaurants/:id — for good, with its menu. Food orders keep their own copy of what was ordered. */
+export const deleteRestaurant = catchAsync(async (req: Request, res: Response) => {
+   await confirmOverOpenBookings(req, { 'items.listingId': req.params.id }, 'this restaurant')
+   const restaurant = await Restaurant.findById(req.params.id)
+   if (!restaurant) throw new AppError(`${ENTITY} not found`, 404)
+   const dishes = await MenuItem.find({ restaurant: restaurant._id }).lean()
+   await MenuItem.deleteMany({ restaurant: restaurant._id })
+   await deleteDoc(req, Restaurant, { _id: restaurant._id }, {
+      entityType: ENTITY,
+      snapshot: (before) => ({ ...before, menu: dishes }),
+      reason: `Deleted with ${dishes.length} dish(es)`,
+   })
+   return sendResponse(res, 200, 'Restaurant deleted', {})
+})
+
+/** DELETE /restaurants/:id/menu/:menuItemId — one dish, of this restaurant. */
+export const deleteMenuItem = catchAsync(async (req: Request, res: Response) => {
+   await confirmOverOpenBookings(req, { 'items.roomTypeId': req.params.menuItemId }, 'this dish')
+   await deleteDoc(
+      req,
+      MenuItem,
+      { _id: req.params.menuItemId, restaurant: req.params.id },
+      { entityType: MENU_ENTITY }
+   )
+   return sendResponse(res, 200, 'Dish deleted', {})
+})

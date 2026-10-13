@@ -3,6 +3,7 @@ import { VERTICALS } from '../../constants/domain.constants'
 import { Location, ServicedRoute } from '../../model/locationModel'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
+import { sameName } from '../../utils/sameName'
 
 /**
  * Where we actually go.
@@ -57,9 +58,14 @@ export const listRoutes = catchAsync(async (req: Request, res: Response) => {
    }
 
    const filter: Record<string, unknown> = { vertical, isActive: true }
-   const originSlug = String(req.query.origin || '').trim()
-   if (originSlug) {
-      const origin = await Location.findOne({ slug: originSlug.toLowerCase(), isActive: true })
+   const asked = String(req.query.origin || '').trim()
+   if (asked) {
+      // The website sends the place's name, as the search box shows it; a slug
+      // is still understood. Read as a slug only, "Pointe Noire" — or any name
+      // that is not its own slug — had no destinations at all.
+      const origin =
+         (await Location.findOne({ name: sameName(asked), isActive: true })) ??
+         (await Location.findOne({ slug: asked.toLowerCase(), isActive: true }))
       // An unknown origin has no routes — not every route.
       if (!origin) return sendResponse(res, 200, 'OK', { items: [] })
       filter.origin = origin._id

@@ -11,6 +11,7 @@ import {
    localizedField,
    Money,
    moneyField,
+   videoField,
 } from './shared.schema'
 
 /**
@@ -120,6 +121,8 @@ export interface IListing extends Document {
    country: string
    geo?: { lat: number; lng: number }
    images: string[]
+   /** The optional video: the address its upload answered with (see `videoField`). */
+   videoUrl?: string
    supplier?: string
    /**
     * Per-currency, integer minor units. USD required (reporting base); CDF/EUR
@@ -133,6 +136,8 @@ export interface IListing extends Document {
    quantityHeld: number
    validFrom?: Date
    validUntil?: Date
+   /** The service this departure was repeated from (§5.2 recurrence). */
+   repeatOf?: Types.ObjectId
    attributes: any
    rating?: number
    reviewCount?: number
@@ -165,6 +170,7 @@ const listingSchema = new Schema<IListing>(
       country: { type: String, default: 'CD' },
       geo: { lat: Number, lng: Number },
       images: { type: [String], default: [] },
+      videoUrl: videoField(),
       supplier: { type: String, trim: true, index: true },
       costPrice: moneyField(),
       sellPrice: moneyField(),
@@ -172,6 +178,9 @@ const listingSchema = new Schema<IListing>(
       quantitySold: { type: Number, default: 0, min: 0 },
       quantityHeld: { type: Number, default: 0, min: 0 },
       validFrom: Date,
+      // How "repeat until" knows which days it has already made — not by their
+      // address, which two services can share and a renamed city changes.
+      repeatOf: { type: Schema.Types.ObjectId, ref: 'Listing', index: true },
       /** Drives §4 at-risk and spoilage for non-hotel stock. */
       validUntil: { type: Date, index: true },
       attributes: { type: attributesSchema, default: {} },
@@ -192,6 +201,16 @@ listingSchema.virtual('available').get(function (this: IListing) {
 })
 listingSchema.set('toObject', { virtuals: true })
 listingSchema.set('toJSON', { virtuals: true })
+
+/**
+ * A flight leg is an object or it is not there. A hand-made request can put a
+ * null in the list, and every reader of the legs — the publish check, the
+ * panel, the ten-minute publishing job — then fails on that one record.
+ */
+listingSchema.pre('validate', function () {
+   const legs = (this.attributes as any)?.segments as unknown[] | undefined
+   if (legs?.some((leg) => !leg)) (this.attributes as any).segments = legs.filter(Boolean)
+})
 
 /** §5.1 validate-before-publish, plus the per-vertical rules from §5.2. */
 listingSchema.methods.publishBlockers = function (): string[] {
@@ -231,7 +250,8 @@ listingSchema.methods.publishBlockers = function (): string[] {
    }
    // The spreadsheet import refuses this row by row; the form has no such
    // check, and the website would print the journey as "-1 h".
-   const journeys: any[] = [this.attributes ?? {}, ...(this.attributes?.segments ?? [])]
+   const legs: any[] = (this.attributes?.segments ?? []).filter(Boolean)
+   const journeys: any[] = [this.attributes ?? {}, ...legs]
    if (
       journeys.some(
          (j) => j.departsAt && j.arrivesAt && new Date(j.arrivesAt) <= new Date(j.departsAt)
@@ -241,7 +261,6 @@ listingSchema.methods.publishBlockers = function (): string[] {
    }
 
    if (this.vertical === VERTICALS.FLIGHT) {
-      const legs: any[] = this.attributes?.segments ?? []
       if (!legs.length) b.push('At least one flight segment is required')
       // Every leg, and both of its times: the website prints all of them. It is
       // what a spreadsheet import insists on, so a flight made in the panel

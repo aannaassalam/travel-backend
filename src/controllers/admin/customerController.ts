@@ -9,7 +9,9 @@ import {
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import { getSettings } from '../../model/settingsModel'
-import { paginate, updateDoc } from '../../services/adminCrud.service'
+import { DeviceToken } from '../../model/deviceTokenModel'
+import { PhoneVerification } from '../../model/phoneVerificationModel'
+import { deleteDoc, paginate, sortBy, updateDoc } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -38,7 +40,17 @@ export const listCustomers = catchAsync(async (req: Request, res: Response) => {
          { email: rx },
       ]
    }
-   const { items, ...paging } = await paginate(Customer, filter, req)
+   const { items, ...paging } = await paginate(
+      Customer,
+      filter,
+      req,
+      sortBy(req.query.sort, {
+         name: ['firstName', 'lastName'],
+         phone: 'phone',
+         status: 'isBlocked',
+         since: 'createdAt',
+      })
+   )
    return sendResponse(res, 200, 'OK', {
       // Phones masked in the list (§8) — a screenshot must not be a database.
       items: presentCustomerList(items as any),
@@ -143,5 +155,45 @@ export const exportCustomers = catchAsync(
          // §14.4: watermark so a leaked file is traceable to a session.
          watermark: `${(req as any).admin?.email} · session ${(req as any).adminSessionId}`,
       })
+   }
+)
+
+/**
+ * DELETE /customers/:id — an account with no bookings, and what hangs off it
+ * (its devices, its pending phone check).
+ *
+ * One with bookings is refused: a booking is a record that stays, and it
+ * names its customer — there is no copy of the booker on the order to fall
+ * back on. Blocking is how such an account is switched off.
+ */
+export const deleteCustomer = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const bookings = await Order.countDocuments({ customer: req.params.id })
+      if (bookings) {
+         return next(
+            new AppError(
+               `This customer has ${bookings} booking${bookings === 1 ? '' : 's'}. Bookings are kept as records, so the account cannot be deleted — block it instead.`,
+               409,
+               'HAS_BOOKINGS'
+            )
+         )
+      }
+      const customer = await deleteDoc<any>(req, Customer, { _id: req.params.id }, {
+         entityType: 'Customer',
+         // Enough to say who it was; the point of deleting is that the rest goes.
+         snapshot: (c) => ({
+            _id: c._id,
+            firstName: c.firstName,
+            lastName: c.lastName,
+            phone: `…${String(c.phone ?? '').slice(-3)}`,
+            isBlocked: c.isBlocked,
+            createdAt: c.createdAt,
+         }),
+      })
+      await Promise.all([
+         DeviceToken.deleteMany({ customer: customer._id }),
+         PhoneVerification.deleteMany({ phone: customer.phone }),
+      ])
+      return sendResponse(res, 200, 'Customer deleted', {})
    }
 )

@@ -218,9 +218,20 @@ check('the users and roles routes match the contract', () => {
       'GET /users/assignable-roles -> users:write',
       'POST /users -> users:write + step-up',
       'PATCH /users/:id -> users:write + step-up',
+      'DELETE /users/:id -> users:delete + step-up',
       'POST /users/:id/reset-password -> users:write + step-up',
    ])
    // Same order as registration, so assignable-roles is ahead of /users/:id.
+})
+
+check('removing a record for good needs its own permission and the password again', () => {
+   const purges = business.filter((r) => r.permission?.endsWith(':delete'))
+   assert.ok(purges.length >= 9, `only ${purges.length} delete routes found`)
+   assert.deepStrictEqual(
+      purges.filter((r) => !r.stepUp || !label(r).startsWith('DELETE ')).map(label),
+      [],
+      'a delete permission guards a route without step-up, or one that is not a DELETE'
+   )
 })
 
 // ---------------------------------------------------------------------------

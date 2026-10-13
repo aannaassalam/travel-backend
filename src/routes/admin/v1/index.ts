@@ -18,6 +18,8 @@ import {
    serveSignedFile,
    uploadFiles,
    uploadMiddleware,
+   uploadVideo,
+   videoUploadMiddleware,
 } from '../../../controllers/admin/uploadController'
 import {
    boundPagination,
@@ -60,6 +62,15 @@ router.post(
    handleUploadErrors,
    uploadFiles
 )
+// The optional video of an inventory item: one file, far larger than the
+// rest, so it has a route and a size limit of its own.
+router.post(
+   '/uploads/video',
+   requirePermission('inventory:write'),
+   videoUploadMiddleware,
+   handleUploadErrors,
+   uploadVideo
+)
 router.post('/uploads/signed-link', requirePermission('orders:read'), getSignedLink)
 
 router.get('/dashboard', requirePermission('dashboard:read'), getDashboard)
@@ -72,9 +83,17 @@ router.patch('/hotels/:id', requirePermission('inventory:write'), hotels.updateH
 router.post('/hotels/:id/publish', requirePermission('inventory:write'), hotels.publishHotel)
 // Off the website, still in the list; publish brings it back.
 router.post('/hotels/:id/deactivate', requirePermission('inventory:write'), hotels.deactivateHotel)
-// Archive, never delete (§5.1) — there is deliberately no DELETE route.
+// Out of the lists and off the website, kept in the database.
 router.post('/hotels/:id/archive', requirePermission('inventory:write'), hotels.archiveHotel)
 router.post('/hotels/:id/duplicate', requirePermission('inventory:write'), hotels.duplicateHotel)
+// For good — its own permission, and the password again (see deleteDoc).
+router.delete('/hotels/:id', requirePermission('inventory:delete'), requireStepUp, hotels.deleteHotel)
+router.delete(
+   '/hotels/:id/room-types/:roomTypeId',
+   requirePermission('inventory:delete'),
+   requireStepUp,
+   hotels.deleteRoomType
+)
 
 router.post('/hotels/:id/room-types', requirePermission('inventory:write'), hotels.createRoomType)
 router.patch(
@@ -117,11 +136,16 @@ router.post(
    requirePermission('inventory:write'),
    restaurants.duplicateRestaurant
 )
-// Archive, never delete (§5.1) — there is deliberately no DELETE route.
 router.post(
    '/restaurants/:id/archive',
    requirePermission('inventory:write'),
    restaurants.archiveRestaurant
+)
+router.delete(
+   '/restaurants/:id',
+   requirePermission('inventory:delete'),
+   requireStepUp,
+   restaurants.deleteRestaurant
 )
 
 router.post(
@@ -138,6 +162,12 @@ router.post(
    '/restaurants/:id/menu/:menuItemId/archive',
    requirePermission('inventory:write'),
    restaurants.archiveMenuItem
+)
+router.delete(
+   '/restaurants/:id/menu/:menuItemId',
+   requirePermission('inventory:delete'),
+   requireStepUp,
+   restaurants.deleteMenuItem
 )
 // A dish's status moves only through these — never a PATCH body (§BUG-010).
 router.post(
@@ -160,6 +190,7 @@ router.post('/listings/:id/publish', requirePermission('inventory:write'), listi
 router.post('/listings/:id/deactivate', requirePermission('inventory:write'), listings.deactivateListing)
 router.post('/listings/:id/archive', requirePermission('inventory:write'), listings.archiveListing)
 router.post('/listings/:id/duplicate', requirePermission('inventory:write'), listings.duplicateListing)
+router.delete('/listings/:id', requirePermission('inventory:delete'), requireStepUp, listings.deleteListing)
 // §5.2 bus recurrence — or the same trip gets hand-entered 90 times.
 router.post('/listings/:id/expand-recurrence', requirePermission('inventory:write'), listings.expandRecurrence)
 
@@ -210,6 +241,7 @@ router.post(
 router.get('/customers', requirePermission('customers:read'), boundPagination, customers.listCustomers)
 router.get('/customers/:id', requirePermission('customers:read'), customers.getCustomer)
 router.patch('/customers/:id', requirePermission('customers:write'), customers.updateCustomer)
+router.delete('/customers/:id', requirePermission('customers:delete'), requireStepUp, customers.deleteCustomer)
 // §14.4: the most valuable dataset in the system — step-up gated and alerted.
 router.post(
    '/customers/export',
@@ -225,6 +257,7 @@ router.get('/enquiries/summary', requirePermission('enquiries:read'), ops.enquir
 router.post('/enquiries/:id/stage', requirePermission('enquiries:write'), ops.updateEnquiryStage)
 router.post('/enquiries/:id/notes', requirePermission('enquiries:write'), ops.addEnquiryNote)
 router.post('/enquiries/:id/quote', requirePermission('enquiries:write'), ops.quoteEnquiry)
+router.delete('/enquiries/:id', requirePermission('enquiries:delete'), requireStepUp, ops.deleteEnquiry)
 
 // --- Payments (§9.1) --------------------------------------------------------
 // Payment exceptions and FX rates were removed: prices are typed per currency,
@@ -236,6 +269,7 @@ router.get('/policies', requirePermission('content:read'), ops.listPolicies)
 // Editing creates a NEW version; there is deliberately no PATCH on policy text.
 router.post('/policies', requirePermission('content:write'), ops.createPolicyVersion)
 router.post('/policies/:id/publish', requirePermission('content:write'), ops.setPolicyLive)
+router.delete('/policies/:id', requirePermission('content:delete'), requireStepUp, ops.deletePolicyVersion)
 
 // --- Content: the website's own wording and pictures ------------------------
 router.get('/site-content', requirePermission('content:read'), siteContent.getContent)
@@ -254,6 +288,12 @@ router.post(
 // --- Notifications (§11) ----------------------------------------------------
 router.get('/notifications/templates', requirePermission('notifications:read'), ops.listTemplates)
 router.put('/notifications/templates', requirePermission('notifications:write'), ops.upsertTemplate)
+router.delete(
+   '/notifications/templates/:id',
+   requirePermission('notifications:delete'),
+   requireStepUp,
+   ops.deleteTemplate
+)
 router.post('/notifications/test', requirePermission('notifications:write'), ops.sendTestNotification)
 
 // --- Settings (§12) ---------------------------------------------------------
@@ -286,9 +326,10 @@ router.get('/users', requirePermission('users:read'), access.listUsers)
 // Must stay above /users/:id.
 router.get('/users/assignable-roles', requirePermission('users:write'), access.assignableRoles)
 router.post('/users', requirePermission('users:write'), requireStepUp, access.createUser)
-// Deactivate, never delete — audit-log entries reference these accounts, so
-// there is deliberately no DELETE route.
 router.patch('/users/:id', requirePermission('users:write'), requireStepUp, access.updateUser)
+// Deactivating is how an account is switched off and kept; this removes one
+// that should not exist. The audit log names actors by address, not by id.
+router.delete('/users/:id', requirePermission('users:delete'), requireStepUp, access.deleteUser)
 router.post(
    '/users/:id/reset-password',
    requirePermission('users:write'),

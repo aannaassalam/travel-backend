@@ -12,6 +12,7 @@ import {
    Money,
    moneyField,
    resolveLocalized,
+   videoField,
 } from './shared.schema'
 
 /**
@@ -64,6 +65,8 @@ export interface IRestaurant extends Document {
    country: string
    geo?: { lat: number; lng: number }
    images: string[]
+   /** The optional video: the address its upload answered with (see `videoField`). */
+   videoUrl?: string
    /** Free text per §18 — opening hours vary too much to enum usefully. */
    openingHours: string
    deliveryZones: any
@@ -99,6 +102,7 @@ const restaurantSchema = new Schema<IRestaurant>(
       country: { type: String, default: 'CD' },
       geo: { lat: Number, lng: Number },
       images: { type: [String], default: [] },
+      videoUrl: videoField(),
       openingHours: { type: String, default: '' },
       deliveryZones: { type: [deliveryZoneSchema], default: [] },
       prepTimeMinutes: { type: Number, min: 0, default: 30 },

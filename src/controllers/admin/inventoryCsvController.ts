@@ -187,6 +187,11 @@ const VALID_FROM = col('valid_from', 'On sale from', 'datetime', 'validFrom',
 
 /** In every export, read by no import. */
 const REFERENCE: Column[] = [
+   // A video is a file, uploaded on the item's form; a cell can only say
+   // whether there is one, and where it is.
+   col('video_url', 'Video', 'text', 'videoUrl', '',
+      'Exports only. The address of the video uploaded for this item, if it has one. Videos are added in the panel, not through a spreadsheet.',
+      { readOnly: true }),
    col('status', 'Status', 'text', 'status', '',
       'Exports only. Ignored on import: everything imported starts inactive.',
       { readOnly: true }),
@@ -802,6 +807,10 @@ const readCell = (
  */
 const inert = (s: string) =>
    s
+      // What an import would trim anyway. Guarded with it still on, `Transco,`
+      // followed by a tab came back as `Transco,'`: the guard went in before
+      // the tab, and the import then took only the tab away.
+      .trim()
       .replace(/([,;\t])(?='*[=+\-@\t\r])|([\n\r])(?='*[=+@])/g, "$1$2'")
       // The start on its own, after the rest: taken in the same pass, a value
       // beginning with a tab was guarded as a start and the tab then skipped

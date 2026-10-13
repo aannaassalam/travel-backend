@@ -1,5 +1,4 @@
 import { NextFunction, Request, Response } from 'express'
-import slugify from 'slugify'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LISTING_STATUS, LOCALES, VERTICALS } from '../../constants/domain.constants'
@@ -17,10 +16,13 @@ import {
 import { getSettings } from '../../model/settingsModel'
 import {
    archiveDoc,
+   confirmOverOpenBookings,
+   deleteDoc,
    createDoc,
    deactivateDoc,
    paginate,
    sortBy,
+   translatedCount,
    updateDoc,
 } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
@@ -29,6 +31,7 @@ import catchAsync from '../../utils/catchAsync'
 import { pick } from '../../utils/pick'
 import { FieldMap, present, presentList } from '../../utils/present'
 import { sendResponse } from '../../utils/response'
+import { writtenDay } from '../../utils/dayRange'
 import { uniqueSlug } from '../../utils/uniqueSlug'
 
 /** Serves flights, bus, cars, activities and properties (§5.2). */
@@ -45,6 +48,7 @@ const LISTING_EDITABLE = [
    'city',
    'country',
    'images',
+   'videoUrl',
    'supplier',
    'quantityTotal',
    'validFrom',
@@ -66,6 +70,7 @@ const listingFields: FieldMap<IListing> = {
    country: (l) => l.country,
    geo: (l) => geoPoint(l.geo),
    images: (l) => l.images,
+   videoUrl: (l) => l.videoUrl,
    supplier: (l) => l.supplier,
    // Admin surface only — §2.1's canonical example of what must never leak.
    costPrice: (l) => l.costPrice,
@@ -135,7 +140,36 @@ export const listListings = catchAsync(async (req: Request, res: Response) => {
       Listing,
       filter,
       req,
-      sortBy(req.query.sort, { name: 'title.fr' })
+      // One key per column of the panel's listing tables (the properties
+      // table shows `sell` as Price). Margin and what is left to sell are
+      // worked out, as the list itself works them out for display.
+      sortBy(req.query.sort, {
+         name: 'title.fr',
+         city: 'city',
+         status: 'status',
+         cost: 'costPrice.USD',
+         sell: 'sellPrice.USD',
+         margin: {
+            value: {
+               $subtract: [{ $ifNull: ['$sellPrice.USD', 0] }, { $ifNull: ['$costPrice.USD', 0] }],
+            },
+         },
+         available: {
+            value: {
+               $max: [
+                  {
+                     $subtract: [
+                        { $ifNull: ['$quantityTotal', 0] },
+                        { $add: [{ $ifNull: ['$quantitySold', 0] }, { $ifNull: ['$quantityHeld', 0] }] },
+                     ],
+                  },
+                  0,
+               ],
+            },
+         },
+         translations: { value: translatedCount('title', LOCALES) },
+         updated: 'updatedAt',
+      })
    )
    return sendResponse(res, 200, 'OK', {
       items: presentList(items as any, listingFields),
@@ -389,6 +423,16 @@ export const archiveListing = catchAsync(async (req: Request, res: Response) => 
    })
 })
 
+/**
+ * DELETE /listings/:id — for good. Bookings that sold it keep their own copy
+ * of what was sold (an order line is a snapshot), so none of them changes.
+ */
+export const deleteListing = catchAsync(async (req: Request, res: Response) => {
+   await confirmOverOpenBookings(req, { 'items.listingId': req.params.id }, 'this listing')
+   await deleteDoc(req, Listing, { _id: req.params.id }, { entityType: ENTITY })
+   return sendResponse(res, 200, 'Listing deleted', {})
+})
+
 /** §5.1: clone, and clone-with-new-dates — the highest-leverage feature. */
 export const duplicateListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
@@ -413,6 +457,9 @@ export const duplicateListing = catchAsync(
       // panel has no way to correct a score that came along by mistake.
       delete copy.rating
       copy.reviewCount = 0
+      // A copy made by hand is a listing of its own, not one of the days a
+      // "repeat until" made.
+      delete copy.repeatOf
       copy.title = req.body.title || {
          ...source.title,
          fr: `${resolveLocalized(source.title)} (copie)`,
@@ -426,11 +473,14 @@ export const duplicateListing = catchAsync(
       // "Duplicate with new dates" — the copy leaves on the new day, at the
       // same times of day as the original.
       if (req.body.validFrom) {
-         const from = new Date(req.body.validFrom)
+         // The day as written. Taken with its time of day, `…T08:00` moved a
+         // 06:30 departure to 14:30.
+         const from = writtenDay(req.body.validFrom)
+         if (!from) return next(new AppError('validFrom must be a date (YYYY-MM-DD)', 400))
          copy.validFrom = from
          if (req.body.validUntil) copy.validUntil = new Date(req.body.validUntil)
          const anchor = anchorDay(source)
-         if (anchor && !Number.isNaN(from.getTime())) {
+         if (anchor) {
             copy.attributes = shiftTimes(copy.attributes, from.getTime() - anchor.getTime())
          }
       }
@@ -457,74 +507,90 @@ export const expandRecurrence = catchAsync(
       if (!source) return next(new AppError('Listing not found', 404))
 
       const { frequency, daysOfWeek, until } = req.body
-      if (!frequency || !until) {
-         return next(new AppError('frequency and until are required', 400))
+      // Spelled out: anything else used to count as "daily", so `weekly` in
+      // lower case made a departure every day.
+      if (frequency !== 'DAILY' && frequency !== 'WEEKLY') {
+         return next(new AppError('frequency must be DAILY or WEEKLY', 400))
       }
+      // The last day as written: midnight in Kinshasa is still the day before
+      // in UTC, and read as a moment it dropped that day.
+      const end = writtenDay(until)
+      if (!end) return next(new AppError('until must be a date (YYYY-MM-DD)', 400))
       const start = anchorDay(source) || new Date(new Date().toISOString().slice(0, 10))
-      const end = new Date(until)
-      const days = Math.floor((end.getTime() - start.getTime()) / DAY)
-      if (!(days >= 1)) return next(new AppError('until must be after the start', 400))
+      const days = Math.round((end.getTime() - start.getTime()) / DAY)
+      if (days < 1) return next(new AppError('until must be after the start', 400))
       // A year of departures at a time; the bound is also what keeps a date in
       // the year 275760 from being walked day by day.
       if (days > MAX_RECURRENCE_DAYS) {
          return next(new AppError('until is more than a year after the start', 400))
       }
-      const weekdays = (Array.isArray(daysOfWeek) ? daysOfWeek : []).map(Number)
+      // 0 (Sunday) to 6, as numbers or as digits. Nothing else names a day —
+      // Number(null) is 0, which is how a blank became "every Sunday".
+      const weekdays = (Array.isArray(daysOfWeek) ? daysOfWeek : [])
+         .filter((d) => ['number', 'string'].includes(typeof d) && /^[0-6]$/.test(String(d)))
+         .map(Number)
 
-      const title = resolveLocalized(source.title)
-      const wanted: { date: Date; slug: string }[] = []
+      const wanted: Date[] = []
       for (let n = 1; n <= days; n++) {
          const date = new Date(start.getTime() + n * DAY)
          if (frequency === 'WEEKLY' && !weekdays.includes(date.getUTCDay())) continue
-         wanted.push({
-            date,
-            slug: slugify(`${title}-${source.city}-${date.toISOString().slice(0, 10)}`, {
-               lower: true,
-               strict: true,
-            }),
-         })
+         wanted.push(date)
       }
       if (!wanted.length) {
          return next(new AppError('That pattern produces no additional dates', 400))
       }
-      // Asked again with a later "until", only the new days are added: the ones
-      // already made keep whatever was changed on them since.
-      const have = new Set(
-         await Listing.distinct('slug', { slug: { $in: wanted.map((w) => w.slug) } })
-      )
-      const missing = wanted.filter((w) => !have.has(w.slug))
+      // Asked again with a later "until", only the new days are added: the
+      // ones already made keep whatever was changed on them since. Known by
+      // what they were repeated from — archived ones aside, which are gone as
+      // far as the office is concerned and may be made again.
+      const family = source.repeatOf ?? source._id
+      const made = await Listing.find({
+         $or: [{ repeatOf: family }, { _id: family }],
+         status: { $ne: LISTING_STATUS.ARCHIVED },
+         validFrom: { $in: wanted },
+      }).select('validFrom')
+      const have = new Set(made.map((l) => l.validFrom!.getTime()))
+      const missing = wanted.filter((date) => !have.has(date.getTime()))
       if (!missing.length) {
          return next(new AppError('Those departures already exist', 409))
       }
 
       const base = source.toObject() as any
-      const created = await Listing.insertMany(
-         missing.map(({ date, slug }) => {
-            const copy = { ...base }
-            delete copy._id
-            delete copy.__v
-            delete copy.id
-            delete copy.createdAt
-            delete copy.updatedAt
-            // Each departure is published by hand, not by the source's schedule.
-            delete copy.publishAt
-            delete copy.unpublishAt
-            // Earned by the original, not by a departure nobody has taken yet.
-            delete copy.rating
-            copy.reviewCount = 0
-            copy.createdBy = (req as any).admin._id
-            copy.attributes = shiftTimes(base.attributes, date.getTime() - start.getTime())
-            copy.validFrom = date
-            copy.validUntil = source.validUntil
-               ? new Date(date.getTime() + (source.validUntil.getTime() - start.getTime()))
-               : undefined
-            copy.slug = slug
-            copy.status = LISTING_STATUS.INACTIVE
-            copy.quantitySold = 0
-            copy.quantityHeld = 0
-            return copy
-         })
-      )
+      const title = resolveLocalized(source.title)
+      const copies = []
+      for (const date of missing) {
+         const copy = { ...base }
+         delete copy._id
+         delete copy.__v
+         delete copy.id
+         delete copy.createdAt
+         delete copy.updatedAt
+         // Each departure is published by hand, not by the source's schedule.
+         delete copy.publishAt
+         delete copy.unpublishAt
+         // Earned by the original, not by a departure nobody has taken yet.
+         delete copy.rating
+         copy.reviewCount = 0
+         copy.createdBy = (req as any).admin._id
+         copy.repeatOf = family
+         copy.attributes = shiftTimes(base.attributes, date.getTime() - start.getTime())
+         copy.validFrom = date
+         copy.validUntil = source.validUntil
+            ? new Date(date.getTime() + (source.validUntil.getTime() - start.getTime()))
+            : undefined
+         // Title, city and day — with a number after it when another service
+         // of the same name already runs there that day.
+         copy.slug = await uniqueSlug(Listing, [
+            title,
+            source.city,
+            date.toISOString().slice(0, 10),
+         ])
+         copy.status = LISTING_STATUS.INACTIVE
+         copy.quantitySold = 0
+         copy.quantityHeld = 0
+         copies.push(copy)
+      }
+      const created = await Listing.insertMany(copies)
 
       // One audit entry for the batch — 90 rows of noise would bury the signal.
       await recordAudit(req, {

@@ -18,7 +18,7 @@ import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import SettingsModel, { getSettings, PolicyVersion } from '../../model/settingsModel'
 import { geoPoint, parseGeo } from '../../model/shared.schema'
-import { paginate } from '../../services/adminCrud.service'
+import { customerNameSort, deleteDoc, paginate, sortBy } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
 import { money, notify, pushBody, render } from '../../services/notifications/notify.service'
 import { sendSms, smsConfigured } from '../../services/notifications/sms.service'
@@ -134,7 +134,23 @@ export const listEnquiries = catchAsync(async (req: Request, res: Response) => {
       filter.$or = or
    }
 
-   const { items, ...paging } = await paginate(Enquiry, filter, req)
+   const { items, ...paging } = await paginate(
+      Enquiry,
+      filter,
+      req,
+      sortBy(req.query.sort, {
+         reference: 'reference',
+         customer: 'customerName',
+         about: ['listingLabel', 'vertical'],
+         kind: 'kind',
+         // In the order of the pipeline, not of the alphabet.
+         stage: { value: { $indexOfArray: [STAGES, '$stage'] } },
+         // Not yet contacted first, the longest-waiting at the top.
+         waiting: ['firstContactAt', 'createdAt'],
+         quoted: 'quotedAmount',
+         created: 'createdAt',
+      })
+   )
    return sendResponse(res, 200, 'OK', {
       items: (items as any[]).map((e) => withSla(e, settings.enquirySlaHours)),
       ...paging,
@@ -335,7 +351,17 @@ export const listPayments = catchAsync(async (req: Request, res: Response) => {
       filter.$or = [{ reference: rx(q) }, { customer: { $in: customers.map((c) => c._id) } }]
    }
    const [{ items, ...paging }, paid] = await Promise.all([
-      paginate(Order, filter, req, { populate: 'customer' }),
+      paginate(Order, filter, req, {
+         ...sortBy(req.query.sort, {
+            order: 'reference',
+            customer: customerNameSort,
+            method: 'paymentMethod',
+            status: 'paymentStatus',
+            amount: 'total',
+            paid: 'paidAt',
+         }),
+         populate: 'customer',
+      }),
       // Summed over everything the search matches, not the page on screen.
       Order.aggregate([
          { $match: { ...filter, paymentStatus: PAYMENT_STATUS.PAID } },
@@ -426,9 +452,13 @@ export const setPolicyLive = catchAsync(
       const version = await PolicyVersion.findById(req.params.id)
       if (!version) return next(new AppError('Policy version not found', 404))
 
-      // Exactly one live version per kind+locale. Not this one itself: taken
-      // down here and then "set live" again, nothing would be written the
-      // second time, and the policy would be left with no live text at all.
+      // Exactly one live version per kind+locale — and never none. This one
+      // goes live first and the others come down after: the other way round
+      // there was a moment with no text at all, in which checkout could not
+      // show the no-refund sentence and an order was refused. For that moment
+      // two are live instead, and every reader takes the newest.
+      version.isLive = true
+      await version.save()
       const siblings = await PolicyVersion.find({
          _id: { $ne: version._id },
          kind: version.kind,
@@ -439,8 +469,6 @@ export const setPolicyLive = catchAsync(
          s.isLive = false
          await s.save()
       }
-      version.isLive = true
-      await version.save()
 
       await recordAudit(req, {
          action: AUDIT_ACTIONS.UPDATE,
@@ -824,5 +852,58 @@ export const sendTestNotification = catchAsync(
             new AppError('Could not send the test message. Check the number and try again.', 502)
          )
       }
+   }
+)
+
+// --- Deleting for good ------------------------------------------------------
+
+/** DELETE /enquiries/:id — nothing else refers to an enquiry. */
+export const deleteEnquiry = catchAsync(async (req: Request, res: Response) => {
+   if (!isValidObjectId(req.params.id)) throw new AppError('Enquiry not found', 404)
+   await deleteDoc(req, Enquiry, { _id: req.params.id }, { entityType: 'Enquiry' })
+   return sendResponse(res, 200, 'Enquiry deleted', {})
+})
+
+/**
+ * DELETE /notifications/templates/:id — the event then sends nothing on that
+ * channel until a template is saved for it again.
+ */
+export const deleteTemplate = catchAsync(async (req: Request, res: Response) => {
+   if (!isValidObjectId(req.params.id)) throw new AppError('Template not found', 404)
+   await deleteDoc(req, NotificationTemplate, { _id: req.params.id }, {
+      entityType: 'NotificationTemplate',
+   })
+   return sendResponse(res, 200, 'Template deleted', {})
+})
+
+/**
+ * DELETE /policies/:id — a version that never counted: not the one on the
+ * website, and not one any customer agreed to.
+ *
+ * The rest stay for good. An order copies the text its customer accepted, but
+ * the version it names is the proof of where that text came from (§10).
+ */
+export const deletePolicyVersion = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      if (!isValidObjectId(req.params.id)) return next(new AppError('Policy version not found', 404))
+      const version = await PolicyVersion.findById(req.params.id)
+      if (!version) return next(new AppError('Policy version not found', 404))
+      if (version.isLive) {
+         return next(
+            new AppError('This version is the one on the website. Put another version live first.', 409, 'POLICY_LIVE')
+         )
+      }
+      const accepted = await Order.countDocuments({ 'consent.policyVersionId': version._id })
+      if (accepted) {
+         return next(
+            new AppError(
+               `${accepted} booking${accepted === 1 ? ' was' : 's were'} made under this version, so it is kept as the record of what those customers agreed to.`,
+               409,
+               'POLICY_ACCEPTED'
+            )
+         )
+      }
+      await deleteDoc(req, PolicyVersion, { _id: version._id }, { entityType: 'PolicyVersion' })
+      return sendResponse(res, 200, 'Version deleted', {})
    }
 )

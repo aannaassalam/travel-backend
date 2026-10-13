@@ -11,6 +11,7 @@ import {
    Money,
    moneyField,
    resolveLocalized,
+   videoField,
 } from './shared.schema'
 
 /**
@@ -35,6 +36,8 @@ export interface IHotel extends Document {
    geo?: { lat: number; lng: number }
    amenities: string[]
    images: string[]
+   /** The optional video: the address its upload answered with (see `videoField`). */
+   videoUrl?: string
    /** §5.2: which hotel this stock was bought from (§18 Q9). */
    supplier?: string
    checkInTime: string
@@ -68,6 +71,7 @@ const hotelSchema = new Schema<IHotel>(
       geo: { lat: Number, lng: Number },
       amenities: { type: [String], default: [] },
       images: { type: [String], default: [] },
+      videoUrl: videoField(),
       supplier: { type: String, trim: true, index: true },
       checkInTime: { type: String, default: '14:00' },
       checkOutTime: { type: String, default: '11:00' },

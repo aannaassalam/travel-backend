@@ -84,6 +84,11 @@ const errorHandler = (err: any, req: Request, res: Response, next: NextFunction)
   if (err.name === 'TokenExpiredError') error = handleJWTExpiredError();
   error.statusCode = error.statusCode || 500;
   error.status = error.status || 'error';
+  // A refusal is the answer to this request, not to the next visitor's. The
+  // public catalogue routes mark themselves cacheable before they run, and a
+  // "nothing published yet" kept by a shared cache for fifteen minutes would
+  // outlive the thing being published.
+  res.set('Cache-Control', 'no-store');
 
   // Anything that is not explicitly development is treated as production.
   // Previously an unset or non-standard NODE_ENV (staging, test) matched

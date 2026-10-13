@@ -40,9 +40,15 @@ export class S3Storage implements StorageAdapter {
       if (!this.bucket) {
          throw new Error('AWS_PUBLIC_BUCKET_NAME is required when STORAGE_DRIVER=s3')
       }
-      this.publicBaseUrl = process.env.STORAGE_PUBLIC_URL
+      // No trailing slash: addresses are built as `<base>/<key>`, and a doubled
+      // slash names a different object in a bucket.
+      this.publicBaseUrl = process.env.STORAGE_PUBLIC_URL?.replace(/\/+$/, '')
+      // AWS_S3_ENDPOINT is for an S3-compatible store that is not AWS (and
+      // for exercising this driver without a bucket); unset, it is AWS.
+      const endpoint = process.env.AWS_S3_ENDPOINT || undefined
       this.client = new S3Client({
          region: process.env.AWS_REGION,
+         ...(endpoint ? { endpoint, forcePathStyle: true } : {}),
          credentials:
             process.env.AWS_ACCESS_KEY_ID && process.env.AWS_ACCESS_KEY_SECRET
                ? {
@@ -67,14 +73,40 @@ export class S3Storage implements StorageAdapter {
       opts: { folder: string; visibility: Visibility }
    ): Promise<StoredFile> {
       const key = this.objectKey(opts.visibility, opts.folder, input.originalName)
-      await this.client.send(
-         new PutObjectCommand({
-            Bucket: this.bucket,
-            Key: key,
-            Body: input.buffer,
-            ContentType: input.mimeType,
+      // A stream that fails while it is being sent (the sender hung up, or
+      // sent more or less than it said) stops the request to S3 there, and is
+      // what the caller is told. Unlistened-to, that failure is an uncaught
+      // exception: the SDK pipes the stream and does not watch it.
+      const stop = new AbortController()
+      const broken = new Promise<never>((_, reject) =>
+         input.stream?.on('error', (err) => {
+            // In this order: the caller hears what broke, not "aborted".
+            reject(err)
+            stop.abort()
          })
       )
+      try {
+         await Promise.race([
+            this.client.send(
+               new PutObjectCommand({
+                  Bucket: this.bucket,
+                  Key: key,
+                  // A large file is passed on as it arrives, never held whole
+                  // in memory or on disk; S3 then needs its length up front.
+                  Body: input.stream ?? input.buffer,
+                  ContentLength: input.stream ? input.size : undefined,
+                  ContentType: input.mimeType,
+               }),
+               { abortSignal: stop.signal }
+            ),
+            broken,
+         ])
+      } finally {
+         // Refused before the stream was read to its end (a 403, a dropped
+         // connection): whoever is feeding it must not be left waiting on a
+         // reader that has gone.
+         input.stream?.destroy()
+      }
       return {
          key,
          url:

@@ -21,6 +21,8 @@ export type AdminRole = (typeof ADMIN_ROLES)[keyof typeof ADMIN_ROLES]
  * route table, the role editor and the guard all read this one list.
  *
  * A write permission does NOT imply the matching read; each is checked alone.
+ * Nor does it imply the delete: removing a record for good is its own
+ * permission, so a role can edit without being able to erase.
  */
 export const PERMISSIONS = [
    'dashboard:read',
@@ -28,21 +30,27 @@ export const PERMISSIONS = [
    'orders:write',
    'enquiries:read',
    'enquiries:write',
+   'enquiries:delete',
    'inventory:read',
    'inventory:write',
+   'inventory:delete',
    'customers:read',
    'customers:write',
+   'customers:delete',
    'customers:export',
    'payments:read',
    'content:read',
    'content:write',
+   'content:delete',
    'notifications:read',
    'notifications:write',
+   'notifications:delete',
    'settings:read',
    'settings:write',
    'audit:read',
    'users:read',
    'users:write',
+   'users:delete',
    'roles:read',
    'roles:write',
 ] as const
@@ -129,7 +137,10 @@ export const AUDIT_ACTIONS = {
    ADMIN_ACCESS_CHANGED: 'ADMIN_ACCESS_CHANGED',
    CREATE: 'CREATE',
    UPDATE: 'UPDATE',
+   /** Archived: out of sight, still in the database. */
    DELETE: 'DELETE',
+   /** Removed for good. The row keeps the record as it was. */
+   PURGE: 'PURGE',
    /** Sensitive reads (§2.2) — logged even though nothing changed. */
    PASSPORT_UNMASKED: 'PASSPORT_UNMASKED',
    CUSTOMER_EXPORTED: 'CUSTOMER_EXPORTED',

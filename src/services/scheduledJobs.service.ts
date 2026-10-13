@@ -256,12 +256,17 @@ export const applyScheduledPublishing = async () => {
    await Listing.updateMany({ publishAt: due, status: PUBLISHED }, { $unset: { publishAt: 1 } })
    let published = 0
    for (const listing of await Listing.find({ publishAt: due, status: INACTIVE })) {
-      if (listing.publishBlockers().length) continue
-      const r = await Listing.updateOne(
-         { _id: listing._id, status: INACTIVE },
-         { $set: { status: PUBLISHED }, $unset: { publishAt: 1 } }
-      )
-      published += r.modifiedCount
+      // One record that cannot be read must not keep the rest off sale.
+      try {
+         if (listing.publishBlockers().length) continue
+         const r = await Listing.updateOne(
+            { _id: listing._id, status: INACTIVE },
+            { $set: { status: PUBLISHED }, $unset: { publishAt: 1 } }
+         )
+         published += r.modifiedCount
+      } catch (e: any) {
+         console.error(`Scheduled publishing skipped listing ${listing._id}:`, e.message)
+      }
    }
    return { published, unpublished: unpublished.modifiedCount }
 }

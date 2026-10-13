@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { Types } from 'mongoose'
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { VERTICALS } from '../../constants/domain.constants'
 import { Hotel } from '../../model/hotelModel'
@@ -9,6 +10,7 @@ import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
+import { escapeRx, sameName } from '../../utils/sameName'
 
 /**
  * The screen where the office decides where the business operates.
@@ -30,16 +32,9 @@ const searchTerm = (v: unknown) =>
    typeof v === 'string' ? v.replace(/\0/g, '').trim().slice(0, 80) : ''
 // §BUG-007: escape before building the RegExp — a raw user string is a malformed
 // regex that makes the driver throw and leak Mongo internals (Location51091).
-const escapeRx = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const searchRx = (value: string) => new RegExp(escapeRx(value), 'i')
-
-/**
- * The whole name and nothing else, whatever its case or the spaces around it.
- * Hotels and restaurants type their city by hand, so "kinshasa" and
- * "Kinshasa " are the same place as the location called Kinshasa.
- */
-const sameName = (name: string) => new RegExp(`^\\s*${escapeRx(name.trim())}\\s*$`, 'i')
 const nameKey = (name: unknown) => String(name ?? '').trim().toLowerCase()
+const NAME_TAKEN = 'Another location already has that name, or one written almost the same'
 
 const present = (l: any) => ({
    id: l._id.toString(),
@@ -97,25 +92,22 @@ export const listLocations = catchAsync(async (req: Request, res: Response) => {
 
 export const createLocation = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const name = String(req.body?.name ?? '').trim()
+      // Text or nothing: String() makes "null" of a null and "x,y" of a list.
+      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : ''
       if (!name) return next(new AppError('A name is required', 400))
 
-      // Inventory names its city by this text, so two places may not share it.
-      if (await Location.exists({ name: sameName(name) })) {
-         return next(new AppError('Another location already has that name', 409))
-      }
-
-      let slug = String(req.body?.slug ?? '').trim().toLowerCase()
-      if (slug) {
-         if (await Location.exists({ slug })) {
-            return next(new AppError('A location with that slug already exists', 409))
-         }
-      } else {
-         // A renamed place keeps its slug (links to it must go on working), so
-         // the slug of a name that has since been freed may still be taken.
-         const base = slugify(name) || 'location'
-         slug = base
-         for (let n = 2; await Location.exists({ slug }); n++) slug = `${base}-${n}`
+      const slug =
+         // A slug sent with the request is put in a slug's shape too.
+         slugify(typeof req.body?.slug === 'string' ? req.body.slug : '') ||
+         slugify(name) ||
+         // A name with nothing a slug can keep (no Latin letter or digit).
+         new Types.ObjectId().toString()
+      // Inventory names its city by this text, so two places may not share it —
+      // nor differ only by an accent, a hyphen or a second space, which is what
+      // the slug flattens ("Kasaï" and "Kasai" are one place typed twice). The
+      // slug's unique index is what holds this when two requests arrive at once.
+      if (await Location.exists({ $or: [{ name: sameName(name) }, { slug }] })) {
+         return next(new AppError(NAME_TAKEN, 409))
       }
 
       const location = await Location.create({
@@ -157,17 +149,22 @@ export const updateLocation = catchAsync(
       // and it may not be blank.
       let renamedFrom: string | null = null
       if (req.body?.name !== undefined) {
-         const name = String(req.body.name).trim()
+         // Text or nothing: String(null) is "null", and the place — with every
+         // hotel and bus in it — was renamed to exactly that.
+         const name = typeof req.body.name === 'string' ? req.body.name.trim() : ''
          if (!name) return next(new AppError('A name is required', 400))
          if (name !== location.name) {
+            // The slug follows the name (the website asks by name, so nothing
+            // links to the old one), which keeps "one slug, one spelling" true
+            // and lets the unique index refuse a second place of the same name.
+            const slug = slugify(name) || location.slug
             const taken = await Location.exists({
                _id: { $ne: location._id },
-               name: sameName(name),
+               $or: [{ name: sameName(name) }, { slug }],
             })
-            if (taken) {
-               return next(new AppError('Another location already has that name', 409))
-            }
+            if (taken) return next(new AppError(NAME_TAKEN, 409))
             renamedFrom = location.name
+            location.slug = slug
          }
          req.body.name = name
       }
@@ -196,18 +193,26 @@ export const updateLocation = catchAsync(
       // naming a place that no longer exists and drop out of the city's search.
       let moved: Record<string, number> | undefined
       if (renamedFrom) {
+         const old = sameName(renamedFrom)
+         // The version goes up with it: a hotel form opened before the rename
+         // would otherwise save the old city straight back.
          const [hotels, restaurants, listings] = await Promise.all(
             [Hotel, Restaurant, Listing].map((model: any) =>
-               model.updateMany(
-                  { city: sameName(renamedFrom as string) },
-                  { $set: { city: location.name } }
-               )
+               model.updateMany({ city: old }, { $set: { city: location.name }, $inc: { __v: 1 } })
             )
+         )
+         // A bus names every stop on its way by the same text, and the website
+         // finds "buses to X" through them.
+         const stops = await Listing.updateMany(
+            { 'attributes.routeStops': old },
+            { $set: { 'attributes.routeStops.$[stop]': location.name }, $inc: { __v: 1 } },
+            { arrayFilters: [{ stop: { $regex: old.source, $options: 'i' } }] }
          )
          moved = {
             hotels: hotels.modifiedCount,
             restaurants: restaurants.modifiedCount,
             listings: listings.modifiedCount,
+            busStops: stops.modifiedCount,
          }
       }
 
