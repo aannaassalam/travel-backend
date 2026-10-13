@@ -34,6 +34,10 @@ const REDACTED_KEYS = [
 
 const redact = (value: any): any => {
    if (!value || typeof value !== 'object') return value
+   // A date, an id, raw bytes: values, not objects to walk. Rebuilt key by key
+   // a date came out empty and an id as a list of its bytes — and the copy
+   // kept of a deleted record, the only one left, had lost both.
+   if (value instanceof Date || value._bsontype || ArrayBuffer.isView(value)) return value
    if (Array.isArray(value)) return value.map(redact)
    return Object.entries(value).reduce<Record<string, any>>((acc, [k, v]) => {
       acc[k] = REDACTED_KEYS.includes(k.toLowerCase()) ? '[REDACTED]' : redact(v)

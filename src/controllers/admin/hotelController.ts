@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { isValidObjectId } from 'mongoose'
 import slugify from 'slugify'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
@@ -262,6 +263,11 @@ export const duplicateHotel = catchAsync(
 // --- Room types -------------------------------------------------------------
 
 export const createRoomType = catchAsync(async (req: Request, res: Response) => {
+   // The hotel can have been deleted since this page was opened: a room type
+   // (and then its prices) stored under it would belong to nothing.
+   if (!isValidObjectId(req.params.id) || !(await Hotel.exists({ _id: req.params.id }))) {
+      throw new AppError(`${ENTITY} not found`, 404)
+   }
    const roomType = await createDoc<any>(
       req,
       RoomType,
@@ -355,7 +361,9 @@ export const bulkUpdateCalendar = catchAsync(
          return next(new AppError('Sell price must be above cost price', 400))
       }
 
-      const roomType = await RoomType.findById(roomTypeId)
+      // Of this hotel: prices are only written through the hotel that owns
+      // the room type, and not for one whose hotel has been deleted.
+      const roomType = await RoomType.findOne({ _id: roomTypeId, hotel: req.params.id })
       if (!roomType) return next(new AppError('Room type not found', 404))
 
       const start = new Date(String(from))
@@ -457,14 +465,17 @@ export const deleteHotel = catchAsync(async (req: Request, res: Response) => {
    const hotel = await Hotel.findById(req.params.id)
    if (!hotel) throw new AppError(`${ENTITY} not found`, 404)
    const rooms = await RoomType.find({ hotel: hotel._id }).lean()
-   // The rooms first: stopped half way, what is left is a hotel that can be
-   // deleted again — not rooms and prices belonging to nothing.
-   const { deletedCount: nights } = await RatePlan.deleteMany({ hotel: hotel._id })
-   await RoomType.deleteMany({ hotel: hotel._id })
+   const nights = await RatePlan.countDocuments({ hotel: hotel._id })
    await deleteDoc(req, Hotel, { _id: hotel._id }, {
       entityType: ENTITY,
       snapshot: (before) => ({ ...before, roomTypes: rooms }),
       reason: `Deleted with ${rooms.length} room type(s) and ${nights} nightly price(s)`,
+      // The rooms before the hotel: stopped half way, what is left is a hotel
+      // that can be deleted again — not rooms and prices belonging to nothing.
+      withIt: async () => {
+         await RatePlan.deleteMany({ hotel: hotel._id })
+         await RoomType.deleteMany({ hotel: hotel._id })
+      },
    })
    return sendResponse(res, 200, 'Hotel deleted', {})
 })
@@ -473,11 +484,11 @@ export const deleteHotel = catchAsync(async (req: Request, res: Response) => {
 export const deleteRoomType = catchAsync(async (req: Request, res: Response) => {
    const own = { _id: req.params.roomTypeId, hotel: req.params.id }
    await confirmOverOpenBookings(req, { 'items.roomTypeId': req.params.roomTypeId }, 'this room type')
-   if (!(await RoomType.exists(own))) throw new AppError('RoomType not found', 404)
-   const { deletedCount: nights } = await RatePlan.deleteMany({ roomType: req.params.roomTypeId })
+   const nights = await RatePlan.countDocuments({ roomType: req.params.roomTypeId })
    await deleteDoc(req, RoomType, own, {
       entityType: 'RoomType',
       reason: `Deleted with ${nights} nightly price(s)`,
+      withIt: () => RatePlan.deleteMany({ roomType: req.params.roomTypeId }),
    })
    return sendResponse(res, 200, 'Room type deleted', {})
 })

@@ -45,7 +45,7 @@ const PRIVACY_FR = doc([
    ['Comment elles sont protégées', "Les données sensibles sont chiffrées au repos. Les documents de voyage sont stockés dans des espaces privés et servis par des liens signés à durée limitée, jamais par une adresse publique permanente. Les accès aux données sont journalisés."],
    ['Avec qui nous les partageons', "Uniquement avec les prestataires nécessaires à votre réservation : compagnie aérienne, hôtel, loueur, opérateur de bus, et notre prestataire de paiement. Nous ne vendons aucune donnée et n'utilisons pas de traceurs publicitaires tiers."],
    ['Vos droits', "Vous pouvez consulter et corriger vos données depuis votre compte, et supprimer votre compte à tout moment depuis la page Profil. Les réservations déjà payées restent enregistrées pour des raisons comptables et légales."],
-   ['Nous contacter', "Écrivez à privacy@flexiairbnb.com ou passez à notre bureau de Gombe. Nous répondons sous 30 jours."],
+   ['Nous contacter', "Écrivez à booking@flexiagency.net ou passez à notre bureau de Gombe. Nous répondons sous 30 jours."],
 ])
 
 const PRIVACY_EN = doc([
@@ -55,7 +55,7 @@ const PRIVACY_EN = doc([
    ['How it is protected', 'Sensitive data is encrypted at rest. Travel documents live in private storage and are served through short-lived signed links, never a permanent public address. Access to data is logged.'],
    ['Who we share it with', 'Only the suppliers your booking requires: the airline, hotel, car hire company, bus operator, and our payment provider. We sell no data and use no third-party advertising trackers.'],
    ['Your rights', 'You can view and correct your data from your account, and delete your account at any time from the Profile page. Bookings already paid remain on record for accounting and legal reasons.'],
-   ['Contacting us', 'Write to privacy@flexiairbnb.com or come to our Gombe office. We reply within 30 days.'],
+   ['Contacting us', 'Write to booking@flexiagency.net or come to our Gombe office. We reply within 30 days.'],
 ])
 
 /**

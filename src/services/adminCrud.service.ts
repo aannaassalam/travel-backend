@@ -299,6 +299,28 @@ export const sortBy = (raw: unknown, fields: Record<string, SortKey>) => {
    }
 }
 
+/**
+ * Orders a column of codes by the words the panel shows for them (see
+ * PANEL_WORDS); a code it has no words for by its own, spelled out.
+ */
+export const byWords = (field: string, words: Record<string, string>): ComputedSort => ({
+   value: {
+      $switch: {
+         branches: Object.entries(words).map(([code, shown]) => ({
+            case: { $eq: [`$${field}`, code] },
+            then: shown,
+         })),
+         default: {
+            $replaceAll: {
+               input: { $toLower: { $ifNull: [`$${field}`, ''] } },
+               find: '_',
+               replacement: ' ',
+            },
+         },
+      },
+   },
+})
+
 /** How many of the languages a record is fully translated into (name and description both), as the lists' Translations column counts it. */
 export const translatedCount = (name: string, locales: readonly string[]) => ({
    $sum: locales.map((l) => ({
@@ -345,16 +367,22 @@ export const deleteDoc = async <T>(
       entityType,
       snapshot,
       reason,
+      withIt,
    }: CrudOptions & {
       /** What the audit log keeps, when that should not be the whole record (personal data). */
       snapshot?: (doc: any) => unknown
       reason?: string
+      /** Removes what cannot stand without the record (a hotel's rooms, a restaurant's menu), just before it. */
+      withIt?: () => Promise<unknown>
    }
 ): Promise<T> => {
    const doc = await model.findOne(filter)
    if (!doc) throw new AppError(`${entityType} not found`, 404)
    const before = doc.toObject()
-   await doc.deleteOne()
+   // The entry first. Stopped half way, the log then says what was being
+   // removed and holds its copy, and the delete can be asked for again; the
+   // other way round a record — or its rooms and prices — could go and leave
+   // no trace of who removed it.
    await recordAudit(req, {
       action: AUDIT_ACTIONS.PURGE,
       entityType,
@@ -362,6 +390,8 @@ export const deleteDoc = async <T>(
       before: snapshot ? snapshot(before) : before,
       reason,
    })
+   await withIt?.()
+   await doc.deleteOne()
    return before as T
 }
 

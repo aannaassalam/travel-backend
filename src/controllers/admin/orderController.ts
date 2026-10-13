@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 
-import { AUDIT_ACTIONS } from '../../constants/admin.constants'
+import { AUDIT_ACTIONS, PANEL_WORDS } from '../../constants/admin.constants'
 import {
    ALLOWED_ORDER_TRANSITIONS,
    CANCELLATION_REASONS,
@@ -16,7 +16,7 @@ import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import { notifyOrder } from '../../services/notifications/notify.service'
 import { releaseListing, releaseStay } from '../../services/orders/inventory.service'
 import { Order } from '../../model/orderModel'
-import { customerNameSort, paginate, sortBy } from '../../services/adminCrud.service'
+import { byWords, customerNameSort, paginate, sortBy } from '../../services/adminCrud.service'
 import { forReader } from '../../middleware/adminAuth'
 import { recordAudit } from '../../services/auditLog.service'
 import { storage } from '../../services/storage'
@@ -125,8 +125,9 @@ export const listOrders = catchAsync(
       const asked = sortBy(req.query.sort, {
          reference: 'reference',
          customer: customerNameSort,
-         status: 'status',
-         payment: 'paymentStatus',
+         // By the words in the cell, not the codes under them.
+         status: byWords('status', PANEL_WORDS.orderStatus),
+         payment: byWords('paymentStatus', PANEL_WORDS.paymentStatus),
          documents: 'fulfilmentStatus',
          total: 'total',
          deadline: 'cashDeadline',

@@ -62,14 +62,16 @@ export const signCustomerToken = (customerId: string, authAt = Date.now()) =>
  * out constantly.
  *
  * SameSite has to be 'none' whenever the site and the API are different
- * registrable domains (the frontend on Vercel, this API on flexiairbnb.com).
+ * registrable domains (the frontend on a vercel.app address, say, and this API
+ * on backend.flexiagency.net).
  * Under 'lax' the browser stores the cookie and then withholds it from every
  * cross-site fetch, so login appears to succeed and the next request is
  * anonymous. 'none' requires Secure, which is why it is tied to HTTPS.
  *
  * The CSRF protection 'lax' was providing is replaced by the CORS allow-list in
- * app.ts: a JSON POST from an unlisted origin is refused at preflight. Host the
- * frontend on a flexiairbnb.com subdomain and this can go back to 'lax'.
+ * app.ts: a JSON POST from an unlisted origin is refused at preflight. With the
+ * frontend only ever served from flexiagency.net (the API's own registrable
+ * domain) this can go back to 'lax'.
  */
 const cookieOptions = () => {
    const crossSite = process.env.NODE_ENV === 'production'

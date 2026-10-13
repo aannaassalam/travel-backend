@@ -82,7 +82,7 @@ export interface ISettings extends Document {
 
 const settingsSchema = new Schema<ISettings>(
    {
-      companyName: { type: String, default: 'Travel DRC' },
+      companyName: { type: String, default: 'Flexi Agency' },
       supportEmail: { type: String, default: '' },
       supportPhone: { type: String, default: '' },
       offices: { type: [officeSchema], default: [] },
@@ -131,6 +131,8 @@ export interface IPolicyVersion extends Document {
    label: string
    body: string
    isLive: boolean
+   /** When it first went on the website. From then on it is part of the record of what applied when, and is kept. */
+   wentLiveAt?: Date
    createdBy?: Types.ObjectId
    createdAt: Date
 }
@@ -147,6 +149,8 @@ const policyVersionSchema = new Schema<IPolicyVersion>(
       label: { type: String, required: true },
       body: { type: String, required: true },
       isLive: { type: Boolean, default: false, index: true },
+      // Written together with isLive, the one change the hook below allows.
+      wentLiveAt: Date,
       createdBy: { type: Schema.Types.ObjectId, ref: 'AdminUser' },
       createdAt: { type: Date, default: Date.now },
    },

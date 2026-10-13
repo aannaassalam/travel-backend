@@ -124,6 +124,53 @@ export const LOCKOUT_POLICY = {
  * Actions that must appear in the audit log. Mutations are logged wholesale by
  * the service layer; the sensitive *reads* here are logged explicitly (§2.2).
  */
+/**
+ * The panel's words for codes it shows in a table column — here only so that a
+ * list ordered by such a column runs in the order those words read
+ * ("Awaiting confirmation" before "Cancelled"), not in the order of the codes
+ * underneath. They are the panel's to choose (admin/lib/functions/labels.lib.ts
+ * and admin/pages/audit-log.tsx): change them there and here together. A code
+ * with no words here is ordered as the panel prints it, spelled out.
+ */
+export const PANEL_WORDS = {
+   orderStatus: {
+      DRAFT: 'Draft',
+      SUBMITTED: 'Awaiting confirmation',
+      CONFIRMED: 'Confirmed',
+      COMPLETED: 'Completed',
+      CANCELLED: 'Cancelled',
+   },
+   paymentStatus: {
+      UNPAID: 'Unpaid',
+      PENDING: 'Payment pending',
+      PAID: 'Paid',
+      FAILED: 'Payment failed',
+      REVERSED: 'Payment reversed',
+   },
+   auditAction: {
+      LOGIN_SUCCESS: 'Signed in',
+      LOGIN_FAILED: 'Failed sign-in',
+      LOGOUT: 'Signed out',
+      STEP_UP_SUCCESS: 'Password re-confirmed',
+      STEP_UP_FAILED: 'Password re-confirmation failed',
+      SESSIONS_REVOKED: 'Other devices signed out',
+      PASSWORD_CHANGED: 'Password changed',
+      ADMIN_ACCESS_CHANGED: 'Access changed',
+      BREAK_GLASS_ENABLED: 'Emergency access enabled',
+      CREATE: 'Created',
+      UPDATE: 'Updated',
+      DELETE: 'Archived',
+      PURGE: 'Deleted for good',
+      PASSPORT_UNMASKED: 'Passport revealed',
+      CUSTOMER_EXPORTED: 'Customers exported',
+      FINANCIAL_EXPORTED: 'Financials exported',
+      CASH_HOLDS_RELEASED: 'Expired cash holds released',
+      CASH_REMINDERS_SENT: 'Cash reminders sent',
+      PASSPORT_DATA_PURGED: 'Old passport data purged',
+      INVENTORY_DRIFT_DETECTED: 'Inventory mismatch detected',
+   },
+} as const
+
 export const AUDIT_ACTIONS = {
    LOGIN_SUCCESS: 'LOGIN_SUCCESS',
    LOGIN_FAILED: 'LOGIN_FAILED',

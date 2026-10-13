@@ -59,7 +59,7 @@ async function main() {
          await s.save()
       }
 
-      await PolicyVersion.create({ ...entry, isLive: true })
+      await PolicyVersion.create({ ...entry, isLive: true, wentLiveAt: new Date() })
       console.log(`  ${entry.kind}/${entry.locale}  created, live (${entry.body.length} chars)`)
    }
 

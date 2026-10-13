@@ -1,8 +1,8 @@
 import { Request, Response } from 'express'
-import { AUDIT_ACTIONS } from '../../constants/admin.constants'
+import { AUDIT_ACTIONS, PANEL_WORDS } from '../../constants/admin.constants'
 import { presentAuditLogs } from '../../dto/admin/auditLog.dto'
 import AuditLog from '../../model/auditLogModel'
-import { paginate, sortBy } from '../../services/adminCrud.service'
+import { byWords, paginate, sortBy } from '../../services/adminCrud.service'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
 
@@ -65,7 +65,8 @@ export const listAuditLogs = catchAsync(async (req: Request, res: Response) => {
       req,
       sortBy(req.query.sort, {
          when: 'createdAt',
-         what: 'action',
+         // By the words in the cell, not the codes under them.
+         what: byWords('action', PANEL_WORDS.auditAction),
          who: 'actorEmail',
          on: ['entityType', 'entityId'],
          details: 'reason',

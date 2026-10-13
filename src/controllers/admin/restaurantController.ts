@@ -432,11 +432,11 @@ export const deleteRestaurant = catchAsync(async (req: Request, res: Response) =
    const restaurant = await Restaurant.findById(req.params.id)
    if (!restaurant) throw new AppError(`${ENTITY} not found`, 404)
    const dishes = await MenuItem.find({ restaurant: restaurant._id }).lean()
-   await MenuItem.deleteMany({ restaurant: restaurant._id })
    await deleteDoc(req, Restaurant, { _id: restaurant._id }, {
       entityType: ENTITY,
       snapshot: (before) => ({ ...before, menu: dishes }),
       reason: `Deleted with ${dishes.length} dish(es)`,
+      withIt: () => MenuItem.deleteMany({ restaurant: restaurant._id }),
    })
    return sendResponse(res, 200, 'Restaurant deleted', {})
 })

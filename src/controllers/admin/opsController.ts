@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { isValidObjectId } from 'mongoose'
 
-import { AUDIT_ACTIONS } from '../../constants/admin.constants'
+import { AUDIT_ACTIONS, PANEL_WORDS } from '../../constants/admin.constants'
 import { PAYMENT_STATUS } from '../../constants/domain.constants'
 import { POLICY_DEFAULTS } from '../../constants/policy.defaults'
 import {
@@ -14,11 +14,12 @@ import {
    NOTIFICATION_CHANNELS,
    TEMPLATE_VARIABLES,
 } from '../../model/enquiryModel'
+import AuditLog from '../../model/auditLogModel'
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import SettingsModel, { getSettings, PolicyVersion } from '../../model/settingsModel'
 import { geoPoint, parseGeo } from '../../model/shared.schema'
-import { customerNameSort, deleteDoc, paginate, sortBy } from '../../services/adminCrud.service'
+import { byWords, customerNameSort, deleteDoc, paginate, sortBy } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
 import { money, notify, pushBody, render } from '../../services/notifications/notify.service'
 import { sendSms, smsConfigured } from '../../services/notifications/sms.service'
@@ -356,7 +357,8 @@ export const listPayments = catchAsync(async (req: Request, res: Response) => {
             order: 'reference',
             customer: customerNameSort,
             method: 'paymentMethod',
-            status: 'paymentStatus',
+            // By the words in the cell, not the codes under them.
+            status: byWords('paymentStatus', PANEL_WORDS.paymentStatus),
             amount: 'total',
             paid: 'paidAt',
          }),
@@ -405,10 +407,35 @@ const policyFields: FieldMap<any> = {
    createdAt: (p) => p.createdAt,
 }
 
+/**
+ * The versions that have been the published text at some time, out of these.
+ *
+ * Stamped since `wentLiveAt` exists. For the versions from before it: putting
+ * one live was always written to the audit log, and one that nobody created
+ * in the panel was put there live by the seed.
+ */
+const everPublished = async (versions: any[]) => {
+   const unsure = versions.filter((v) => !v.isLive && !v.wentLiveAt && v.createdBy)
+   const logged = unsure.length
+      ? await AuditLog.distinct('entityId', {
+           entityType: 'PolicyVersion',
+           entityId: { $in: unsure.map((v) => String(v._id)) },
+           'after.isLive': true,
+        })
+      : []
+   return new Set(
+      versions
+         .filter((v) => v.isLive || v.wentLiveAt || !v.createdBy || logged.includes(String(v._id)))
+         .map((v) => String(v._id))
+   )
+}
+
 export const listPolicies = catchAsync(async (_req: Request, res: Response) => {
    const policies = await PolicyVersion.find().sort({ _id: -1 })
+   const published = await everPublished(policies)
    return sendResponse(res, 200, 'OK', {
-      items: presentList(policies, policyFields),
+      // `wasLive`: kept for good (see deletePolicyVersion), so the panel offers no bin for it.
+      items: presentList(policies, policyFields).map((p: any) => ({ ...p, wasLive: published.has(p.id) })),
       // What the website shows for a text nobody has published yet, so the
       // editor can open on it instead of on an empty box.
       builtIn: POLICY_DEFAULTS,
@@ -457,6 +484,7 @@ export const setPolicyLive = catchAsync(
       // there was a moment with no text at all, in which checkout could not
       // show the no-refund sentence and an order was refused. For that moment
       // two are live instead, and every reader takes the newest.
+      if (!version.isLive && !version.wentLiveAt) version.wentLiveAt = new Date()
       version.isLive = true
       await version.save()
       const siblings = await PolicyVersion.find({
@@ -466,6 +494,8 @@ export const setPolicyLive = catchAsync(
          isLive: true,
       })
       for (const s of siblings) {
+         // One that went live before the stamp existed gets it as it comes down.
+         if (!s.wentLiveAt) s.wentLiveAt = s.createdAt
          s.isLive = false
          await s.save()
       }
@@ -865,8 +895,10 @@ export const deleteEnquiry = catchAsync(async (req: Request, res: Response) => {
 })
 
 /**
- * DELETE /notifications/templates/:id — the event then sends nothing on that
- * channel until a template is saved for it again.
+ * DELETE /notifications/templates/:id — until a template is saved for it
+ * again, the event sends no SMS (or e-mail) on that channel. A push is the
+ * exception: without a template of its own it borrows the SMS wording (see
+ * notify.service), so stopping one means removing the SMS template too.
  */
 export const deleteTemplate = catchAsync(async (req: Request, res: Response) => {
    if (!isValidObjectId(req.params.id)) throw new AppError('Template not found', 404)
@@ -877,11 +909,13 @@ export const deleteTemplate = catchAsync(async (req: Request, res: Response) => 
 })
 
 /**
- * DELETE /policies/:id — a version that never counted: not the one on the
- * website, and not one any customer agreed to.
+ * DELETE /policies/:id — a version that never counted: one that was stored
+ * and never went on the website (a publish that stopped half way, a draft).
  *
- * The rest stay for good. An order copies the text its customer accepted, but
- * the version it names is the proof of where that text came from (§10).
+ * The rest stay for good (§10, §15). An order names the refund sentence its
+ * customer ticked; the terms and the privacy policy they accepted with it are
+ * named nowhere, so the history of what was published when is the only
+ * record of which text applied to a booking.
  */
 export const deletePolicyVersion = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
@@ -900,6 +934,15 @@ export const deletePolicyVersion = catchAsync(
                `${accepted} booking${accepted === 1 ? ' was' : 's were'} made under this version, so it is kept as the record of what those customers agreed to.`,
                409,
                'POLICY_ACCEPTED'
+            )
+         )
+      }
+      if ((await everPublished([version])).size) {
+         return next(
+            new AppError(
+               'This version was the published text for a time, so it is kept as the record of what applied then.',
+               409,
+               'POLICY_WAS_LIVE'
             )
          )
       }
