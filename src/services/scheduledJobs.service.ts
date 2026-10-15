@@ -18,6 +18,7 @@ import { getSettings } from '../model/settingsModel'
 import { sendOutOfBandAlert } from './auditLog.service'
 import { NOTIFICATION_EVENTS } from '../model/enquiryModel'
 import { notifyOrder } from './notifications/notify.service'
+import { askMaxicash } from './payments/settlement.service'
 
 /** How long before a cash deadline the customer gets chased. */
 const REMINDER_WINDOW_MS = 12 * 60 * 60 * 1000
@@ -74,6 +75,13 @@ export const releaseExpiredCashHolds = async () => {
    if (!expired.length) return 0
 
    for (const order of expired) {
+      /**
+       * A payment was opened at MaxiCash for this booking: before letting it
+       * go, ask MaxiCash whether it was paid. A notice that never arrived must
+       * not cost a customer who paid their seat.
+       */
+      if (await askMaxicash(order as any)) continue
+
       const heldIds = order.heldRatePlanIds ?? []
       for (const item of order.items) {
          if (item.roomTypeId && heldIds.length) {

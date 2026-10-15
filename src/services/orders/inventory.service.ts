@@ -1,6 +1,7 @@
 import { Types } from 'mongoose'
 import { Listing } from '../../model/listingModel'
 import { RatePlan } from '../../model/hotelModel'
+import { Order } from '../../model/orderModel'
 
 /**
  * §4.5 inventory holds.
@@ -129,3 +130,35 @@ export const commitStay = (ids: Types.ObjectId[], qty: number) =>
       { _id: { $in: ids }, held: { $gte: qty } },
       { $inc: { held: -qty, sold: qty } }
    )
+
+/**
+ * An order's hold becomes a sale — once, whoever asks and however often.
+ *
+ * Payment can be reported twice at the same moment (the provider repeating its
+ * call; the office confirming by hand just as the provider's call lands), and
+ * the save that follows can lose a race and be run again. A second conversion
+ * would take another customer's hold for a sale that never happened. So the
+ * order is marked by one atomic update, and only the caller that set the mark
+ * moves the stock.
+ *
+ * ponytail: the mark is set before the stock moves, so a crash between the
+ * two leaves the units held rather than sold — never oversold, and visible in
+ * the listing's counts. Upgrade to one transaction with the order's own save
+ * when the deployment is guaranteed to be a replica set.
+ */
+export const commitOrderStock = async (order: {
+   _id: Types.ObjectId
+   heldRatePlanIds?: Types.ObjectId[]
+   items: { roomTypeId?: unknown; listingId?: Types.ObjectId; quantity: number }[]
+}) => {
+   const first = await Order.updateOne(
+      { _id: order._id, stockCommittedAt: null },
+      { $set: { stockCommittedAt: new Date() } }
+   )
+   if (first.modifiedCount !== 1) return
+   const heldIds = order.heldRatePlanIds ?? []
+   for (const item of order.items) {
+      if (item.roomTypeId && heldIds.length) await commitStay(heldIds, item.quantity)
+      else if (item.listingId) await commitListing(item.listingId, item.quantity)
+   }
+}

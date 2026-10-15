@@ -30,6 +30,7 @@ import { RESPONSES } from './constants/constants'
 import connectDb from './config/db.config'
 import app from './app'
 import { normaliseLegacyStatuses, startScheduledJobs } from './services/scheduledJobs.service'
+import { paymentsStatus } from './services/payments/maxicash.service'
 
 const PORT = process.env.PORT || 3001
 
@@ -64,6 +65,7 @@ async function bootstrap() {
 
    const server = app.listen(PORT, () => {
       console.log(`Listening on PORT ${PORT}`)
+      console.log(paymentsStatus())
    })
 
    server.on('error', (err) => {

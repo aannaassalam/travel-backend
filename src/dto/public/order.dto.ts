@@ -1,3 +1,4 @@
+import { paymentAwaited } from '../../services/payments/maxicash.service'
 import { FieldMap, present } from '../../utils/present'
 
 /**
@@ -144,6 +145,10 @@ export const presentOrder = (o: any) => {
       chargedTotal: o.chargedTotal ?? 0,
       fxRate: o.fxRate ?? 1,
       paymentMethod: o.paymentMethod,
+      // A payment may already have been made and is not confirmed yet: the
+      // screens say "being confirmed" and do not offer to pay again. Nothing
+      // else of the provider's side of an order is a client's to read.
+      paymentAwaited: paymentAwaited(o) ? true : undefined,
       cashDeadline: o.cashDeadline?.toISOString?.(),
       // The number the customer quotes when paying cash at the office. It is
       // the order reference, which they already hold — not a new secret.

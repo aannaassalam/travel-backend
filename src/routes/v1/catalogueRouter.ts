@@ -22,7 +22,13 @@ import {
    getOrder,
    getOrderDocument,
 } from '../../controllers/public/orderController'
-import { paymentStatus, startPayment } from '../../controllers/public/paymentController'
+import {
+   maxicashNotify,
+   maxicashReturn,
+   paymentOptions,
+   paymentStatus,
+   startPayment,
+} from '../../controllers/public/paymentController'
 import {
    deleteMe,
    registerDevice,
@@ -181,12 +187,37 @@ router.post('/me/devices', protectCustomer, registerDevice)
 router.delete('/me/devices', protectCustomer, unregisterDevice)
 
 router.post('/orders', checkoutLimiter, createOrder)
+/** Whether online payment can be offered: the website and the app ask this instead of carrying a switch each. */
+router.get('/payments/options', paymentOptions)
+
 /**
- * Confirms the cash rail on an order. Product decision 2026-10-02: cash only in
- * every environment, so the MaxiCash notify route is gone (404) and any other
- * rail is refused with CASH_ONLY.
+ * Confirms cash on an order, or opens a payment at MaxiCash. Rate-limited with
+ * checkout because each online call opens a transaction there. With online
+ * payment switched off, anything but cash is refused with CASH_ONLY.
  */
 router.post('/orders/:reference/pay', checkoutLimiter, startPayment)
+
+/**
+ * MaxiCash's own call, on the address made for one attempt on one order.
+ *
+ * Deliberately NOT behind `checkoutLimiter`: throttling a provider's repeats
+ * would drop real settlements. It still gets a generous ceiling so it cannot
+ * be used as an amplifier.
+ *
+ * Every method: MaxiCash does not say which it uses, and a settlement
+ * notification silently 404ing is the worst possible failure here.
+ */
+const webhookLimiter = rateLimit({
+   max: 600,
+   windowMs: 15 * 60 * 1000,
+   standardHeaders: true,
+   legacyHeaders: false,
+   message: { received: false },
+})
+router.all('/payments/maxicash/notify/:token', webhookLimiter, maxicashNotify)
+
+/** The customer's browser, back from MaxiCash's page: says which booking, settles nothing. */
+router.post('/payments/maxicash/return', orderReadLimiter, maxicashReturn)
 
 /** What the return screen polls; reports the order's own paymentStatus. */
 router.get('/orders/:reference/payment', orderReadLimiter, privateOnly, paymentStatus)

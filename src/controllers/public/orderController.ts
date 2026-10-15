@@ -4,6 +4,7 @@ import { Types } from 'mongoose'
 import {
    BASE_CURRENCY,
    FULFILMENT_STATUS,
+   onlinePaymentsEnabled,
    ORDER_STATUS,
    PAYMENT_METHOD,
    PAYMENT_STATUS,
@@ -32,6 +33,13 @@ import {
 } from '../../services/orders/pricing.service'
 import { currentCustomer } from '../../middleware/customerAuth'
 import { notifyOrder } from '../../services/notifications/notify.service'
+import {
+   belowOnlineMinimum,
+   maxicashEnabled,
+   onlineCurrencies,
+   onlineMinimumMinor,
+} from '../../services/payments/maxicash.service'
+import { nudge } from './paymentController'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -239,14 +247,30 @@ export const createOrder = catchAsync(
       }
 
       /**
-       * Product decision 2026-10-02: cash only in every environment. A request
-       * for any other method is refused outright, not silently booked as cash —
-       * the client must show the customer the right thing, not guess.
+       * Decided here, not by the client. An order is ONLINE only when it was
+       * asked for in so many words AND online payment is on and set up; while
+       * it is off, a request for it is refused outright, not silently booked
+       * as cash — the client must show the customer the right thing, not guess.
        */
-      if (paymentMethod && paymentMethod !== PAYMENT_METHOD.CASH) {
+      const onlineOffered = onlinePaymentsEnabled() && maxicashEnabled()
+      if (paymentMethod && paymentMethod !== PAYMENT_METHOD.CASH && !onlineOffered) {
          return next(new AppError('Only cash payment is available.', 400, 'CASH_ONLY'))
       }
-      const method = PAYMENT_METHOD.CASH
+      const method =
+         paymentMethod === PAYMENT_METHOD.ONLINE ? PAYMENT_METHOD.ONLINE : PAYMENT_METHOD.CASH
+      /**
+       * Refused before anything is priced or held: MaxiCash takes dollars, and
+       * an online order in another currency could only be created to fail at
+       * the payment step with a seat held for nothing.
+       */
+      const asked = String(currency ?? 'USD').toUpperCase()
+      if (method === PAYMENT_METHOD.ONLINE && !onlineCurrencies.includes(asked)) {
+         return next(
+            new AppError(`${asked} cannot be paid online`, 400, 'CURRENCY_UNSUPPORTED', {
+               supported: onlineCurrencies,
+            })
+         )
+      }
 
       // The locale the customer is actually being served, used for the consent
       // snapshot here and the customer record below.
@@ -486,6 +510,12 @@ export const createOrder = catchAsync(
             deliveryLine ? [...priced, deliveryLine] : priced,
             currency
          )
+         // MaxiCash takes nothing under five dollars: said now, before the
+         // booking exists, not on MaxiCash's page after it. (Thrown, so the
+         // stock held above is released.)
+         if (method === PAYMENT_METHOD.ONLINE && chargedTotal < onlineMinimumMinor) {
+            throw belowOnlineMinimum()
+         }
          const settings = await getSettings()
          const isCash = method === PAYMENT_METHOD.CASH
 
@@ -613,6 +643,8 @@ export const getOrder = catchAsync(
          // Only for the masked confirmation line; the DTO emits nothing else.
          .populate('customer', 'phone')
       if (!order) return next(new AppError('Order not found', 404))
+      // (the app's order screen and the website's confirmation page wait here)
+      nudge(order as any)
       return sendResponse(res, 200, 'OK', { order: presentOrder(order) })
    }
 )

@@ -104,13 +104,12 @@ export const PAYMENT_METHOD = {
  * How the money actually moves.
  *
  * `paymentMethod` says only whether we collect it ourselves (CASH) or a
- * provider does (ONLINE); the rail is the specific instrument, and the office
- * needs it to reconcile.
+ * provider does (ONLINE); the rail is the specific instrument.
  *
- * MaxiCash settles all four online rails — card, mobile money, its own wallet
- * and bank transfer. That last one is why BANK_TRANSFER moved out of the
- * offline list: the previous provider had no bank-transfer channel at all, so
- * it had to be collected by hand against the reference. It no longer does.
+ * For an online payment the instrument is chosen on MaxiCash's own page —
+ * card, mobile money or its wallet — and its guide gives no way to choose it
+ * from here. So an online order carries no rail, and the four names below are
+ * only still accepted from an app build that sends one: each means "online".
  *
  * CASH stays offline by definition: it is money handed over at the counter.
  */
@@ -135,12 +134,19 @@ export const ONLINE_RAILS: PaymentRail[] = [
 export const OFFLINE_RAILS: PaymentRail[] = [PAYMENT_RAIL.CASH]
 
 /**
- * Product decision 2026-10-02: cash only in every environment.
+ * The switch for online payment. Off unless ONLINE_PAYMENTS_ENABLED is exactly
+ * 'true': a missing variable must never open a payment path nobody meant to
+ * enable. While it is off every booking is a cash booking and any other
+ * method is refused.
  *
- * Not an env var on purpose — nothing may switch online payment back on. The
- * MaxiCash integration stays in the tree but is unreachable.
+ * (Cash only from 2026-10-02 to 2026-10-13, when the owner asked for MaxiCash
+ * back.) The website and the app do not carry a switch of their own: they ask
+ * `GET /payments/options`, so this one decides for all three.
+ *
+ * Read at call time, not import time, so a restart with a new value is
+ * honoured without rebuilding.
  */
-export const onlinePaymentsEnabled = () => false
+export const onlinePaymentsEnabled = () => process.env.ONLINE_PAYMENTS_ENABLED === 'true'
 
 /**
  * §6.3: allow-listed transitions only, enforced server-side. Anything not

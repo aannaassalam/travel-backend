@@ -14,7 +14,11 @@ import { RatePlan } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import { notifyOrder } from '../../services/notifications/notify.service'
-import { releaseListing, releaseStay } from '../../services/orders/inventory.service'
+import {
+   commitOrderStock,
+   releaseListing,
+   releaseStay,
+} from '../../services/orders/inventory.service'
 import { Order } from '../../model/orderModel'
 import { byWords, customerNameSort, paginate, sortBy } from '../../services/adminCrud.service'
 import { forReader } from '../../middleware/adminAuth'
@@ -55,6 +59,15 @@ const QUEUE_FILTERS: Record<string, () => Record<string, any>> = {
          },
          { paymentStatus: PAYMENT_STATUS.FAILED },
          { paymentStatus: PAYMENT_STATUS.REVERSED },
+         // A payment that may have been made and is not confirmed (the same
+         // test as `paymentAwaited`): the customer came back from MaxiCash's
+         // "paid" address, or MaxiCash said something this server could not
+         // read. Someone should look at the MaxiCash account.
+         { paymentStatus: PAYMENT_STATUS.PENDING, 'payment.returnOutcome': 'SUCCESS' },
+         {
+            paymentStatus: PAYMENT_STATUS.PENDING,
+            'payment.lastNotification': { $exists: true },
+         },
       ],
    }),
    'cash-pending': () => ({
@@ -501,13 +514,20 @@ export const removeDocument = catchAsync(
    }
 )
 
+/**
+ * The office recording that an order has been paid.
+ *
+ * A cash order: the money is in hand at the counter. An online order: MaxiCash
+ * has the money, and its notice to this server never arrived or could not be
+ * read — the office has seen the payment in its MaxiCash account and says so,
+ * with that payment's reference as the reason. Without this, a customer who
+ * paid online and whose notice went missing could only be cancelled.
+ */
 export const markCashReceived = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const order = await Order.findById(req.params.id)
       if (!order) return next(new AppError('Order not found', 404))
-      if (order.paymentMethod !== 'CASH') {
-         return next(new AppError('This is not a cash order', 400))
-      }
+      const cash = order.paymentMethod === 'CASH'
       /**
        * §BUG-001: idempotent, and only from the one state that means "owed at the
        * counter". Without this guard a second click double-fires the hold→sold
@@ -515,10 +535,26 @@ export const markCashReceived = catchAsync(
        * revived straight to PAID.
        */
       if (
-         order.status !== ORDER_STATUS.SUBMITTED ||
-         order.paymentStatus !== PAYMENT_STATUS.UNPAID
+         cash &&
+         (order.status !== ORDER_STATUS.SUBMITTED ||
+            order.paymentStatus !== PAYMENT_STATUS.UNPAID)
       ) {
          return next(new AppError('Order is not awaiting cash payment', 409))
+      }
+      // Online: any order still open and not paid — started, declined, or
+      // awaiting MaxiCash's word; and one the office has already confirmed.
+      if (
+         !cash &&
+         (![ORDER_STATUS.SUBMITTED, ORDER_STATUS.CONFIRMED].includes(order.status as any) ||
+            order.paymentStatus === PAYMENT_STATUS.PAID ||
+            order.paymentStatus === PAYMENT_STATUS.REVERSED)
+      ) {
+         return next(new AppError('Order is not awaiting payment', 409))
+      }
+      if (!cash && !String(req.body?.reason ?? '').trim()) {
+         return next(
+            new AppError('Give the MaxiCash payment reference as the reason', 400, 'REASON_REQUIRED')
+         )
       }
       const before = order.toObject()
 
@@ -528,28 +564,29 @@ export const markCashReceived = catchAsync(
        * incremented forever — the unit is neither on sale nor counted as sold,
        * so it silently disappears from the catalogue.
        */
-      const heldIds = order.heldRatePlanIds ?? []
-      for (const item of order.items) {
-         if (item.roomTypeId && heldIds.length) {
-            await RatePlan.updateMany(
-               { _id: { $in: heldIds }, held: { $gte: item.quantity } },
-               { $inc: { held: -item.quantity, sold: item.quantity } }
-            )
-         } else if (item.listingId) {
-            await Listing.updateOne(
-               { _id: item.listingId, quantityHeld: { $gte: item.quantity } },
-               { $inc: { quantityHeld: -item.quantity, quantitySold: item.quantity } }
-            )
-         }
-      }
+      // Once only, even if MaxiCash's own notice lands at this very moment.
+      await commitOrderStock(order)
       order.heldRatePlanIds = undefined
 
       order.status = ORDER_STATUS.CONFIRMED
       order.paymentStatus = PAYMENT_STATUS.PAID
       order.paidAt = new Date()
       order.cashDeadline = undefined
-      order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_PENDING
-      addTimeline(order, req, 'CASH_RECEIVED', undefined, req.body.reason)
+      // (an online order the office had already confirmed may have its
+      // documents out: that is not undone by recording the payment)
+      if (cash || order.fulfilmentStatus === FULFILMENT_STATUS.NOT_STARTED) {
+         order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_PENDING
+      }
+      if (cash) addTimeline(order, req, 'CASH_RECEIVED', undefined, req.body.reason)
+      else {
+         addTimeline(
+            order,
+            req,
+            'PAYMENT_RECEIVED',
+            'Recorded by the office from the MaxiCash account',
+            req.body.reason
+         )
+      }
       await order.save()
 
       void notifyOrder(NOTIFICATION_EVENTS.PAYMENT_RECEIVED, order._id)
@@ -562,7 +599,7 @@ export const markCashReceived = catchAsync(
          after: order.toObject(),
          reason: req.body.reason,
       })
-      return sendResponse(res, 200, 'Cash recorded as received', {
+      return sendResponse(res, 200, cash ? 'Cash recorded as received' : 'Payment recorded as received', {
          order: orderFor(req, order),
       })
    }

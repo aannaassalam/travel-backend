@@ -132,6 +132,8 @@ export interface IOrder extends Document {
    idempotencyScope?: string
    /** Rate-plan documents holding stock for this order, so payment commits exactly what was held. */
    heldRatePlanIds?: Types.ObjectId[]
+   /** Set by whoever turned this order's hold into a sale — see `commitOrderStock`. */
+   stockCommittedAt?: Date
    status: OrderStatus
    paymentStatus: PaymentStatus
    fulfilmentStatus: FulfilmentStatus
@@ -150,19 +152,31 @@ export interface IOrder extends Document {
    /** Provider-side state. Never returned to a client — see presentOrder. */
    payment?: {
       provider: string
+      /** MaxiCash's LogID for the attempt now open: the checkout session, not the payment. */
       transactionId?: string
       merchantTransactionId?: string
-      /**
-       * MaxiCash's own payment id, learned from the notification. The only key
-       * its status lookup accepts, so without it an order cannot be verified.
-       */
+      /** MaxiCash's own number for the payment, when its notification gives one: what the office looks it up by. */
       providerPaymentId?: string
       paymentUrl?: string
       /** Provider method that actually settled it: OM, MPESA, VISA… */
       providerMethod?: string
       lastStatus?: string
       lastCheckedAt?: Date
+      lastAskedAt?: Date
       initializedAt?: Date
+      /** Every time a payment was opened at the provider, newest last. See the schema. */
+      attempts?: {
+         logId: string
+         notifyHash: string
+         successHash: string
+         failureHash: string
+         startedAt: Date
+      }[]
+      /** The customer's browser came back from the provider: when, and by which address. */
+      returnedAt?: Date
+      returnOutcome?: 'SUCCESS' | 'FAILURE'
+      lastNotification?: { at: Date; params: Record<string, string> }
+      lastReturn?: { at: Date; params: Record<string, string> }
    }
    channel: string
    /** §6.1: cash orders auto-release at this deadline. */
@@ -196,6 +210,7 @@ const orderSchema = new Schema<IOrder>(
       /** §BUG-009: scopes a replay to its original caller. */
       idempotencyScope: { type: String },
       heldRatePlanIds: { type: [Schema.Types.ObjectId], default: undefined },
+      stockCommittedAt: { type: Date },
       status: {
          type: String,
          enum: Object.values(ORDER_STATUS),
@@ -239,9 +254,10 @@ const orderSchema = new Schema<IOrder>(
       /**
        * Everything the provider gave us for this order.
        *
-       * Nothing here is a secret: MaxiCash's checkout session is identified by
-       * an opaque LogID and its notification carries no shared token, so there
-       * is nothing to hide with `select: false`. It is still absent from the
+       * Nothing here is a secret. MaxiCash signs nothing, so what proves a
+       * call is its is the address it was told to call — and of each such
+       * address only the SHA-256 of its token is kept (`attempts`), which
+       * cannot be turned back into the address. It is still absent from the
        * public DTO, which is an explicit allow-list.
        */
       payment: {
@@ -258,7 +274,34 @@ const orderSchema = new Schema<IOrder>(
          providerMethod: { type: String },
          lastStatus: { type: String },
          lastCheckedAt: { type: Date },
+         /** When MaxiCash was last asked about this order (see `askMaxicash`): the pace of asking. */
+         lastAskedAt: { type: Date },
          initializedAt: { type: Date },
+         /**
+          * One entry each time a payment is opened at the provider, with that
+          * attempt's own three addresses (as hashes; see maxicash.service).
+          * The earlier ones stay good: a customer who goes back and starts
+          * again may still finish on the first page, and that payment must
+          * find its order.
+          */
+         attempts: {
+            type: [
+               {
+                  _id: false,
+                  logId: String,
+                  notifyHash: String,
+                  successHash: String,
+                  failureHash: String,
+                  startedAt: Date,
+               },
+            ],
+            default: undefined,
+         },
+         returnedAt: { type: Date },
+         returnOutcome: { type: String, enum: ['SUCCESS', 'FAILURE'] },
+         /** What the provider last sent, as it arrived — until its format is known for certain. */
+         lastNotification: { type: Schema.Types.Mixed },
+         lastReturn: { type: Schema.Types.Mixed },
       },
       channel: { type: String, enum: ['WEB', 'IOS', 'ANDROID', 'ADMIN'], default: 'WEB' },
       cashDeadline: { type: Date, index: true },
@@ -294,5 +337,9 @@ const orderSchema = new Schema<IOrder>(
 
 /** §6.1 "Needs action": paid but no documents issued. */
 orderSchema.index({ paymentStatus: 1, fulfilmentStatus: 1 })
+/** How a call from the payment provider finds its order: by the address it was given. */
+orderSchema.index({ 'payment.attempts.notifyHash': 1 }, { sparse: true })
+orderSchema.index({ 'payment.attempts.successHash': 1 }, { sparse: true })
+orderSchema.index({ 'payment.attempts.failureHash': 1 }, { sparse: true })
 
 export const Order = mongoose.model<IOrder>('Order', orderSchema)
