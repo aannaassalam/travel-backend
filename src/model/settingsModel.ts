@@ -62,6 +62,12 @@ export interface ISettings extends Document {
    defaultLocale: string
    enabledCurrencies: string[]
    baseCurrency: string
+   /**
+    * What 1 USD is worth in each other currency. Prices are entered in USD
+    * only; every CDF and EUR price is worked out from these (fx.service).
+    * Unset means that currency is not offered.
+    */
+   exchangeRates: { CDF?: number; EUR?: number }
    /** §5.1: price edits beyond this percentage need typed confirmation. */
    priceChangeGuardPercent: number
    /** §12 inventory rules. */
@@ -90,6 +96,10 @@ const settingsSchema = new Schema<ISettings>(
       defaultLocale: { type: String, enum: LOCALES, default: DEFAULT_LOCALE },
       enabledCurrencies: { type: [String], default: [...CURRENCIES] },
       baseCurrency: { type: String, default: BASE_CURRENCY },
+      exchangeRates: {
+         CDF: { type: Number, min: 0.000001, max: 10_000_000 },
+         EUR: { type: Number, min: 0.000001, max: 10_000_000 },
+      },
       // Bounded + required: updateSettings copies the body onto the doc and
       // save() validates, so a 0/negative/null value (which would e.g. purge
       // every passport or expire every hold instantly) is refused as a 400.

@@ -49,9 +49,32 @@ const orderItemSchema = new Schema(
       listingId: { type: Schema.Types.ObjectId, required: true },
       listingLabel: { type: String, required: true },
       roomTypeId: Schema.Types.ObjectId,
+      /** For a bus or flight: the departure the customer chose, date and time. */
       startDate: Date,
       endDate: Date,
       quantity: { type: Number, required: true, min: 1 },
+      /**
+       * Bus and flight seats by fare: `quantity` is their sum. Each pays its own
+       * price (adult 12+, child 2–12, baby under 2), so the line's total is not
+       * one unit price times the quantity.
+       */
+      passengers: {
+         type: {
+            _id: false,
+            adults: { type: Number, min: 0 },
+            children: { type: Number, min: 0 },
+            infants: { type: Number, min: 0 },
+         },
+         default: undefined,
+      },
+      /** Flights: the weights the customer declared, in kg, for the airline. */
+      baggage: {
+         type: { _id: false, cabinKg: { type: Number, min: 0 }, checkedKg: { type: Number, min: 0 } },
+         default: undefined,
+      },
+      /** The route's departure point and destination, as sold. */
+      origin: String,
+      destination: String,
       /** Minor units, USD base. Snapshotted so later price edits never
        *  retroactively change what a customer was charged. */
       unitSellPrice: { type: Number, required: true },

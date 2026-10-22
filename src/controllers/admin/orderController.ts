@@ -8,9 +8,9 @@ import {
    ORDER_STATUS,
    PAYMENT_STATUS,
 } from '../../constants/domain.constants'
-import { presentOrder, presentOrderList } from '../../dto/admin/order.dto'
+import { presentOrder, presentOrderList, SupplierContact } from '../../dto/admin/order.dto'
 import { Customer } from '../../model/customerModel.admin'
-import { RatePlan } from '../../model/hotelModel'
+import { Hotel, RatePlan } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import { notifyOrder } from '../../services/notifications/notify.service'
@@ -187,9 +187,38 @@ export const getOrder = catchAsync(
          .select('+travellers.documentNumber')
          .populate('customer')
       if (!order) return next(new AppError('Order not found', 404))
-      return sendResponse(res, 200, 'OK', { order: presentOrder(order) })
+      return sendResponse(res, 200, 'OK', {
+         order: presentOrder(order, await suppliersOf(order.items)),
+      })
    }
 )
+
+/**
+ * The supplier behind each line — the hotel's, or the listing's (a route's
+ * travel agency) — with the details to reach them, keyed by the line's
+ * `listingId`. So whoever is on duty can call the supplier from the booking.
+ */
+const suppliersOf = async (items: { listingId?: unknown }[]) => {
+   const ids = items.map((i) => i.listingId).filter(Boolean)
+   const [hotels, listings] = await Promise.all([
+      Hotel.find({ _id: { $in: ids } }).select('supplier').populate('supplier').lean(),
+      Listing.find({ _id: { $in: ids } }).select('supplier').populate('supplier').lean(),
+   ])
+   const out = new Map<string, SupplierContact>()
+   for (const r of [...hotels, ...listings] as any[]) {
+      const s = r.supplier
+      if (!s?._id) continue
+      out.set(String(r._id), {
+         id: String(s._id),
+         name: s.name,
+         phone: s.phone || undefined,
+         email: s.email || undefined,
+         contactName: s.contactName || undefined,
+         address: s.address || undefined,
+      })
+   }
+   return out
+}
 
 const addTimeline = (order: any, req: Request, event: string, detail?: string, reason?: string) => {
    order.timeline.push({
@@ -227,31 +256,9 @@ export const transitionOrder = catchAsync(
       const before = order.toObject()
 
       if (to === ORDER_STATUS.CONFIRMED) {
-         /**
-          * §6.3: confirming must verify inventory is still held. If the hold
-          * expired, block rather than overselling — the customer would arrive
-          * at a hotel with no room.
-          */
-         for (const item of order.items) {
-            if (!item.roomTypeId || !item.startDate) continue
-            const cells = await RatePlan.find({
-               roomType: item.roomTypeId,
-               date: { $gte: item.startDate, $lt: item.endDate || item.startDate },
-            })
-            const short = cells.find(
-               (c) => c.allotment - c.sold < item.quantity
-            )
-            if (short) {
-               return next(
-                  new AppError(
-                     `Inventory is no longer available for ${item.listingLabel} on ${short.date
-                        .toISOString()
-                        .slice(0, 10)}. Confirmation blocked to avoid overselling.`,
-                     409
-                  )
-               )
-            }
-         }
+         // Rooms and seats are not counted (the hotel or the agency confirms),
+         // so there is no allotment to re-check here; cars and activities had
+         // theirs taken when the booking was made.
          order.confirmedAt = new Date()
       }
 

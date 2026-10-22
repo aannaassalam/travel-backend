@@ -1,7 +1,6 @@
-import { IHotel, IRatePlan, IRoomType } from '../../model/hotelModel'
+import { IHotel, IRoomType } from '../../model/hotelModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
 import {
-   availableCurrencies,
    baseAmount,
    geoPoint,
    resolveLocalized,
@@ -31,7 +30,9 @@ const hotelFields: FieldMap<IHotel> = {
    amenities: (h) => h.amenities,
    images: (h) => h.images,
    videoUrl: (h) => h.videoUrl,
-   supplier: (h) => h.supplier,
+   // The id, whether or not the record was read with its supplier alongside.
+   supplier: (h) => ((h.supplier as any)?._id ?? h.supplier)?.toString(),
+   supplierName: (h) => (h.supplier as any)?.name,
    checkInTime: (h) => h.checkInTime,
    checkOutTime: (h) => h.checkOutTime,
    policies: (h) => h.policies,
@@ -66,6 +67,11 @@ const roomTypeFields: FieldMap<IRoomType> = {
    beds: (r) => r.beds,
    amenities: (r) => r.amenities,
    images: (r) => r.images,
+   /** Per night, for every future night; USD minor units (cost never leaves the admin). */
+   costPrice: (r) => r.costPrice,
+   sellPrice: (r) => r.sellPrice,
+   margin: (r) => baseAmount(r.sellPrice) - baseAmount(r.costPrice),
+   mealPlan: (r) => r.mealPlan,
    status: (r) => r.status,
    version: (r) => (r as any).__v,
 }
@@ -73,29 +79,6 @@ const roomTypeFields: FieldMap<IRoomType> = {
 export const presentRoomType = (r: IRoomType) => present(r, roomTypeFields)
 export const presentRoomTypes = (r: IRoomType[]) =>
    presentList(r, roomTypeFields)
-
-/** One cell of the §5.2 calendar grid. */
-const ratePlanFields: FieldMap<IRatePlan> = {
-   id: (p) => p._id.toString(),
-   roomTypeId: (p) => p.roomType?.toString(),
-   date: (p) => p.date.toISOString().slice(0, 10),
-   // Full per-currency maps; the grid shows base and the editor shows all.
-   costPrice: (p) => p.costPrice,
-   sellPrice: (p) => p.sellPrice,
-   costPriceBase: (p) => baseAmount(p.costPrice),
-   sellPriceBase: (p) => baseAmount(p.sellPrice),
-   currencies: (p) => availableCurrencies(p.sellPrice),
-   allotment: (p) => p.allotment,
-   sold: (p) => p.sold,
-   held: (p) => p.held,
-   available: (p) => Math.max(p.allotment - p.sold - p.held, 0),
-   mealPlan: (p) => p.mealPlan,
-   blocked: (p) => p.blocked,
-   margin: (p) => baseAmount(p.sellPrice) - baseAmount(p.costPrice),
-}
-
-export const presentRatePlans = (p: IRatePlan[]) =>
-   presentList(p, ratePlanFields)
 
 // ---------------------------------------------------------------------------
 

@@ -75,7 +75,17 @@ export const presentOrderList = (o: IOrder[]) => presentList(o, orderListFields)
  * §6.2 order detail. Traveller document numbers are masked here; unmasking is a
  * separate, reason-required, logged endpoint (§14.5).
  */
-const orderDetailFields: FieldMap<IOrder> = {
+/** Who to call about a line: its hotel's or listing's supplier, as recorded under Suppliers. */
+export interface SupplierContact {
+   id: string
+   name: string
+   phone?: string
+   email?: string
+   contactName?: string
+   address?: string
+}
+
+const orderDetailFields = (suppliers?: Map<string, SupplierContact>): FieldMap<IOrder> => ({
    ...orderListFields,
    customer: (o: any) =>
       o.customer && typeof o.customer === 'object'
@@ -99,6 +109,12 @@ const orderDetailFields: FieldMap<IOrder> = {
          startDate: i.startDate,
          endDate: i.endDate,
          quantity: i.quantity,
+         // A bus or flight: the route, the seats by fare and (flights) the bags.
+         origin: i.origin,
+         destination: i.destination,
+         passengers: i.passengers ?? undefined,
+         baggage: i.baggage ?? undefined,
+         supplier: suppliers?.get(String(i.listingId)),
          unitSellPrice: i.unitSellPrice,
          // Admin surface only — §2.1's exact example of what must never leak.
          unitCostPrice: i.unitCostPrice,
@@ -154,6 +170,7 @@ const orderDetailFields: FieldMap<IOrder> = {
    internalNotes: (o) => o.internalNotes,
    cancellationReason: (o) => o.cancellationReason,
    version: (o) => (o as any).__v,
-}
+})
 
-export const presentOrder = (o: IOrder) => present(o, orderDetailFields)
+export const presentOrder = (o: IOrder, suppliers?: Map<string, SupplierContact>) =>
+   present(o, orderDetailFields(suppliers))

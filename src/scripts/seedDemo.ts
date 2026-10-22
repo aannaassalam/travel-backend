@@ -23,6 +23,7 @@ import { Customer } from '../model/customerModel.admin'
 import { Enquiry } from '../model/enquiryModel'
 import SettingsModel, { PolicyVersion } from '../model/settingsModel'
 import { Hotel, RatePlan, RoomType } from '../model/hotelModel'
+import { Supplier } from '../model/supplierModel'
 import { Order } from '../model/orderModel'
 
 const usd = (dollars: number) => Math.round(dollars * 100)
@@ -68,6 +69,10 @@ const run = async () => {
       SettingsModel.deleteMany({}),
    ])
 
+   // Suppliers are records picked from a list; made once per name.
+   const supplier = async (name: string) =>
+      (await Supplier.findOneAndUpdate({ name }, { $setOnInsert: { name } }, { upsert: true, new: true }))._id
+
    const hotels = await Hotel.create([
       {
          name: { fr: 'Hôtel Memling', en: 'Memling Hotel' },
@@ -79,7 +84,7 @@ const run = async () => {
          description: { fr: 'Hôtel d’affaires au cœur de Gombe.', en: 'Business hotel in Gombe.' },
          amenities: ['WIFI', 'POOL', 'RESTAURANT', 'PARKING'],
          images: ['/assets/images/hotel-1.jpg'],
-         supplier: 'Memling Group',
+         supplier: await supplier('Memling Group'),
       },
       {
          name: { fr: 'Grand Hôtel de Lubumbashi', en: 'Lubumbashi Grand Hotel' },
@@ -90,7 +95,7 @@ const run = async () => {
          description: { fr: 'Confort moderne au centre-ville.' },
          amenities: ['WIFI', 'RESTAURANT'],
          images: ['/assets/images/hotel-2.jpg'],
-         supplier: 'Katanga Hospitality',
+         supplier: await supplier('Katanga Hospitality'),
       },
       {
          name: { fr: 'Lodge du Lac de Goma', en: 'Goma Lakeside Lodge' },
@@ -103,42 +108,22 @@ const run = async () => {
       },
    ])
 
+   // One nightly price per room type, for every night (USD; CDF and EUR are
+   // worked out from the rates in Settings).
+   const roomType = (hotel: number, fr: string, en: string, base: number, extra: object) => ({
+      hotel: hotels[hotel]._id,
+      name: { fr, en },
+      costPrice: { USD: usd(base * 0.7) },
+      sellPrice: { USD: usd(base) },
+      status: LISTING_STATUS.PUBLISHED,
+      ...extra,
+   })
    const rooms = await RoomType.create([
-      { hotel: hotels[0]._id, name: { fr: 'Chambre Standard', en: 'Standard Room' }, maxAdults: 2, beds: '1 double', status: LISTING_STATUS.PUBLISHED },
-      { hotel: hotels[0]._id, name: { fr: 'Chambre Exécutive', en: 'Executive Room' }, maxAdults: 2, maxChildren: 1, beds: '1 king', status: LISTING_STATUS.PUBLISHED },
-      { hotel: hotels[0]._id, name: { fr: 'Suite', en: 'Suite' }, maxAdults: 3, maxChildren: 2, beds: '1 king + sofa', status: LISTING_STATUS.PUBLISHED },
-      { hotel: hotels[1]._id, name: { fr: 'Chambre Standard', en: 'Standard Room' }, maxAdults: 2, beds: '2 singles', status: LISTING_STATUS.PUBLISHED },
+      roomType(0, 'Chambre Standard', 'Standard Room', 120, { maxAdults: 2, beds: '1 double' }),
+      roomType(0, 'Chambre Exécutive', 'Executive Room', 180, { maxAdults: 2, maxChildren: 1, beds: '1 king' }),
+      roomType(0, 'Suite', 'Suite', 260, { maxAdults: 3, maxChildren: 2, beds: '1 king + sofa' }),
+      roomType(1, 'Chambre Standard', 'Standard Room', 120, { maxAdults: 2, beds: '2 singles' }),
    ])
-
-   // 45 nights of availability, with some already sold and some past-dated so
-   // spoilage and at-risk tiles have something real to report.
-   const cells: any[] = []
-   // Illustrative CDF/EUR prices are typed here exactly as an administrator
-   // would type them — deliberately NOT derived from the USD figure.
-   const CDF_PER_USD = 2800
-   const EUR_PER_USD = 0.92
-   for (const room of rooms) {
-      const fr = room.name?.fr ?? ''
-      const base = fr.includes('Suite') ? 260 : fr.includes('Exéc') ? 180 : 120
-      for (let i = -10; i < 35; i++) {
-         const allotment = 5
-         const sold = i < 0 ? Math.floor(Math.random() * 4) : i < 8 ? Math.floor(Math.random() * 3) : 0
-         cells.push({
-            hotel: room.hotel,
-            roomType: room._id,
-            date: day(i),
-            costPrice: { USD: usd(base * 0.7) },
-            sellPrice: {
-               USD: usd(base),
-               CDF: Math.round(base * CDF_PER_USD) * 100,
-               EUR: usd(Math.round(base * EUR_PER_USD)),
-            },
-            allotment,
-            sold,
-         })
-      }
-   }
-   await RatePlan.insertMany(cells)
 
    const customers = await Customer.create([
       { firstName: 'Jean', lastName: 'Mukendi', phone: '+243810000001', email: 'jean@example.cd', city: 'Kinshasa' },
@@ -283,7 +268,7 @@ const run = async () => {
 
 
    console.log(
-      `Seeded ${hotels.length} hotels · ${rooms.length} room types · ${cells.length} nights · ${customers.length} customers · 4 orders · 3 enquiries · 2 policies`
+      `Seeded ${hotels.length} hotels · ${rooms.length} room types · ${customers.length} customers · 4 orders · 3 enquiries · 2 policies`
    )
    await mongoose.disconnect()
 }

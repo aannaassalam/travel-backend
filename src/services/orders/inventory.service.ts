@@ -1,4 +1,5 @@
 import { Types } from 'mongoose'
+import { VERTICALS } from '../../constants/domain.constants'
 import { Listing } from '../../model/listingModel'
 import { RatePlan } from '../../model/hotelModel'
 import { Order } from '../../model/orderModel'
@@ -17,6 +18,15 @@ import { Order } from '../../model/orderModel'
  *   commit  held      -> sold      (payment succeeds)
  *   release held      -> available (payment fails, or the hold expires)
  */
+
+/**
+ * Whether a line is sold from a counted stock that checkout holds and payment
+ * converts. Only cars and activities are: hotel rooms and bus and flight seats
+ * are not limited (the hotel or the agency confirms), dishes are cooked or not,
+ * and a property is never checked out at all.
+ */
+export const holdsStock = (vertical: string) =>
+   vertical === VERTICALS.CAR || vertical === VERTICALS.ACTIVITY
 
 /** One night of a hotel stay. Listings use a single pseudo-night. */
 export interface HeldNight {
@@ -149,7 +159,7 @@ export const commitStay = (ids: Types.ObjectId[], qty: number) =>
 export const commitOrderStock = async (order: {
    _id: Types.ObjectId
    heldRatePlanIds?: Types.ObjectId[]
-   items: { roomTypeId?: unknown; listingId?: Types.ObjectId; quantity: number }[]
+   items: { vertical?: string; roomTypeId?: unknown; listingId?: Types.ObjectId; quantity: number }[]
 }) => {
    const first = await Order.updateOne(
       { _id: order._id, stockCommittedAt: null },
@@ -159,6 +169,8 @@ export const commitOrderStock = async (order: {
    const heldIds = order.heldRatePlanIds ?? []
    for (const item of order.items) {
       if (item.roomTypeId && heldIds.length) await commitStay(heldIds, item.quantity)
-      else if (item.listingId) await commitListing(item.listingId, item.quantity)
+      else if (item.listingId && holdsStock(item.vertical ?? '')) {
+         await commitListing(item.listingId, item.quantity)
+      }
    }
 }

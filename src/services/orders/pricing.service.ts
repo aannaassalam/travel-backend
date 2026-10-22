@@ -1,9 +1,12 @@
 import { Types } from 'mongoose'
-import { CURRENCIES, BASE_CURRENCY, VERTICALS } from '../../constants/domain.constants'
-import { Listing } from '../../model/listingModel'
-import { Hotel, RatePlan, RoomType } from '../../model/hotelModel'
+import { CURRENCIES, BASE_CURRENCY, Currency, VERTICALS } from '../../constants/domain.constants'
+import { isScheduledRoute, Listing } from '../../model/listingModel'
+import { Hotel, RoomType } from '../../model/hotelModel'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
+import { baseAmount, Money } from '../../model/shared.schema'
+import { currentRates, inAllCurrencies } from '../fx.service'
 import { nightsBetween } from './inventory.service'
+import { scheduledDeparture } from './schedule.service'
 
 /**
  * Server-side re-pricing.
@@ -14,7 +17,22 @@ import { nightsBetween } from './inventory.service'
  * on every line for margin reporting, and cost price must never travel to a
  * public client in either direction — so the only place it can come from is a
  * lookup like this one.
+ *
+ * Prices are stored in USD; the other currencies of a line are worked out from
+ * the office's exchange rates (fx.service), per unit and then multiplied, so a
+ * CDF total is exactly the CDF prices the customer was shown added up.
  */
+
+export interface Passengers {
+   adults: number
+   children: number
+   infants: number
+}
+
+export interface Baggage {
+   cabinKg: number
+   checkedKg: number
+}
 
 export interface RequestedItem {
    vertical: string
@@ -23,6 +41,10 @@ export interface RequestedItem {
    startDate?: string
    endDate?: string
    quantity: number
+   /** Bus and flight seats by fare. */
+   passengers?: Partial<Passengers>
+   /** Flights: what the customer will carry, in kg. */
+   baggage?: Partial<Baggage>
 }
 
 export interface PricedItem {
@@ -37,8 +59,12 @@ export interface PricedItem {
    unitCostPrice: number
    lineTotal: number
    lineCost: number
-   /** Per-currency line totals, present only where a real typed price exists. */
+   /** The line's total in each currency it can be charged in. */
    lineTotalByCurrency: Record<string, number>
+   passengers?: Passengers
+   baggage?: Baggage
+   origin?: string
+   destination?: string
 }
 
 const label = (value: any): string =>
@@ -63,11 +89,91 @@ const validateDates = (startRaw: string, endRaw: string) => {
    if ((end - start) / DAY_MS > MAX_SPAN_DAYS) throw new Error('INVALID_DATES')
 }
 
-/** A currency is only offered when every component of the price was typed in it. */
-const intersectCurrencies = (a: Record<string, number>, b: Record<string, number>) => {
+/** A USD price times a count, in every currency it converts to. */
+const scaled = (usdMinor: number, times: number): Record<string, number> => {
    const out: Record<string, number> = {}
-   for (const c of Object.keys(a)) if (typeof b[c] === 'number') out[c] = a[c] + b[c]
+   for (const [c, v] of Object.entries(inAllCurrencies(usdMinor))) out[c] = (v ?? 0) * times
    return out
+}
+
+/** Adds price lists together, currency by currency, keeping those every part has. */
+const added = (...parts: Record<string, number>[]): Record<string, number> => {
+   const out: Record<string, number> = {}
+   for (const c of CURRENCIES) {
+      if (parts.every((p) => typeof p[c] === 'number')) out[c] = parts.reduce((s, p) => s + p[c], 0)
+   }
+   return out
+}
+
+/**
+ * Seats by fare, as asked for: whole numbers, at least one adult (a child or
+ * a baby does not travel alone), no more babies than adults (one on each lap),
+ * twenty seats at most, as for any other line.
+ */
+export const parsePassengers = (raw: any): Passengers => {
+   const n = (v: unknown) => (v === undefined || v === null || v === '' ? 0 : Number(v))
+   const p = { adults: n(raw?.adults), children: n(raw?.children), infants: n(raw?.infants) }
+   const whole = Object.values(p).every((v) => Number.isInteger(v) && v >= 0)
+   const total = p.adults + p.children + p.infants
+   if (!whole || p.adults < 1 || p.infants > p.adults || total > 20) {
+      throw new Error('INVALID_PASSENGERS')
+   }
+   return p
+}
+
+/** Flights: both weights, in kg, as the customer declares them (0 is "none"). */
+export const parseBaggage = (raw: any): Baggage => {
+   const kg = (v: unknown) => (v === '' || v === null || v === undefined ? NaN : Number(v))
+   const b = { cabinKg: kg(raw?.cabinKg), checkedKg: kg(raw?.checkedKg) }
+   if (Object.values(b).some((v) => !Number.isFinite(v) || v < 0 || v > 200)) {
+      throw new Error('INVALID_BAGGAGE')
+   }
+   return { cabinKg: Math.round(b.cabinKg * 10) / 10, checkedKg: Math.round(b.checkedKg * 10) / 10 }
+}
+
+/**
+ * A bus or flight booking: one departure from the route's timetable, and a
+ * fare per passenger — adult, child (2–12) and baby (under 2) each pay their
+ * own. There is no seat count to check; the agency is the one who confirms.
+ */
+const priceRouteItem = (listing: any, item: RequestedItem): PricedItem => {
+   const attrs = listing.attributes ?? {}
+   const departure = scheduledDeparture(attrs, item.startDate)
+   if (!departure) throw new Error('INVALID_DEPARTURE')
+   const p = parsePassengers(item.passengers)
+   const baggage = listing.vertical === VERTICALS.FLIGHT ? parseBaggage(item.baggage) : undefined
+
+   const fare = {
+      adult: baseAmount(listing.sellPrice),
+      child: baseAmount(listing.childSellPrice),
+      infant: baseAmount(listing.infantSellPrice),
+   }
+   const cost = {
+      adult: baseAmount(listing.costPrice),
+      child: baseAmount(listing.childCostPrice),
+      infant: baseAmount(listing.infantCostPrice),
+   }
+   return {
+      vertical: listing.vertical,
+      listingId: listing._id,
+      listingLabel: label(listing.title),
+      startDate: departure,
+      quantity: p.adults + p.children + p.infants,
+      // Per adult: the headline fare. The line total is the real sum.
+      unitSellPrice: fare.adult,
+      unitCostPrice: cost.adult,
+      lineTotal: fare.adult * p.adults + fare.child * p.children + fare.infant * p.infants,
+      lineCost: cost.adult * p.adults + cost.child * p.children + cost.infant * p.infants,
+      lineTotalByCurrency: added(
+         scaled(fare.adult, p.adults),
+         scaled(fare.child, p.children),
+         scaled(fare.infant, p.infants)
+      ),
+      passengers: p,
+      baggage,
+      origin: listing.city,
+      destination: attrs.destination,
+   }
 }
 
 export const priceListingItem = async (item: RequestedItem): Promise<PricedItem> => {
@@ -77,7 +183,9 @@ export const priceListingItem = async (item: RequestedItem): Promise<PricedItem>
    })
    if (!listing) throw new Error('ITEM_UNAVAILABLE')
    if (listing.vertical === VERTICALS.PROPERTY) throw new Error('PROPERTY_IS_ENQUIRY_ONLY')
-   // A flight or bus that has left is not for sale, whatever its status still
+   if (isScheduledRoute(listing.vertical)) return priceRouteItem(listing, item)
+
+   // A dated listing that has left is not for sale, whatever its status still
    // says: the job that marks it expired runs every ten minutes, not every
    // second. The same reading of "departed" as publishBlockers.
    const attrs = listing.attributes as any
@@ -94,15 +202,8 @@ export const priceListingItem = async (item: RequestedItem): Promise<PricedItem>
          ? Math.max(nightsBetween(new Date(item.startDate), new Date(item.endDate)).length, 1)
          : 1
 
-   const sell = (listing.sellPrice as any) ?? {}
-   const cost = (listing.costPrice as any) ?? {}
-   const byCurrency: Record<string, number> = {}
-   for (const c of CURRENCIES) {
-      if (typeof sell[c] === 'number' && sell[c] > 0) {
-         byCurrency[c] = sell[c] * item.quantity * units
-      }
-   }
-
+   const sell = baseAmount(listing.sellPrice)
+   const cost = baseAmount(listing.costPrice)
    return {
       vertical: listing.vertical,
       listingId: listing._id,
@@ -110,18 +211,18 @@ export const priceListingItem = async (item: RequestedItem): Promise<PricedItem>
       startDate: item.startDate ? new Date(item.startDate) : undefined,
       endDate: item.endDate ? new Date(item.endDate) : undefined,
       quantity: item.quantity,
-      unitSellPrice: sell[BASE_CURRENCY] ?? 0,
-      unitCostPrice: cost[BASE_CURRENCY] ?? 0,
-      lineTotal: (sell[BASE_CURRENCY] ?? 0) * item.quantity * units,
-      lineCost: (cost[BASE_CURRENCY] ?? 0) * item.quantity * units,
-      lineTotalByCurrency: byCurrency,
+      unitSellPrice: sell,
+      unitCostPrice: cost,
+      lineTotal: sell * item.quantity * units,
+      lineCost: cost * item.quantity * units,
+      lineTotalByCurrency: scaled(sell, item.quantity * units),
    }
 }
 
 /**
- * A hotel stay is priced night by night from the rate plans, never from a
- * nightly rate multiplied out — the whole point of a per-night calendar is that
- * a weekend can cost more than a Tuesday.
+ * A hotel stay: the room type's nightly price, times the nights, times the
+ * rooms. One price holds for every future night, and rooms are not counted —
+ * the office decided neither should limit a booking.
  */
 export const priceStayItem = async (item: RequestedItem): Promise<PricedItem> => {
    if (!item.roomTypeId || !item.startDate || !item.endDate) {
@@ -137,53 +238,34 @@ export const priceStayItem = async (item: RequestedItem): Promise<PricedItem> =>
    const hotel = await Hotel.exists({ _id: roomType.hotel, status: 'PUBLISHED' })
    if (!hotel) throw new Error('ITEM_UNAVAILABLE')
 
-   const dates = nightsBetween(new Date(item.startDate), new Date(item.endDate))
-   if (!dates.length) throw new Error('STAY_REQUIRES_AT_LEAST_ONE_NIGHT')
+   const nights = nightsBetween(new Date(item.startDate), new Date(item.endDate)).length
+   if (!nights) throw new Error('STAY_REQUIRES_AT_LEAST_ONE_NIGHT')
 
-   const plans = await RatePlan.find({ roomType: roomType._id, date: { $in: dates } })
-   if (plans.length !== dates.length) throw new Error('ITEM_UNAVAILABLE')
-
-   let sellUsd = 0
-   let costUsd = 0
-   let byCurrency: Record<string, number> | null = null
-
-   for (const p of plans) {
-      const sell = (p.sellPrice as any) ?? {}
-      const cost = (p.costPrice as any) ?? {}
-      sellUsd += sell[BASE_CURRENCY] ?? 0
-      costUsd += cost[BASE_CURRENCY] ?? 0
-
-      const night: Record<string, number> = {}
-      for (const c of CURRENCIES) {
-         if (typeof sell[c] === 'number' && sell[c] > 0) night[c] = sell[c]
-      }
-      byCurrency = byCurrency === null ? night : intersectCurrencies(byCurrency, night)
-   }
-
+   const sell = baseAmount(roomType.sellPrice)
+   const cost = baseAmount(roomType.costPrice)
+   if (sell <= 0) throw new Error('ITEM_UNAVAILABLE')
    const qty = item.quantity
-   const scaled: Record<string, number> = {}
-   for (const [c, v] of Object.entries(byCurrency ?? {})) scaled[c] = v * qty
 
    return {
       vertical: VERTICALS.HOTEL,
       listingId: roomType.hotel,
       listingLabel: label((roomType as any).name),
       roomTypeId: roomType._id,
-      startDate: dates[0],
+      startDate: new Date(item.startDate),
       endDate: new Date(item.endDate),
       quantity: qty,
       // Per night per room, so the admin's per-line arithmetic still reads true.
-      unitSellPrice: Math.round(sellUsd / dates.length),
-      unitCostPrice: Math.round(costUsd / dates.length),
-      lineTotal: sellUsd * qty,
-      lineCost: costUsd * qty,
-      lineTotalByCurrency: scaled,
+      unitSellPrice: sell,
+      unitCostPrice: cost,
+      lineTotal: sell * nights * qty,
+      lineCost: cost * nights * qty,
+      lineTotalByCurrency: scaled(sell, nights * qty),
    }
 }
 
 /**
  * A dish. The simplest line on the system: no dates, no nights, no allotment —
- * a quantity times a typed price.
+ * a quantity times a price.
  *
  * `isAvailable` is checked here rather than only in the menu query, because the
  * kitchen can 86 a dish while the customer is filling their cart. Re-reading it
@@ -200,13 +282,8 @@ export const priceMenuItem = async (item: RequestedItem): Promise<PricedItem> =>
    const restaurant = await Restaurant.findOne({ _id: dish.restaurant, status: 'PUBLISHED' })
    if (!restaurant) throw new Error('ITEM_UNAVAILABLE')
 
-   const sell = (dish.sellPrice as any) ?? {}
-   const cost = (dish.costPrice as any) ?? {}
-   const byCurrency: Record<string, number> = {}
-   for (const c of CURRENCIES) {
-      if (typeof sell[c] === 'number' && sell[c] > 0) byCurrency[c] = sell[c] * item.quantity
-   }
-
+   const sell = baseAmount(dish.sellPrice)
+   const cost = baseAmount(dish.costPrice)
    return {
       vertical: VERTICALS.RESTAURANT,
       // The restaurant, not the dish: `listingId` is what the admin order view
@@ -217,11 +294,11 @@ export const priceMenuItem = async (item: RequestedItem): Promise<PricedItem> =>
       // unchanged — it is already "the child record this line actually sold".
       roomTypeId: dish._id,
       quantity: item.quantity,
-      unitSellPrice: sell[BASE_CURRENCY] ?? 0,
-      unitCostPrice: cost[BASE_CURRENCY] ?? 0,
-      lineTotal: (sell[BASE_CURRENCY] ?? 0) * item.quantity,
-      lineCost: (cost[BASE_CURRENCY] ?? 0) * item.quantity,
-      lineTotalByCurrency: byCurrency,
+      unitSellPrice: sell,
+      unitCostPrice: cost,
+      lineTotal: sell * item.quantity,
+      lineCost: cost * item.quantity,
+      lineTotalByCurrency: scaled(sell, item.quantity),
    }
 }
 
@@ -232,38 +309,29 @@ export const priceItem = (item: RequestedItem) => {
 }
 
 /**
- * The delivery fee, shaped like a line so `settle` can treat it as one.
- *
- * It has to take part in the currency decision, not be added afterwards: a fee
- * typed only in USD means the order cannot honestly settle in CDF, exactly as a
- * dish priced only in USD does. Adding it after the fact would either convert
- * it — which §5 forbids — or quietly charge a USD fee inside a CDF total.
+ * The delivery fee, shaped like a line so `settle` can treat it as one, and
+ * converted the same way as the food it comes with.
  */
 export const priceDelivery = (zone: any, restaurantLabel: string): PricedItem => {
-   const fee = (zone?.fee as any) ?? {}
-   const byCurrency: Record<string, number> = {}
-   for (const c of CURRENCIES) {
-      if (typeof fee[c] === 'number') byCurrency[c] = fee[c]
-   }
+   const fee = baseAmount(zone?.fee as Money)
    return {
       vertical: VERTICALS.RESTAURANT,
       listingId: zone._id,
       listingLabel: `Livraison — ${restaurantLabel}`,
       quantity: 1,
-      unitSellPrice: fee[BASE_CURRENCY] ?? 0,
+      unitSellPrice: fee,
       unitCostPrice: 0,
-      lineTotal: fee[BASE_CURRENCY] ?? 0,
+      lineTotal: fee,
       lineCost: 0,
-      lineTotalByCurrency: byCurrency,
+      lineTotalByCurrency: scaled(fee, 1),
    }
 }
 
 /**
- * What the customer is actually charged.
- *
- * §5: a converted figure is never presented as the charge. If every line has a
- * real typed price in the requested currency we settle in it; otherwise we fall
- * back to the USD base rather than inventing a rate at checkout.
+ * What the customer is actually charged: the lines in the currency they chose,
+ * at today's rate — or USD when that currency has no rate set. The rate goes
+ * on the order (`fxRate`, what 1 USD was worth) so a later change of rate never
+ * moves a booking already made.
  */
 export const settle = (items: PricedItem[], requested: string) => {
    const totalUsd = items.reduce((s, i) => s + i.lineTotal, 0)
@@ -279,7 +347,7 @@ export const settle = (items: PricedItem[], requested: string) => {
    return {
       chargedCurrency: requested,
       chargedTotal,
-      fxRate: totalUsd ? chargedTotal / totalUsd : 1,
+      fxRate: currentRates()[requested as Currency] ?? 1,
       totalUsd,
    }
 }

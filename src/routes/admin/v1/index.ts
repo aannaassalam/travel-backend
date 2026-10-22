@@ -12,6 +12,7 @@ import * as ops from '../../../controllers/admin/opsController'
 import * as siteContent from '../../../controllers/admin/siteContentController'
 import * as restaurants from '../../../controllers/admin/restaurantController'
 import * as orders from '../../../controllers/admin/orderController'
+import * as suppliers from '../../../controllers/admin/supplierController'
 import {
    getSignedLink,
    handleUploadErrors,
@@ -102,10 +103,6 @@ router.patch(
    hotels.updateRoomType
 )
 
-// §5.3 availability calendar
-router.get('/hotels/:id/calendar', requirePermission('inventory:read'), hotels.getCalendar)
-router.post('/hotels/:id/calendar', requirePermission('inventory:write'), hotels.bulkUpdateCalendar)
-
 // --- Inventory: restaurants and menus (§5.2) --------------------------------
 // Same permission as the rest of inventory: a menu is stock like any other.
 router.get(
@@ -191,8 +188,6 @@ router.post('/listings/:id/deactivate', requirePermission('inventory:write'), li
 router.post('/listings/:id/archive', requirePermission('inventory:write'), listings.archiveListing)
 router.post('/listings/:id/duplicate', requirePermission('inventory:write'), listings.duplicateListing)
 router.delete('/listings/:id', requirePermission('inventory:delete'), requireStepUp, listings.deleteListing)
-// §5.2 bus recurrence — or the same trip gets hand-entered 90 times.
-router.post('/listings/:id/expand-recurrence', requirePermission('inventory:write'), listings.expandRecurrence)
 
 // --- Inventory as spreadsheets: template, export, import (§5.1, §2.2) --------
 // `:group` is HOTEL, RESTAURANT, FLIGHT, BUS, CAR, ACTIVITY or PROPERTY. Reading
@@ -300,6 +295,12 @@ router.post('/notifications/test', requirePermission('notifications:write'), ops
 router.get('/settings', requirePermission('settings:read'), ops.getSettingsHandler)
 // §1.3: settings changes require step-up re-authentication.
 router.patch('/settings', requirePermission('settings:write'), requireStepUp, ops.updateSettings)
+
+// --- Suppliers: picked on every hotel and listing; a route's travel agency ---
+router.get('/suppliers', requirePermission('inventory:read'), suppliers.listSuppliers)
+router.post('/suppliers', requirePermission('inventory:write'), suppliers.createSupplier)
+router.patch('/suppliers/:id', requirePermission('inventory:write'), suppliers.updateSupplier)
+router.delete('/suppliers/:id', requirePermission('inventory:delete'), requireStepUp, suppliers.deleteSupplier)
 
 // --- Locations & serviced routes (§12) --------------------------------------
 router.get('/locations', requirePermission('inventory:read'), locations.listLocations)

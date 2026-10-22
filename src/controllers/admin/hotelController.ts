@@ -7,13 +7,12 @@ import { LISTING_STATUS, LOCALES } from '../../constants/domain.constants'
 import {
    presentHotel,
    presentHotels,
-   presentRatePlans,
    presentRoomType,
    presentRoomTypes,
 } from '../../dto/admin/inventory.dto'
 import { Hotel, RatePlan, RoomType } from '../../model/hotelModel'
 import { baseAmount, parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
-import { getSettings } from '../../model/settingsModel'
+import { supplierRef } from './supplierController'
 import {
    archiveDoc,
    confirmOverOpenBookings,
@@ -48,7 +47,6 @@ const HOTEL_EDITABLE = [
    'amenities',
    'images',
    'videoUrl',
-   'supplier',
    'checkInTime',
    'checkOutTime',
    'policies',
@@ -64,7 +62,25 @@ const ROOMTYPE_EDITABLE = [
    'amenities',
    'images',
    'sizeSqm',
+   'mealPlan',
 ] as const
+
+/**
+ * A room type's nightly price, as sent: USD only, for every future night. The
+ * same rule as any listing — a cost, and a sell price above it — because a
+ * room sold below cost is a loss on every night of every stay.
+ */
+const roomPrices = (body: any, patch: Record<string, any>) => {
+   if (body.costPrice !== undefined) patch.costPrice = parseMoney(body.costPrice)
+   if (body.sellPrice !== undefined) patch.sellPrice = parseMoney(body.sellPrice)
+   if (patch.sellPrice === undefined && patch.costPrice === undefined) return patch
+   const sell = baseAmount(patch.sellPrice)
+   const cost = baseAmount(patch.costPrice)
+   if (sell <= 0) throw new AppError('Enter the nightly sell price in USD', 400)
+   if (cost <= 0) throw new AppError('Enter the nightly cost price in USD', 400)
+   if (sell <= cost) throw new AppError('The sell price must be above the cost price', 400)
+   return patch
+}
 
 /** Free-text search box: NUL stripped (the driver throws on it) and capped so a pasted paragraph never becomes a regex. */
 const searchTerm = (v: unknown) =>
@@ -94,14 +110,14 @@ export const listHotels = catchAsync(async (req: Request, res: Response) => {
       filter,
       req,
       // One key per column of the panel's hotels table.
-      sortBy(req.query.sort, {
+      { populate: 'supplier', ...sortBy(req.query.sort, {
          name: 'name.fr',
          city: 'city',
          status: 'status',
          translations: { value: translatedCount('name', LOCALES) },
          supplier: 'supplier',
          updated: 'updatedAt',
-      })
+      }) }
    )
    return sendResponse(res, 200, 'OK', {
       items: presentHotels(items as any),
@@ -111,7 +127,7 @@ export const listHotels = catchAsync(async (req: Request, res: Response) => {
 
 export const getHotel = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const hotel = await Hotel.findById(req.params.id)
+      const hotel = await Hotel.findById(req.params.id).populate('supplier')
       if (!hotel) return next(new AppError('Hotel not found', 404))
       const roomTypes = await RoomType.find({
          hotel: hotel._id,
@@ -131,6 +147,7 @@ export const createHotel = catchAsync(async (req: Request, res: Response) => {
       Hotel,
       {
          ...pick(req.body, HOTEL_EDITABLE),
+         supplier: await supplierRef(req.body.supplier),
          geo: parseGeo(req.body.geo),
          slug: await uniqueSlug(Hotel, [resolveLocalized(name), city]),
          createdBy: (req as any).admin._id,
@@ -145,7 +162,11 @@ export const updateHotel = catchAsync(async (req: Request, res: Response) => {
       req,
       Hotel,
       req.params.id,
-      { ...pick(req.body, HOTEL_EDITABLE), geo: parseGeo(req.body.geo) },
+      {
+         ...pick(req.body, HOTEL_EDITABLE),
+         supplier: await supplierRef(req.body.supplier),
+         geo: parseGeo(req.body.geo),
+      },
       { entityType: ENTITY }
    )
    return sendResponse(res, 200, 'Hotel updated', { hotel: presentHotel(hotel) })
@@ -158,6 +179,13 @@ export const publishHotel = catchAsync(
       if (!hotel) return next(new AppError('Hotel not found', 404))
 
       const blockers = (hotel as any).publishBlockers()
+      // A hotel with no priced room has nothing a customer could book.
+      const priced = await RoomType.exists({
+         hotel: hotel._id,
+         status: LISTING_STATUS.PUBLISHED,
+         'sellPrice.USD': { $gt: 0 },
+      })
+      if (!priced) blockers.push('Add at least one room type with its nightly price')
       if (blockers.length) {
          return next(
             new AppError(`Cannot publish: ${blockers.join('; ')}`, 400)
@@ -272,12 +300,11 @@ export const createRoomType = catchAsync(async (req: Request, res: Response) => 
       req,
       RoomType,
       {
-         ...pick(req.body, ROOMTYPE_EDITABLE),
+         ...roomPrices(req.body, pick(req.body, ROOMTYPE_EDITABLE)),
          hotel: req.params.id,
          // Decided here, never taken from the body (§BUG-010). A room type has
          // no publish step of its own, so it is live once saved; whether a
-         // customer sees it is the hotel's status, and whether it can be
-         // booked is the calendar's.
+         // customer sees it is the hotel's status.
          status: LISTING_STATUS.PUBLISHED,
       },
       { entityType: 'RoomType' }
@@ -292,168 +319,13 @@ export const updateRoomType = catchAsync(async (req: Request, res: Response) => 
       req,
       RoomType,
       req.params.roomTypeId,
-      pick(req.body, ROOMTYPE_EDITABLE),
+      roomPrices(req.body, pick(req.body, ROOMTYPE_EDITABLE)),
       { entityType: 'RoomType' }
    )
    return sendResponse(res, 200, 'Room type updated', {
       roomType: presentRoomType(roomType),
    })
 })
-
-// --- Availability calendar (§5.3) -------------------------------------------
-
-/** Reads the grid: room types as rows, dates as columns. */
-export const getCalendar = catchAsync(
-   async (req: Request, res: Response, next: NextFunction) => {
-      const { from, to } = req.query
-      if (!from || !to) {
-         return next(new AppError('from and to dates are required', 400))
-      }
-      const start = new Date(String(from))
-      const end = new Date(String(to))
-      // Bounded like every other list endpoint (§2.2) — a year-wide grid would
-      // be both unusable and a heavy query.
-      const days = (end.getTime() - start.getTime()) / 86400000
-      if (!(days >= 0) || days > 92) {
-         return next(new AppError('Date range must be between 0 and 92 days', 400))
-      }
-
-      const roomTypes = await RoomType.find({
-         hotel: req.params.id,
-         status: { $ne: LISTING_STATUS.ARCHIVED },
-      })
-      const cells = await RatePlan.find({
-         hotel: req.params.id,
-         date: { $gte: start, $lte: end },
-      })
-
-      return sendResponse(res, 200, 'OK', {
-         roomTypes: presentRoomTypes(roomTypes),
-         cells: presentRatePlans(cells),
-      })
-   }
-)
-
-/**
- * §5.3: bulk-set price or allotment across a drag-selected range.
- *
- * Entering 30 nights one form at a time is unusable (§5.2), so this is the
- * write path the grid uses. One audit entry for the whole operation rather than
- * one per night — 90 rows of noise would bury the signal.
- */
-export const bulkUpdateCalendar = catchAsync(
-   async (req: Request, res: Response, next: NextFunction) => {
-      const { roomTypeId, from, to, costPrice, sellPrice, allotment, mealPlan, blocked } =
-         req.body
-
-      if (!roomTypeId || !from || !to) {
-         return next(new AppError('roomTypeId, from and to are required', 400))
-      }
-      const sellMoney = parseMoney(sellPrice)
-      const costMoney = parseMoney(costPrice)
-      if (
-         sellPrice !== undefined &&
-         costPrice !== undefined &&
-         baseAmount(sellMoney) < baseAmount(costMoney)
-      ) {
-         // §5.1 publish validation, applied at write time so it cannot be
-         // dodged by editing after publishing.
-         return next(new AppError('Sell price must be above cost price', 400))
-      }
-
-      // Of this hotel: prices are only written through the hotel that owns
-      // the room type, and not for one whose hotel has been deleted.
-      const roomType = await RoomType.findOne({ _id: roomTypeId, hotel: req.params.id })
-      if (!roomType) return next(new AppError('Room type not found', 404))
-
-      const start = new Date(String(from))
-      const end = new Date(String(to))
-      const dates: Date[] = []
-      for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
-         dates.push(new Date(d))
-      }
-      if (!dates.length || dates.length > 366) {
-         return next(new AppError('Invalid date range', 400))
-      }
-
-      /**
-       * §5.1 price-change guard: an edit moving a published price by more than
-       * the configured threshold needs typed confirmation. A mis-keyed price
-       * that gets purchased is genuinely painful to unwind with no refunds.
-       */
-      const settings = await getSettings()
-      const guard = settings.priceChangeGuardPercent
-      if (sellPrice !== undefined && !req.body.confirmPriceChange) {
-         const existing = await RatePlan.find({
-            roomType: roomTypeId,
-            date: { $gte: start, $lte: end },
-            'sellPrice.USD': { $gt: 0 },
-         })
-         // Compared in the base currency, the one price every night has.
-         const nextBase = baseAmount(sellMoney)
-         const breached = existing.find((cell) => {
-            const currentBase = baseAmount(cell.sellPrice)
-            if (!currentBase) return false
-            return (Math.abs(nextBase - currentBase) / currentBase) * 100 > guard
-         })
-         if (breached) {
-            return next(
-               new AppError(
-                  `This changes an existing price by more than ${guard}%. Resend with confirmPriceChange to proceed.`,
-                  409
-               )
-            )
-         }
-      }
-
-      const set: Record<string, any> = {}
-      if (costPrice !== undefined) set.costPrice = costMoney
-      if (sellPrice !== undefined) set.sellPrice = sellMoney
-      if (allotment !== undefined) set.allotment = allotment
-      if (mealPlan !== undefined) set.mealPlan = mealPlan
-      if (blocked !== undefined) set.blocked = blocked
-
-      /**
-       * Defaults for a night that does not exist yet. MongoDB rejects an update
-       * where $set and $setOnInsert touch the same path ("would create a
-       * conflict"), so anything already in $set is excluded here — required
-       * fields the caller did omit still get a value on insert.
-       */
-      const setOnInsert: Record<string, any> = { hotel: req.params.id }
-      if (set.costPrice === undefined) setOnInsert.costPrice = { USD: 0 }
-      if (set.sellPrice === undefined) setOnInsert.sellPrice = { USD: 0 }
-      if (set.allotment === undefined) setOnInsert.allotment = 0
-
-      // Upsert: a night with no row yet is created, an existing one is patched.
-      // Cast: hotel/roomType arrive as route+body strings; Mongoose casts
-      // them to ObjectId at write time, which its bulkWrite types don't model.
-      await RatePlan.bulkWrite(
-         dates.map((date) => ({
-            updateOne: {
-               filter: { roomType: roomTypeId, date },
-               update: { $set: set, $setOnInsert: setOnInsert },
-               upsert: true,
-            },
-         })) as any
-      )
-
-      await recordAudit(req, {
-         action: AUDIT_ACTIONS.UPDATE,
-         entityType: 'RatePlan',
-         entityId: String(roomTypeId),
-         after: { ...set, from, to, nights: dates.length },
-         reason: req.body.reason,
-      })
-
-      const cells = await RatePlan.find({
-         roomType: roomTypeId,
-         date: { $gte: start, $lte: end },
-      })
-      return sendResponse(res, 200, `${dates.length} night(s) updated`, {
-         cells: presentRatePlans(cells),
-      })
-   }
-)
 
 /**
  * DELETE /hotels/:id — for good, with what cannot stand without it: its room

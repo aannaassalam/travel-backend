@@ -29,7 +29,12 @@ if (process.env.EGRESS_IPV4_FIRST !== 'false') {
 import { RESPONSES } from './constants/constants'
 import connectDb from './config/db.config'
 import app from './app'
-import { normaliseLegacyStatuses, startScheduledJobs } from './services/scheduledJobs.service'
+import {
+   migrateCatalogueModel,
+   normaliseLegacyStatuses,
+   startScheduledJobs,
+} from './services/scheduledJobs.service'
+import { keepRatesFresh, refreshRates } from './services/fx.service'
 import { paymentsStatus } from './services/payments/maxicash.service'
 
 const PORT = process.env.PORT || 3001
@@ -59,6 +64,13 @@ async function bootstrap() {
    await normaliseLegacyStatuses().catch((e) =>
       console.error('Could not normalise legacy inventory statuses:', e.message)
    )
+   // Suppliers as records, room prices of their own, routes on timetables.
+   await migrateCatalogueModel().catch((e) =>
+      console.error('Could not bring the catalogue up to date:', e.message)
+   )
+   // Every CDF and EUR price is worked out from these, so they are read first.
+   await refreshRates().catch((e) => console.error('Could not read exchange rates:', e.message))
+   keepRatesFresh()
 
    // §6.1/§14.5/§5.1: cash release, passport purge, scheduled publishing.
    startScheduledJobs()

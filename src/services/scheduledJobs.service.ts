@@ -7,9 +7,11 @@ import {
    LISTING_STATUS,
    ORDER_STATUS,
    PAYMENT_STATUS,
+   VERTICALS,
 } from '../constants/domain.constants'
 import { Hotel, RatePlan, RoomType } from '../model/hotelModel'
 import { Listing } from '../model/listingModel'
+import { Supplier } from '../model/supplierModel'
 import { MenuItem, Restaurant } from '../model/restaurantModel'
 import AuditLog from '../model/auditLogModel'
 import { Customer } from '../model/customerModel.admin'
@@ -220,6 +222,94 @@ export const normaliseLegacyStatuses = async () => {
    if (Object.values(changed).some(Boolean)) {
       console.log('Inventory statuses normalised to INACTIVE/PUBLISHED:', JSON.stringify(changed))
       await systemAudit('INVENTORY_STATUS_NORMALISED', changed)
+   }
+   return changed
+}
+
+/**
+ * The catalogue as it was before suppliers, room prices and route timetables,
+ * brought up to date. Run on every boot like the status rewrite above: three
+ * queries that find nothing after the first time.
+ *
+ * - A supplier typed as text on a hotel or listing becomes a Supplier record
+ *   (one per name, whatever its case) that the record then points at.
+ * - A room type with no price of its own takes the one its old nightly
+ *   calendar had for tonight, or the next night priced — or failing that the
+ *   last one. A room with no price at all stays unbookable until one is set.
+ * - A bus or flight that was one dated departure, with no timetable, cannot
+ *   be booked any more: it is taken off the website (INACTIVE) until the
+ *   office gives it its agency, destination and times.
+ */
+const escapeRx = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+export const migrateCatalogueModel = async () => {
+   const changed = { suppliersCreated: 0, supplierLinks: 0, roomPrices: 0, routesTakenDown: 0 }
+
+   for (const model of [Hotel, Listing] as any[]) {
+      // The raw collection: the schema now says ObjectId, and casting the old
+      // text would fail before it could be read.
+      const rows = await model.collection
+         .find({ supplier: { $type: 'string' } })
+         .project({ supplier: 1 })
+         .toArray()
+      for (const row of rows) {
+         const name = String(row.supplier).trim()
+         if (!name) {
+            await model.collection.updateOne({ _id: row._id }, { $unset: { supplier: '' } })
+            continue
+         }
+         let supplier = await Supplier.findOne({ name: new RegExp(`^${escapeRx(name)}$`, 'i') })
+         if (!supplier) {
+            supplier = await Supplier.create({ name })
+            changed.suppliersCreated += 1
+         }
+         await model.collection.updateOne({ _id: row._id }, { $set: { supplier: supplier._id } })
+         changed.supplierLinks += 1
+      }
+   }
+
+   const today = new Date(new Date().toISOString().slice(0, 10))
+   const unpriced = await RoomType.collection
+      .find({ $or: [{ 'sellPrice.USD': { $exists: false } }, { 'sellPrice.USD': { $lte: 0 } }] })
+      .project({ _id: 1 })
+      .toArray()
+   for (const room of unpriced) {
+      const priced = { roomType: room._id, 'sellPrice.USD': { $gt: 0 } }
+      const plan =
+         (await RatePlan.collection
+            .find({ ...priced, date: { $gte: today } })
+            .sort({ date: 1 })
+            .limit(1)
+            .next()) ??
+         (await RatePlan.collection.find(priced).sort({ date: -1 }).limit(1).next())
+      if (!plan) continue
+      await RoomType.collection.updateOne(
+         { _id: room._id },
+         {
+            $set: {
+               sellPrice: { USD: plan.sellPrice.USD },
+               costPrice: { USD: plan.costPrice?.USD ?? 0 },
+               mealPlan: plan.mealPlan ?? 'ROOM_ONLY',
+            },
+         }
+      )
+      changed.roomPrices += 1
+   }
+
+   const down = await Listing.updateMany(
+      {
+         vertical: { $in: [VERTICALS.BUS, VERTICALS.FLIGHT] },
+         status: { $in: [LISTING_STATUS.PUBLISHED, LISTING_STATUS.SOLD_OUT] },
+         'attributes.dailyTimes.0': { $exists: false },
+         'attributes.weeklyTimes.0': { $exists: false },
+      },
+      { $set: { status: LISTING_STATUS.INACTIVE }, $inc: { __v: 1 } }
+   )
+   changed.routesTakenDown = down.modifiedCount
+
+   if (Object.values(changed).some(Boolean)) {
+      console.log('Catalogue brought up to date:', JSON.stringify(changed))
+      await systemAudit('CATALOGUE_MODEL_MIGRATED', changed)
    }
    return changed
 }

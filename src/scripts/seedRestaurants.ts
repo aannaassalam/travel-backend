@@ -21,9 +21,8 @@ import { buildMongoUri } from '../config/db.config'
 import { LISTING_STATUS, MENU_SECTIONS } from '../constants/domain.constants'
 import { MenuItem, Restaurant } from '../model/restaurantModel'
 
-/** Minor units. USD is the reporting base; CDF is typed, never converted. */
+/** Minor units, USD only: CDF and EUR are worked out from the rates in Settings. */
 const usd = (dollars: number) => Math.round(dollars * 100)
-const cdf = (francs: number) => Math.round(francs)
 
 type Dish = {
    section: string
@@ -380,7 +379,7 @@ const run = async () => {
          reviewCount: r.reviews,
          deliveryZones: r.zones.map((z) => ({
             name: z.name,
-            fee: { USD: usd(z.fee), CDF: cdf(z.feeCdf) },
+            fee: { USD: usd(z.fee) },
             minOrder: z.min ? { USD: usd(z.min) } : undefined,
             etaMinutes: z.eta,
             isActive: true,
@@ -393,10 +392,8 @@ const run = async () => {
             section: d.section,
             name: { fr: d.fr, en: d.en },
             description: { fr: d.descFr, en: d.descEn },
-            // CDF alongside USD on every dish so a CDF checkout can actually
-            // settle — one dish missing it would drop the whole order to USD.
-            sellPrice: { USD: usd(d.sell), CDF: cdf(d.sell * 2800) },
-            costPrice: { USD: usd(d.cost), CDF: cdf(d.cost * 2800) },
+            sellPrice: { USD: usd(d.sell) },
+            costPrice: { USD: usd(d.cost) },
             isAvailable: d.available !== false,
             sortOrder: i,
             status: LISTING_STATUS.PUBLISHED,

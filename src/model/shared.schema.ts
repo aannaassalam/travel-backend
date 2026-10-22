@@ -1,12 +1,12 @@
 import {
    BASE_CURRENCY,
-   CURRENCIES,
    Currency,
    DEFAULT_LOCALE,
    LOCALES,
 } from '../constants/domain.constants'
 import AppError from '../utils/appError'
 import { isOwnPublicFile } from '../utils/ownFile'
+import { inAllCurrencies } from '../services/fx.service'
 
 /**
  * Building blocks shared by every sellable thing: localised text and money.
@@ -94,18 +94,19 @@ export const translationStatus = (value: Localized | string | undefined) => {
 export type Money = Partial<Record<Currency, number>>
 
 /**
- * Prices, per currency, in integer minor units.
+ * A price, in integer minor units of USD.
  *
- * Each currency is entered explicitly by the administrator rather than
- * converted at read time. A converted price drifts with the FX rate between the
- * moment a customer sees it and the moment they pay, and under a no-refund
- * policy that difference is not something anyone wants to argue about. What the
- * administrator typed is what the customer is charged.
+ * Prices are entered in USD only. CDF and EUR are worked out at read time from
+ * the office's exchange rates (services/fx.service), so changing a rate moves
+ * every price at once and nobody retypes a catalogue. What a customer pays is
+ * fixed when their order is made: the order keeps its converted total and the
+ * rate it used.
  *
- * USD remains mandatory: it is the reporting base. Margin, spoilage,
- * sell-through and every dashboard total have to aggregate in ONE currency, and
- * a catalogue priced only in CDF could not be summed against one priced only in
- * EUR. Other currencies are optional — an unset one simply is not offered.
+ * Stored as `{ USD }` so it stays the shape every reader already takes. CDF and
+ * EUR typed before conversion existed may still be on old records; nothing
+ * reads them, and the next save of that record drops them.
+ *
+ * USD is the reporting base: margin, spoilage and every dashboard total sum it.
  */
 export const moneyField = (opts: { required?: boolean } = {}) => ({
    USD: {
@@ -126,24 +127,21 @@ export const baseAmount = (money: Money | number | undefined): number => {
    return money?.[BASE_CURRENCY as Currency] ?? 0
 }
 
-/** Currencies this record can actually be sold in — those with a real price. */
-export const availableCurrencies = (money: Money | number | undefined): Currency[] => {
-   if (typeof money === 'number') return [BASE_CURRENCY as Currency]
-   return CURRENCIES.filter((c) => typeof money?.[c] === 'number' && money[c]! > 0)
-}
+/** Currencies this record can be sold in: USD, and each one with a rate set. */
+export const availableCurrencies = (money: Money | number | undefined): Currency[] =>
+   baseAmount(money) > 0 ? (Object.keys(inAllCurrencies(money)) as Currency[]) : []
 
-/** Normalises form input, dropping blanks so an empty box never becomes 0. */
+/**
+ * Form input to a stored price: the USD amount only (any other currency sent
+ * is ignored — it is worked out, never typed). A blank box is "not set", never
+ * 0, so `{}` comes back for it.
+ */
 export const parseMoney = (input: any): Money | undefined => {
    if (input === undefined || input === null) return undefined
-   if (typeof input === 'number') return { USD: input }
-   const out: Money = {}
-   CURRENCIES.forEach((c) => {
-      const v = input[c]
-      if (v === '' || v === null || v === undefined) return
-      const n = Number(v)
-      if (!Number.isNaN(n)) out[c] = Math.round(n)
-   })
-   return out
+   const v = typeof input === 'number' ? input : input[BASE_CURRENCY]
+   if (v === '' || v === null || v === undefined) return {}
+   const n = Number(v)
+   return Number.isNaN(n) ? {} : { USD: Math.round(n) }
 }
 
 // ---------------------------------------------------------------------------

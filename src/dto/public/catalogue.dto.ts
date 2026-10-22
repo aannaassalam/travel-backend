@@ -1,7 +1,8 @@
 import { IHotel, IRoomType } from '../../model/hotelModel'
-import { IListing } from '../../model/listingModel'
+import { IListing, isScheduledRoute } from '../../model/listingModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
 import { geoPoint, Localized, Money } from '../../model/shared.schema'
+import { inAllCurrencies } from '../../services/fx.service'
 import { FieldMap, present, presentList } from '../../utils/present'
 
 /** Only the locales that actually have text — blanks are noise on the wire. */
@@ -13,17 +14,11 @@ const localized = (value: Localized | string | undefined) => {
    )
 }
 
-/** Only the currencies with a real price — an unset one is simply not offered. */
-const pickMoney = (value: Money | number | undefined) => {
-   if (typeof value === 'number') return { USD: value }
-   if (!value) return { USD: 0 }
-   const out: Record<string, number> = {}
-   for (const c of ['USD', 'CDF', 'EUR'] as const) {
-      const v = (value as any)[c]
-      if (typeof v === 'number' && v > 0) out[c] = v
-   }
-   return Object.keys(out).length ? out : { USD: 0 }
-}
+/**
+ * A price in every currency on offer: the USD stored, and CDF and EUR worked
+ * out at the office's rates (fx.service). A currency with no rate is left out.
+ */
+const pickMoney = (value: Money | number | undefined) => inAllCurrencies(value)
 
 /**
  * Public catalogue DTOs. §14.3 rule 2: nothing here is shared with src/dto/admin
@@ -51,14 +46,21 @@ const listingFields: FieldMap<IListing> = {
    // The address of the uploaded video, in our own storage (see `videoField`).
    videoUrl: (l) => l.videoUrl,
    /**
-    * Per-currency integer minor units. Explicit prices, not conversions — the
-    * customer is charged what the administrator typed. Sell only: cost never
-    * leaves the admin surface.
+    * Per-currency integer minor units, converted from USD. Sell only: cost
+    * never leaves the admin surface. For a bus or flight, the adult fare.
     */
    sellPrice: (l) => pickMoney(l.sellPrice),
-   /** §4.5 availability, computed. The raw sold/held columns stay internal. */
+   /** Bus and flight fares for a child of 2 to 12 and a baby under 2. */
+   childPrice: (l) => (isScheduledRoute(l.vertical) ? pickMoney(l.childSellPrice) : undefined),
+   infantPrice: (l) => (isScheduledRoute(l.vertical) ? pickMoney(l.infantSellPrice) : undefined),
+   /**
+    * §4.5 availability, computed. The raw sold/held columns stay internal.
+    * Absent for a bus or flight route: its seats are not counted.
+    */
    available: (l) =>
-      Math.max((l.quantityTotal ?? 0) - (l.quantitySold ?? 0) - (l.quantityHeld ?? 0), 0),
+      isScheduledRoute(l.vertical)
+         ? undefined
+         : Math.max((l.quantityTotal ?? 0) - (l.quantitySold ?? 0) - (l.quantityHeld ?? 0), 0),
    validFrom: (l) => l.validFrom?.toISOString(),
    validUntil: (l) => l.validUntil?.toISOString(),
    rating: (l) => (l as any).rating,
@@ -95,14 +97,7 @@ export const presentListings = (l: IListing[]) => presentList(l, listingFields)
 
 /* ------------------------------------------------------------------- hotels */
 
-export interface RoomTypeWithPrice extends IRoomType {
-   /** Per-currency minor units, resolved from the rate plans for the nights asked for. */
-   sellPrice?: Money
-   available?: number
-   mealPlan?: string
-}
-
-const roomTypeFields: FieldMap<RoomTypeWithPrice> = {
+const roomTypeFields: FieldMap<IRoomType> = {
    id: (r) => r._id.toString(),
    hotelId: (r) => r.hotel.toString(),
    name: (r) => localized(r.name),
@@ -113,14 +108,14 @@ const roomTypeFields: FieldMap<RoomTypeWithPrice> = {
    amenities: (r) => r.amenities ?? [],
    images: (r) => r.images ?? [],
    mealPlan: (r) => r.mealPlan ?? 'ROOM_ONLY',
+   /** Per night, for every night: one price holds until the office changes it. Rooms are not counted. */
    sellPrice: (r) => pickMoney(r.sellPrice),
-   available: (r) => r.available ?? 0,
    sizeSqm: (r) => (r as any).sizeSqm,
 }
 
 export interface HotelWithRooms extends IHotel {
    fromPrice?: Money
-   roomTypes?: RoomTypeWithPrice[]
+   roomTypes?: IRoomType[]
 }
 
 const hotelFields: FieldMap<HotelWithRooms> = {

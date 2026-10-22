@@ -23,6 +23,7 @@ import { byWords, customerNameSort, deleteDoc, paginate, sortBy } from '../../se
 import { recordAudit } from '../../services/auditLog.service'
 import { money, notify, pushBody, render } from '../../services/notifications/notify.service'
 import { sendSms, smsConfigured } from '../../services/notifications/sms.service'
+import { refreshRates } from '../../services/fx.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { dayRange } from '../../utils/dayRange'
@@ -540,6 +541,8 @@ const settingsFields: FieldMap<any> = {
    defaultLocale: (s) => s.defaultLocale,
    enabledCurrencies: (s) => s.enabledCurrencies,
    baseCurrency: (s) => s.baseCurrency,
+   /** What 1 USD is worth in each: every CDF and EUR price is worked out from these. */
+   exchangeRates: (s) => ({ CDF: s.exchangeRates?.CDF, EUR: s.exchangeRates?.EUR }),
    priceChangeGuardPercent: (s) => s.priceChangeGuardPercent,
    holdTtlOnlineMinutes: (s) => s.holdTtlOnlineMinutes,
    holdTtlCashHours: (s) => s.holdTtlCashHours,
@@ -633,6 +636,47 @@ export const parseOffices = (input: unknown) => {
    return offices
 }
 
+/**
+ * The exchange rates from the form: what 1 USD is worth, a positive number per
+ * currency, or blank to stop offering that currency.
+ *
+ * A rate moves every price on the site at once, so a change bigger than the
+ * price guard (the same percentage a single price edit is held to) is refused
+ * until it is sent again with `confirmRateChange` — 285 typed for 2 850 would
+ * sell everything in francs at a tenth of its price.
+ */
+const parseRates = (raw: unknown, current: any, guardPercent: number, confirmed: boolean) => {
+   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new AppError('exchangeRates must be { CDF, EUR }', 400)
+   }
+   const out: Record<string, number | undefined> = {}
+   for (const c of ['CDF', 'EUR'] as const) {
+      const v = (raw as any)[c]
+      if (v === undefined) {
+         out[c] = current?.[c]
+         continue
+      }
+      if (v === null || v === '') {
+         out[c] = undefined
+         continue
+      }
+      const n = Number(v)
+      if (!Number.isFinite(n) || n <= 0 || n > 10_000_000) {
+         throw new AppError(`The ${c} rate must be a positive number: what 1 USD is worth in ${c}`, 400)
+      }
+      const was = Number(current?.[c])
+      if (!confirmed && was > 0 && (Math.abs(n - was) / was) * 100 > guardPercent) {
+         throw new AppError(
+            `1 USD = ${n} ${c} changes the rate by more than ${guardPercent}% (it was ${was}). Every ${c} price moves with it. Save again to confirm.`,
+            409,
+            'RATE_CHANGE_CONFIRM'
+         )
+      }
+      out[c] = n
+   }
+   return out
+}
+
 /** §1.3: settings changes require step-up re-auth (enforced at the route). */
 export const updateSettings = catchAsync(async (req: Request, res: Response) => {
    const settings = await getSettings()
@@ -640,12 +684,22 @@ export const updateSettings = catchAsync(async (req: Request, res: Response) => 
 
    // Validated here, because the copy below writes whatever the body carries.
    if (req.body.offices !== undefined) req.body.offices = parseOffices(req.body.offices)
+   if (req.body.exchangeRates !== undefined) {
+      req.body.exchangeRates = parseRates(
+         req.body.exchangeRates,
+         settings.exchangeRates,
+         settings.priceChangeGuardPercent,
+         req.body.confirmRateChange === true
+      )
+   }
 
    Object.keys(settingsFields).forEach((key) => {
       if (key === 'updatedAt') return
       if (req.body[key] !== undefined) (settings as any)[key] = req.body[key]
    })
    await settings.save()
+   // Prices on this server move now; the others pick it up within a minute.
+   await refreshRates()
 
    await recordAudit(req, {
       action: AUDIT_ACTIONS.UPDATE,

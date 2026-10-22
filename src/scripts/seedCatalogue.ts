@@ -3,10 +3,10 @@
  *
  *   npm run seed:catalogue
  *
- * Generates a realistic volume — roughly 160 listings across the five sellable
- * verticals plus 16 hotels with room types and a rolling 120 nights of rate
- * plans — so the site can be used and judged with a full catalogue rather than
- * a handful of fixtures.
+ * Generates a realistic volume — bus and flight routes on timetables, cars,
+ * activities and properties, plus 16 hotels whose room types carry a nightly
+ * price, every one named against a supplier — so the site can be used and
+ * judged with a full catalogue rather than a handful of fixtures.
  *
  * Everything is produced from a seeded PRNG, so re-running gives byte-identical
  * data and screenshots stay comparable between runs.
@@ -25,6 +25,7 @@ import { buildMongoUri } from '../config/db.config'
 import { LISTING_STATUS, MEAL_PLANS, VERTICALS } from '../constants/domain.constants'
 import { Hotel, RatePlan, RoomType } from '../model/hotelModel'
 import { Listing } from '../model/listingModel'
+import { Supplier } from '../model/supplierModel'
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -80,17 +81,8 @@ const chance = (p: number) => rand() < p
 /** Dollars → integer minor units (§5). */
 const usd = (dollars: number) => Math.round(dollars * 100)
 
-/**
- * Prices are per-currency and explicit — never converted at read time. An
- * administrator would type all three; the seed derives CDF and EUR once, at
- * indicative rates, and rounds each to a unit that currency is actually quoted
- * in (CDF to 500 F, EUR to 50 cents).
- */
-const money = (usdMinor: number) => ({
-   USD: usdMinor,
-   CDF: Math.round(((usdMinor / 100) * 2870) / 500) * 500,
-   EUR: Math.round(((usdMinor * 0.92) / 50)) * 50,
-})
+/** Prices are entered in USD only; CDF and EUR come from the rates in Settings. */
+const money = (usdMinor: number) => ({ USD: usdMinor })
 
 /** Localised text. French is required before publish; English ships with it. */
 const L = (fr: string, en: string) => ({ fr, en })
@@ -178,7 +170,30 @@ const reviews = () => intBetween(8, 480)
 /* ------------------------------------------------------------------ flights */
 
 const CARRIERS = ['Congo Airways', 'Air Kasaï', 'CAA', 'Malu Aviation'] as const
+const FLIGHT_TIMES = ['06:30', '08:00', '10:15', '13:00', '15:45', '17:30'] as const
 
+/** n different items, in a stable order. */
+const some = <T>(arr: readonly T[], n: number) =>
+   [...arr].sort(() => rand() - 0.5).slice(0, n)
+
+/**
+ * Bus and flight fares: adult, child (2–12, about three quarters) and baby
+ * (under 2), each with its cost — what the agency charges the office.
+ */
+const fares = (adult: number, babyShare: number) => {
+   const child = usd(Math.round((adult / 100) * 0.75))
+   const baby = usd(Math.round((adult / 100) * babyShare))
+   return {
+      costPrice: money(Math.round(adult * 0.78)),
+      sellPrice: money(adult),
+      childCostPrice: money(Math.round(child * 0.78)),
+      childSellPrice: money(child),
+      infantCostPrice: money(Math.round(baby * 0.5)),
+      infantSellPrice: money(baby),
+   }
+}
+
+/** Flight routes: one or two airlines on each pair, flying set days of the week. */
 function buildFlights() {
    const out: any[] = []
    const routes: [string, string][] = [
@@ -199,101 +214,36 @@ function buildFlights() {
    ]
 
    for (const [from, to] of routes) {
-      const origin = CITIES.find((c) => c.name === from)!
-      const dest = CITIES.find((c) => c.name === to)!
-
-      for (let variant = 0; variant < 4; variant++) {
-         const carrier = pick(CARRIERS)
-         const cabin = variant === 3 ? 'BUSINESS' : 'ECONOMY'
-         const isReturn = variant % 2 === 0
-         const depOffset = intBetween(4, 70)
+      for (const carrier of some(CARRIERS, intBetween(1, 2))) {
          const durationMin = intBetween(95, 205)
-         const depAt = day(depOffset, intBetween(6, 17))
-         const arrAt = new Date(+depAt + durationMin * 60000)
-         const flightNo = `${carrier === 'Congo Airways' ? '8Z' : carrier === 'CAA' ? 'BU' : 'QC'} ${intBetween(
-            100,
-            899
-         )}`
-
-         const base = cabin === 'BUSINESS' ? between(620, 980) : between(180, 520)
-         const price = usd(Math.round((isReturn ? base * 1.75 : base) / 5) * 5)
-
-         const segments: any[] = [
-            {
-               carrier,
-               flightNumber: flightNo,
-               origin: origin.iata,
-               destination: dest.iata,
-               departsAt: depAt,
-               arrivesAt: arrAt,
-            },
-         ]
-         if (isReturn) {
-            const backAt = day(depOffset + intBetween(3, 14), intBetween(9, 19))
-            segments.push({
-               carrier,
-               flightNumber: `${flightNo.split(' ')[0]} ${intBetween(100, 899)}`,
-               origin: dest.iata,
-               destination: origin.iata,
-               departsAt: backAt,
-               arrivesAt: new Date(+backAt + durationMin * 60000),
-            })
-         }
-
-         // Roughly one in seven is deliberately sold out: §1 says the empty
-         // state is the most-used screen, so it has to be reachable by
-         // ordinary browsing, not only by a contrived search.
-         const total = intBetween(4, 24)
-         const sold = chance(0.14) ? total : intBetween(0, total - 2)
-
-         const title = `${from} → ${to}, ${
-            isReturn ? 'aller-retour' : 'aller simple'
-         }${cabin === 'BUSINESS' ? ', classe Affaires' : ''}`
-         const titleEn = `${from} → ${to}, ${
-            isReturn ? 'return' : 'one way'
-         }${cabin === 'BUSINESS' ? ', Business class' : ''}`
-
+         const days = some([0, 1, 2, 3, 4, 5, 6], intBetween(3, 5)).sort()
+         const weeklyTimes = days.flatMap((d) =>
+            some(FLIGHT_TIMES, chance(0.25) ? 2 : 1).map((time) => ({ day: d, time }))
+         )
+         const adult = usd(Math.round(between(180, 520) / 5) * 5)
          out.push({
             vertical: VERTICALS.FLIGHT,
-            title: L(title, titleEn),
-            slug: slugify(`${from}-${to}-${isReturn ? 'ar' : 'as'}-${cabin}-${variant}-${depOffset}`),
+            title: L(`${from} → ${to}`, `${from} → ${to}`),
+            slug: slugify(`${from}-${to}-${carrier}`),
             description: {
-               fr: `Vol ${
-                  segments.length > 1 ? 'aller-retour' : 'direct'
-               } entre ${from} et ${to} opéré par ${carrier}. ${
-                  cabin === 'BUSINESS'
-                     ? 'Classe Affaires : embarquement prioritaire, 32 kg de bagages et accès au salon.'
-                     : 'Bagage en soute inclus, enregistrement en ligne 24 h avant le départ.'
-               } Places achetées à l'avance : le prix ne bouge pas après réservation.`,
-               en: `${
-                  segments.length > 1 ? 'Return' : 'Direct'
-               } flight between ${from} and ${to} operated by ${carrier}. ${
-                  cabin === 'BUSINESS'
-                     ? 'Business class: priority boarding, 32 kg baggage and lounge access.'
-                     : 'Checked bag included, online check-in from 24 h before departure.'
-               } Seats bought in advance: the price does not move after booking.`,
+               fr: `Vol direct entre ${from} et ${to} opéré par ${carrier}. Bagage en soute inclus, enregistrement en ligne 24 h avant le départ. Choisissez votre date et l'heure du vol.`,
+               en: `Direct flight between ${from} and ${to} operated by ${carrier}. Checked bag included, online check-in from 24 h before departure. Choose your date and flight time.`,
             },
-            status: sold >= total ? LISTING_STATUS.SOLD_OUT : LISTING_STATUS.PUBLISHED,
+            status: LISTING_STATUS.PUBLISHED,
             city: from,
             images: [pick(img.flight), pick(img.flight)],
             supplier: carrier,
-            costPrice: money(Math.round(price * 0.78)),
-            sellPrice: money(price),
-            quantityTotal: total,
-            quantitySold: sold,
-            quantityHeld: 0,
-            validUntil: depAt,
+            ...fares(adult, 0.1),
             rating: rating(),
             reviewCount: reviews(),
             attributes: {
-               tripType: isReturn ? 'RETURN' : 'ONE_WAY',
-               cabin,
-               baggage:
-                  cabin === 'BUSINESS'
-                     ? '2 bagages en soute 32 kg + salon'
-                     : `1 bagage en soute ${pick([20, 23])} kg + 1 bagage cabine 7 kg`,
+               destination: to,
+               operator: carrier,
+               weeklyTimes,
+               durationMinutes: durationMin,
+               cabin: 'ECONOMY',
+               baggage: `1 bagage en soute ${pick([20, 23])} kg + 1 bagage cabine 7 kg`,
                fareRules: 'Non modifiable. Non remboursable.',
-               segments,
             },
          })
       }
@@ -305,7 +255,9 @@ function buildFlights() {
 
 const BUS_OPERATORS = ['Transco', 'Kasaï Express', 'Kivu Lines', 'Socogetra'] as const
 const BUS_CLASSES = ['Standard', 'Climatisé', 'VIP 2+1'] as const
+const BUS_TIMES = ['05:30', '06:30', '08:00', '10:00', '13:00', '15:00'] as const
 
+/** Bus routes: two companies on each road, leaving at the same times every day. */
 function buildBuses() {
    const out: any[] = []
    const routes: [string, string, string[]][] = [
@@ -320,46 +272,36 @@ function buildBuses() {
    ]
 
    for (const [from, to, stops] of routes) {
-      for (let v = 0; v < 4; v++) {
-         const operator = pick(BUS_OPERATORS)
+      for (const operator of some(BUS_OPERATORS, 2)) {
          const cls = pick(BUS_CLASSES)
-         const offset = intBetween(2, 40)
-         const depAt = day(offset, intBetween(5, 15))
          const hours = intBetween(3, 11)
-         const total = intBetween(12, 56)
-         const sold = chance(0.1) ? total : intBetween(0, total - 4)
-         const price = usd(Math.round(between(12, 48)))
-
+         const adult = usd(Math.round(between(12, 48)))
          out.push({
             vertical: VERTICALS.BUS,
-            title: L(`${from} → ${to}, ${operator}`, `${from} → ${to}, ${operator}`),
-            slug: slugify(`${from}-${to}-${operator}-${v}-${offset}`),
+            title: L(`${from} → ${to}`, `${from} → ${to}`),
+            slug: slugify(`${from}-${to}-${operator}`),
             description: {
                fr: `Liaison ${from} – ${to} assurée par ${operator} en bus ${cls.toLowerCase()}. ${
                   stops.length ? `Arrêts à ${stops.join(', ')}. ` : ''
-               }Bagage de 20 kg inclus, départ depuis la gare routière.`,
+               }Bagage de 20 kg inclus, départ depuis la gare routière. Départs tous les jours.`,
                en: `${from} – ${to} service run by ${operator} on a ${cls.toLowerCase()} coach. ${
                   stops.length ? `Stops at ${stops.join(', ')}. ` : ''
-               }20 kg baggage included, departs from the bus terminal.`,
+               }20 kg baggage included, departs from the bus terminal. Departures every day.`,
             },
-            status: sold >= total ? LISTING_STATUS.SOLD_OUT : LISTING_STATUS.PUBLISHED,
+            status: LISTING_STATUS.PUBLISHED,
             city: from,
             images: [pick(img.bus)],
             supplier: operator,
-            costPrice: money(Math.round(price * 0.7)),
-            sellPrice: money(price),
-            quantityTotal: total,
-            quantitySold: sold,
-            validUntil: depAt,
+            ...fares(adult, chance(0.5) ? 0 : 0.1),
             rating: rating(),
             reviewCount: reviews(),
             attributes: {
+               destination: to,
                operator,
                vehicleClass: cls,
                routeStops: [from, ...stops, to],
-               seatsOrCapacity: total,
-               departsAt: depAt,
-               arrivesAt: new Date(+depAt + hours * 3600000),
+               dailyTimes: some(BUS_TIMES, intBetween(2, 3)).sort(),
+               durationMinutes: hours * 60,
             },
          })
       }
@@ -723,10 +665,7 @@ const ROOM_TEMPLATES = [
    { name: 'Suite Exécutive', beds: '1 lit king size', adults: 4, size: [60, 90], mult: 2.9 },
 ] as const
 
-/** A rolling window of nightly rates — the unit that actually sells (§5.2). */
-const NIGHTS = 120
-
-async function buildHotels() {
+async function buildHotels(supplierId: (name: string) => Promise<unknown>) {
    const hotelDocs: any[] = []
    for (const [name, city, stars] of HOTEL_NAMES) {
       const amenityCount = intBetween(6, 10)
@@ -750,7 +689,7 @@ async function buildHotels() {
          geo: nearCity(city),
          amenities,
          images: gallery(img.hotel, 2).concat(gallery(img.room, 2)),
-         supplier: `${name} direct`,
+         supplier: await supplierId(`${name} direct`),
          checkInTime: '14:00',
          checkOutTime: '11:00',
          policies:
@@ -769,7 +708,12 @@ async function buildHotels() {
       baseByHotel.set(String(h._id), base)
       const templates = [...ROOM_TEMPLATES].slice(0, intBetween(2, 4))
       for (const tpl of templates) {
+         // One nightly price per room type, for every night.
+         const sell = usd(Math.round((base * tpl.mult) / 5) * 5)
          roomDocs.push({
+            costPrice: money(Math.round(sell * 0.72)),
+            sellPrice: money(sell),
+            mealPlan: tpl.mult > 1.5 ? MEAL_PLANS.HALF_BOARD : MEAL_PLANS.BREAKFAST,
             hotel: h._id,
             name: L(tpl.name, tpl.name),
             description: {
@@ -788,39 +732,7 @@ async function buildHotels() {
    }
    const rooms = await RoomType.create(roomDocs)
 
-   // Nightly rate plans. Weekends cost more, and a scattering of nights is
-   // fully sold so the availability logic has something real to compute.
-   const plans: any[] = []
-   for (const room of rooms) {
-      const base = baseByHotel.get(String(room.hotel)) ?? 90
-      // `create()` with an array widens the document type here; the name is a
-      // plain string on the schema.
-      const roomName = String((room as any).name)
-      const tpl = ROOM_TEMPLATES.find((t) => t.name === roomName) ?? ROOM_TEMPLATES[0]
-      const allotment = intBetween(2, 9)
-      for (let n = 0; n < NIGHTS; n++) {
-         const date = day(n)
-         const weekend = [5, 6].includes(date.getUTCDay())
-         const nightly = base * tpl.mult * (weekend ? 1.15 : 1) * between(0.95, 1.08)
-         const sell = usd(Math.round(nightly / 5) * 5)
-         const sold = chance(0.08) ? allotment : intBetween(0, allotment)
-         plans.push({
-            hotel: room.hotel,
-            roomType: room._id,
-            date,
-            costPrice: money(Math.round(sell * 0.72)),
-            sellPrice: money(sell),
-            allotment,
-            sold,
-            held: 0,
-            mealPlan: tpl.mult > 1.5 ? MEAL_PLANS.HALF_BOARD : MEAL_PLANS.BREAKFAST,
-            blocked: false,
-         })
-      }
-   }
-   await RatePlan.insertMany(plans, { ordered: false })
-
-   return { hotels: hotels.length, rooms: rooms.length, plans: plans.length }
+   return { hotels: hotels.length, rooms: rooms.length }
 }
 
 /* --------------------------------------------------------------------- main */
@@ -848,6 +760,33 @@ const run = async () => {
       RatePlan.deleteMany({}),
    ])
 
+   /**
+    * Every supplier named below, as a record with demo contact details: made
+    * once per name, kept across runs (other data may already point at it).
+    */
+   const made = new Map<string, unknown>()
+   const supplierId = async (name: string) => {
+      if (!made.has(name)) {
+         const n = made.size + 1
+         const handle = slugify(name)
+         const supplier = await Supplier.findOneAndUpdate(
+            { name },
+            {
+               $setOnInsert: {
+                  name,
+                  phone: `+24381000${String(n).padStart(4, '0')}`,
+                  email: `reservations@${handle}.example`,
+                  contactName: pick(['Jean Mukendi', 'Grâce Kabila', 'Patrick Ilunga', 'Sarah Mbuyi']),
+                  address: `${pick(['Avenue du Commerce', 'Boulevard du 30 Juin', 'Avenue Kasa-Vubu'])}, ${n}`,
+               },
+            },
+            { upsert: true, new: true }
+         )
+         made.set(name, supplier._id)
+      }
+      return made.get(name)
+   }
+
    const listings = [
       ...buildFlights(),
       ...buildBuses(),
@@ -855,9 +794,10 @@ const run = async () => {
       ...buildActivities(),
       ...buildProperties(),
    ]
+   for (const l of listings) if (l.supplier) l.supplier = await supplierId(l.supplier)
    await Listing.insertMany(listings, { ordered: false })
 
-   const hotelStats = await buildHotels()
+   const hotelStats = await buildHotels(supplierId)
 
    const byVertical = listings.reduce<Record<string, number>>((acc, l) => {
       acc[l.vertical] = (acc[l.vertical] ?? 0) + 1

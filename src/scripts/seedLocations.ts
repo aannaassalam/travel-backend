@@ -62,6 +62,8 @@ async function main() {
 
    for (const l of await Listing.find({}).select('city vertical attributes')) {
       add(l.city, l.vertical)
+      // A bus or flight route serves both of its ends.
+      add((l as any).attributes?.destination, l.vertical)
       /**
        * Every stop on a coach route is a place we service, not just the two
        * ends — someone boarding at Mbanza-Ngungu is a customer, and leaving
@@ -129,7 +131,12 @@ async function main() {
       const pairs = new Set<string>()
       for (const l of listings) {
          const attrs = (l as any).attributes ?? {}
-         if (vertical === VERTICALS.FLIGHT) {
+         // A route: from its city to its destination, both by name.
+         if (attrs.destination) {
+            const o = byName.get(l.city)
+            const d = byName.get(attrs.destination)
+            if (o && d && !o._id.equals(d._id)) pairs.add(`${o._id}|${d._id}`)
+         } else if (vertical === VERTICALS.FLIGHT) {
             // One route per leg, so a connection seeds both hops.
             for (const s of attrs.segments ?? []) {
                const o = byIata.get(String(s.origin).toUpperCase())

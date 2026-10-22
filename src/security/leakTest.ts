@@ -25,6 +25,7 @@ import {
 } from '../dto/admin/adminUser.dto'
 import { presentAuditLogs } from '../dto/admin/auditLog.dto'
 import { presentPublicUser } from '../dto/public/user.dto'
+import { presentHotel, presentListing } from '../dto/public/catalogue.dto'
 
 let failures = 0
 const check = (name: string, fn: () => void) => {
@@ -116,6 +117,50 @@ check('presentPublicUser hides admin-only and secret fields', () => {
    const out = presentPublicUser(poisoned() as any)
    assertNoFields('presentPublicUser', out, [...NEVER_ANYWHERE, ...NEVER_PUBLIC])
    assert.strictEqual((out as any).email, 'test@example.com', 'lost a legitimate field')
+})
+
+check('presentListing (bus route) hides every cost and the agency behind it', () => {
+   const out = presentListing(
+      poisoned({
+         vertical: 'BUS',
+         title: { fr: 'Kinshasa → Matadi' },
+         slug: 'kin-mat',
+         city: 'Kinshasa',
+         images: [],
+         sellPrice: { USD: 1500 },
+         childSellPrice: { USD: 1000 },
+         infantSellPrice: { USD: 0 },
+         childCostPrice: { USD: 701 },
+         infantCostPrice: { USD: 1 },
+         // A populated supplier: its contact details are the office's, not the customer's.
+         supplier: { _id: 'x', name: 'Secret Supplier Ltd', phone: 'LEAKED', email: 'LEAKED' },
+         attributes: { destination: 'Matadi', dailyTimes: ['06:30'], operator: 'Transco' },
+      }) as any
+   )
+   assertNoFields('presentListing', out, [
+      ...NEVER_ANYWHERE,
+      ...NEVER_PUBLIC,
+      'childCostPrice',
+      'infantCostPrice',
+   ])
+   assert.ok(!JSON.stringify(out).includes('701'), 'the child cost reached the public listing')
+   assert.strictEqual((out as any).childPrice.USD, 1000, 'lost the child fare')
+   assert.strictEqual((out as any).attributes.operator, 'Transco', 'lost the operator name')
+})
+
+check('presentHotel hides room costs', () => {
+   const out = presentHotel(
+      poisoned({
+         name: { fr: 'Hôtel' },
+         slug: 'h',
+         roomTypes: [
+            poisoned({ hotel: 'h', name: { fr: 'Standard' }, sellPrice: { USD: 9000 }, costPrice: { USD: 6543 } }),
+         ],
+      }) as any
+   )
+   assertNoFields('presentHotel', out, [...NEVER_ANYWHERE, ...NEVER_PUBLIC])
+   assert.ok(!JSON.stringify(out).includes('6543'), 'a room cost reached the public hotel')
+   assert.strictEqual((out as any).roomTypes[0].sellPrice.USD, 9000, 'lost the room price')
 })
 
 console.log('\nAdmin surface DTOs')

@@ -31,7 +31,20 @@ const itemFields = (currency: string, orderTotalUsd: number, chargedTotal: numbe
       roomTypeId: (i) => i.roomTypeId?.toString(),
       startDate: (i) => i.startDate?.toISOString?.().slice(0, 10),
       endDate: (i) => i.endDate?.toISOString?.().slice(0, 10),
+      /** A bus or flight: the time of the departure chosen, "HH:MM" as timetabled. */
+      departureTime: (i) =>
+         ['BUS', 'FLIGHT'].includes(i.vertical) && i.passengers
+            ? i.startDate?.toISOString?.().slice(11, 16)
+            : undefined,
+      origin: (i) => i.origin,
+      destination: (i) => i.destination,
       quantity: (i) => i.quantity,
+      passengers: (i) =>
+         i.passengers
+            ? { adults: i.passengers.adults, children: i.passengers.children, infants: i.passengers.infants }
+            : undefined,
+      baggage: (i) =>
+         i.baggage ? { cabinKg: i.baggage.cabinKg, checkedKg: i.baggage.checkedKg } : undefined,
       unitSellPrice: (i) => money(i.unitSellPrice),
       lineTotal: (i) => money(i.lineTotal, currency, share(i.lineTotal)),
    }

@@ -208,11 +208,17 @@ export const updateLocation = catchAsync(
             { $set: { 'attributes.routeStops.$[stop]': location.name }, $inc: { __v: 1 } },
             { arrayFilters: [{ stop: { $regex: old.source, $options: 'i' } }] }
          )
+         // A bus or flight route's other end, too: "to X" is found by it.
+         const destinations = await Listing.updateMany(
+            { 'attributes.destination': old },
+            { $set: { 'attributes.destination': location.name }, $inc: { __v: 1 } }
+         )
          moved = {
             hotels: hotels.modifiedCount,
             restaurants: restaurants.modifiedCount,
             listings: listings.modifiedCount,
             busStops: stops.modifiedCount,
+            routeDestinations: destinations.modifiedCount,
          }
       }
 

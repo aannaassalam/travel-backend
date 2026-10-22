@@ -8,6 +8,8 @@ import { Hotel } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
 import { Location } from '../../model/locationModel'
 import { Restaurant } from '../../model/restaurantModel'
+import { Supplier } from '../../model/supplierModel'
+import { cleanTimetable, WeeklyTime } from '../../services/orders/schedule.service'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -53,11 +55,17 @@ type Kind =
    | 'list'
    | 'enum'
    | 'bool'
+   /** Times of day, "06:30 | 14:00": a bus's departures, every day. */
+   | 'times'
+   /** Days and times, "Mon 08:00 | Wed 15:45": a flight's week. */
+   | 'weekly'
 
 /** What the example row needs that only the database knows. */
 interface TemplateContext {
    /** A city this kind of inventory can actually be saved against. */
    city: string
+   /** Another one, for the other end of a bus or flight route. */
+   destination: string
    /** A departure comfortably ahead, so the example row is one that could sell. */
    departs: Date
 }
@@ -159,18 +167,42 @@ const PIN: Column[] = [
       'Map pin, together with latitude.', { min: -180, max: 180 }),
 ]
 
+// USD only: francs and euros are worked out from the exchange rates in Settings.
 const PRICES: Column[] = [
    col('cost_price_usd', 'Cost price (USD)', 'money', 'costPrice.USD', '45.00',
       'What you pay the supplier for one. Never shown to customers.',
       { required: true, min: 0.01 }),
    col('sell_price_usd', 'Sell price (USD)', 'money', 'sellPrice.USD', '70.00',
-      'What the customer pays for one. Must be above the cost price.',
+      'What the customer pays for one. Must be above the cost price. CDF and EUR prices are worked out from the exchange rates in Settings.',
       { required: true, min: 0.01 }),
-   col('sell_price_cdf', 'Sell price (CDF)', 'money', 'sellPrice.CDF', '196000',
-      'Only if you also sell it in francs. Blank means not sold in CDF — nothing is converted.',
-      { min: 0.01 }),
-   col('sell_price_eur', 'Sell price (EUR)', 'money', 'sellPrice.EUR', '64.00',
-      'Only if you also sell it in euros.', { min: 0.01 }),
+]
+
+/** A bus or flight route's three fares: adult (12+), child (2–12), baby (under 2). */
+const FARES: Column[] = [
+   col('cost_price_usd', 'Adult cost (USD)', 'money', 'costPrice.USD', '45.00',
+      'What the agency charges you for an adult (12 and over). Never shown to customers.',
+      { required: true, min: 0.01 }),
+   col('sell_price_usd', 'Adult fare (USD)', 'money', 'sellPrice.USD', '70.00',
+      'What an adult pays. Must be above the adult cost. CDF and EUR are worked out from the exchange rates in Settings.',
+      { required: true, min: 0.01 }),
+   col('child_cost_usd', 'Child cost (USD)', 'money', 'childCostPrice.USD', '35.00',
+      'What the agency charges you for a child of 2 to 12.', { required: true, min: 0 }),
+   col('child_fare_usd', 'Child fare (USD)', 'money', 'childSellPrice.USD', '55.00',
+      'What a child of 2 to 12 pays. Must be above the child cost.',
+      { required: true, min: 0.01 }),
+   col('baby_cost_usd', 'Baby cost (USD)', 'money', 'infantCostPrice.USD', '5.00',
+      'What the agency charges you for a baby under 2. 0 if nothing.', { required: true, min: 0 }),
+   col('baby_fare_usd', 'Baby fare (USD)', 'money', 'infantSellPrice.USD', '10.00',
+      'What a baby under 2 pays. 0 if babies travel free.', { required: true, min: 0 }),
+]
+
+/** A route's two ends: where it leaves from (the record's city) and where it goes. */
+const ROUTE_ENDS: Column[] = [
+   col('city', 'From (departure point)', 'text', 'city', (c) => c.city,
+      'Where it leaves from. Must be one of your serviced Locations, switched on for this kind of product.',
+      { required: true, max: 120 }),
+   col('destination', 'To (destination)', 'text', 'attributes.destination', (c) => c.destination,
+      'Where it goes. Also one of your serviced Locations.', { required: true, max: 120 }),
 ]
 
 const quantity = (what: string, example: string) =>
@@ -179,7 +211,14 @@ const quantity = (what: string, example: string) =>
 
 const supplier = (example: string) =>
    col('supplier', 'Supplier', 'text', 'supplier', example,
-      'Who you buy it from. For your own reports; customers never see it.', { max: 200 })
+      'Who you buy it from, by its name under Suppliers (add it there first). Customers never see it.',
+      { max: 200 })
+
+/** A route's supplier is its travel agency, and its name is shown as the operator. */
+const AGENCY = (example: string) =>
+   col('supplier', 'Travel agency', 'text', 'supplier', example,
+      'The agency that runs it, by its name under Suppliers (add it there first). Customers see this name as the operator.',
+      { required: true, max: 200 })
 
 const VALID_FROM = col('valid_from', 'On sale from', 'datetime', 'validFrom',
    (c) => stamp(new Date(c.departs.getTime() - 30 * DAY)),
@@ -223,56 +262,18 @@ const pinned = (doc: any, fail: Fail) => {
    }
 }
 
-const flight = (doc: any, fail: Fail) => {
+/** A bus or flight route: its fares in order, its two ends apart, and a time to leave. */
+const route = (doc: any, fail: Fail) => {
    sellable(doc, fail)
-   const [out, back] = doc.attributes?.segments ?? []
-   if (!out) return // the missing cells have already been reported
-
-   for (const [field, code] of [['origin', out.origin], ['destination', out.destination]]) {
-      if (code && !/^[A-Z]{3}$/.test(code)) {
-         fail(field, 'Must be a 3-letter airport code, like FIH')
-      }
+   const childCost = doc.childCostPrice?.USD ?? 0
+   const childFare = doc.childSellPrice?.USD ?? 0
+   if (childFare && childFare <= childCost) fail('child_fare_usd', 'Must be above the child cost')
+   if ((doc.infantSellPrice?.USD ?? 0) < (doc.infantCostPrice?.USD ?? 0)) {
+      fail('baby_fare_usd', 'Cannot be below the baby cost')
    }
-   if (out.origin && out.origin === out.destination) {
-      fail('destination', 'Must be different from the origin')
-   }
-   if (out.departsAt && out.arrivesAt && out.arrivesAt <= out.departsAt) {
-      fail('arrives_at', 'Must be after the departure')
-   }
-   // The shared pair is what the catalogue sorts by and the nightly job
-   // expires on. A flight that kept its time only on the segment never expired.
-   doc.attributes.departsAt = out.departsAt
-   doc.attributes.arrivesAt = out.arrivesAt
-
-   if (back && Object.values(back).some(Boolean)) {
-      if (!back.departsAt) {
-         fail('return_departs_at', 'A return flight needs its departure time')
-      } else if (out.departsAt && back.departsAt <= out.departsAt) {
-         fail('return_departs_at', 'Must be after the outbound departure')
-      }
-      if (!back.arrivesAt) {
-         fail('return_arrives_at', 'A return flight needs its arrival time')
-      }
-      if (back.departsAt && back.arrivesAt && back.arrivesAt <= back.departsAt) {
-         fail('return_arrives_at', 'Must be after the return departure')
-      }
-      // The way back is the way out, reversed.
-      doc.attributes.segments = [
-         out,
-         { ...back, carrier: out.carrier, origin: out.destination, destination: out.origin },
-      ]
-      doc.attributes.tripType = 'RETURN'
-   } else {
-      doc.attributes.segments = [out]
-      doc.attributes.tripType = 'ONE_WAY'
-   }
-}
-
-const bus = (doc: any, fail: Fail) => {
-   sellable(doc, fail)
-   const { departsAt, arrivesAt } = doc.attributes ?? {}
-   if (departsAt && arrivesAt && arrivesAt <= departsAt) {
-      fail('arrives_at', 'Must be after the departure')
+   const a = doc.attributes ?? {}
+   if (a.destination && doc.city && a.destination.toLowerCase() === doc.city.toLowerCase()) {
+      fail('destination', 'Must be different from the departure point')
    }
 }
 
@@ -333,7 +334,7 @@ const GROUPS: Record<string, GroupSpec> = {
          ...REFERENCE,
       ],
       finish: pinned,
-      after: 'Then, in the panel: add photos, the room types and their nightly prices, and publish.',
+      after: 'Then, in the panel: add photos and the room types with their nightly prices, and publish.',
    },
 
    RESTAURANT: {
@@ -372,87 +373,61 @@ const GROUPS: Record<string, GroupSpec> = {
    FLIGHT: {
       ...listing(VERTICALS.FLIGHT),
       label: 'Flights',
-      singular: 'flight',
+      singular: 'flight route',
       file: 'flights',
       base: { vertical: VERTICALS.FLIGHT },
       columns: [
-         // A return, because the example row fills the three return columns.
-         ...titled('Kinshasa ⇄ Lubumbashi, aller-retour', 'Kinshasa ⇄ Lubumbashi, return'),
-         SERVICED_CITY,
+         ...titled('Kinshasa → Lubumbashi', 'Kinshasa → Lubumbashi'),
+         ...ROUTE_ENDS,
          ...described(
             'Vol direct, un bagage en soute inclus.',
             'Direct flight, one checked bag included.'
          ),
-         col('carrier', 'Airline', 'text', 'attributes.segments.0.carrier', 'Congo Airways',
-            'The airline operating the flight.', { required: true, max: 120 }),
-         col('flight_number', 'Flight number', 'text', 'attributes.segments.0.flightNumber',
-            '8Z 101', 'As printed on the ticket.', { max: 20 }),
-         col('origin', 'From (airport code)', 'text', 'attributes.segments.0.origin', 'FIH',
-            'The 3-letter code of the departure airport.', { required: true, upper: true }),
-         col('destination', 'To (airport code)', 'text', 'attributes.segments.0.destination',
-            'FBM', 'The 3-letter code of the arrival airport.', { required: true, upper: true }),
-         col('departs_at', 'Departs', 'datetime', 'attributes.segments.0.departsAt',
-            (c) => stamp(c.departs), 'Date and time of departure.', { required: true }),
-         col('arrives_at', 'Arrives', 'datetime', 'attributes.segments.0.arrivesAt',
-            (c) => stamp(new Date(c.departs.getTime() + 2.5 * 3600000)),
-            'Date and time of arrival.', { required: true }),
-         col('return_flight_number', 'Return flight number', 'text',
-            'attributes.segments.1.flightNumber', '8Z 102',
-            'Fill the three return columns for a return ticket; leave them blank for one way.',
-            { max: 20 }),
-         col('return_departs_at', 'Return departs', 'datetime',
-            'attributes.segments.1.departsAt',
-            (c) => stamp(new Date(c.departs.getTime() + 7 * DAY)),
-            'Date and time the return flight leaves.'),
-         col('return_arrives_at', 'Return arrives', 'datetime',
-            'attributes.segments.1.arrivesAt',
-            (c) => stamp(new Date(c.departs.getTime() + 7 * DAY + 2.5 * 3600000)),
-            'Date and time the return flight lands.'),
+         AGENCY('Congo Airways'),
+         col('timetable', 'Weekly timetable', 'weekly', 'attributes.weeklyTimes',
+            'Mon 08:00 | Wed 08:00 | Fri 15:45',
+            'Each flight of the week as a day and a time, separated by a | bar. Days: Mon Tue Wed Thu Fri Sat Sun (or Lun Mar Mer Jeu Ven Sam Dim).',
+            { required: true }),
+         col('duration_minutes', 'Flight time (minutes)', 'int', 'attributes.durationMinutes', '150',
+            'How long the flight takes, to show the arrival time. Optional.', { min: 1, max: 2880 }),
          col('cabin', 'Cabin', 'enum', 'attributes.cabin', 'ECONOMY', 'The class of travel.',
             { options: ['ECONOMY', 'PREMIUM', 'BUSINESS', 'FIRST'] }),
-         col('baggage', 'Baggage', 'text', 'attributes.baggage',
+         col('baggage', 'Baggage allowance', 'text', 'attributes.baggage',
             '1 bagage en soute 23 kg + 1 bagage cabine', 'What is included.', { max: 300 }),
          col('fare_rules', 'Fare rules', 'text', 'attributes.fareRules',
             'Non modifiable. Non remboursable.', 'Change and refund conditions.', { max: 1000 }),
-         ...PRICES,
-         quantity('seats', '20'),
-         supplier('Congo Airways'),
-         SOLD,
+         ...FARES,
          ...REFERENCE,
       ],
-      finish: flight,
+      finish: route,
       after: 'Then, in the panel: add a photo and publish.',
    },
 
    BUS: {
       ...listing(VERTICALS.BUS),
       label: 'Bus',
-      singular: 'bus service',
+      singular: 'bus route',
       file: 'bus',
       base: { vertical: VERTICALS.BUS },
       columns: [
-         ...titled('Kinshasa → Matadi, Transco', 'Kinshasa → Matadi, Transco'),
-         SERVICED_CITY,
+         ...titled('Kinshasa → Matadi', 'Kinshasa → Matadi'),
+         ...ROUTE_ENDS,
          ...described('Départ quotidien, car climatisé.', 'Daily departure, air-conditioned coach.'),
-         col('operator', 'Operator', 'text', 'attributes.operator', 'Transco',
-            'The bus company.', { required: true, max: 120 }),
-         col('departs_at', 'Departs', 'datetime', 'attributes.departsAt',
-            (c) => stamp(c.departs), 'Date and time of departure.'),
-         col('arrives_at', 'Arrives', 'datetime', 'attributes.arrivesAt',
-            (c) => stamp(new Date(c.departs.getTime() + 6 * 3600000)),
-            'Date and time of arrival.'),
+         AGENCY('Transco'),
+         col('departure_times', 'Departure times', 'times', 'attributes.dailyTimes',
+            '06:30 | 10:00 | 14:00',
+            'The times it leaves, every day, separated by a | bar. The customer picks the date and one of these.',
+            { required: true }),
+         col('duration_minutes', 'Journey time (minutes)', 'int', 'attributes.durationMinutes', '360',
+            'How long the journey takes, to show the arrival time. Optional.', { min: 1, max: 4320 }),
          col('vehicle_class', 'Vehicle class', 'text', 'attributes.vehicleClass', 'Climatisé',
             'For example Climatisé, VIP, Standard.', { max: 120 }),
          col('route_stops', 'Stops on the way', 'list', 'attributes.routeStops',
             'Kisantu | Mbanza-Ngungu', 'Towns the bus stops in, separated by a | bar.'),
-         ...PRICES,
-         quantity('seats', '45'),
-         VALID_FROM,
-         supplier('Transco'),
-         SOLD,
+         ...FARES,
          ...REFERENCE,
       ],
-      finish: bus,
+      finish: route,
       after: 'Then, in the panel: add a photo and publish.',
    },
 
@@ -559,11 +534,8 @@ const GROUPS: Record<string, GroupSpec> = {
          col('price_basis', 'Price is', 'enum', 'attributes.priceBasis', 'TOTAL',
             'TOTAL for a sale price, PER_MONTH for rent.', { options: ['TOTAL', 'PER_MONTH'] }),
          col('price_usd', 'Price (USD)', 'money', 'sellPrice.USD', '250000.00',
-            'The asking price or the monthly rent.', { required: true, min: 0.01 }),
-         col('price_cdf', 'Price (CDF)', 'money', 'sellPrice.CDF', '',
-            'Only if you also quote it in francs.', { min: 0.01 }),
-         col('price_eur', 'Price (EUR)', 'money', 'sellPrice.EUR', '',
-            'Only if you also quote it in euros.', { min: 0.01 }),
+            'The asking price or the monthly rent. CDF and EUR are worked out from the exchange rates in Settings.',
+            { required: true, min: 0.01 }),
          col('bedrooms', 'Bedrooms', 'int', 'attributes.bedrooms', '4', 'Number of bedrooms.',
             { min: 0 }),
          col('bathrooms', 'Bathrooms', 'int', 'attributes.bathrooms', '3',
@@ -688,6 +660,24 @@ const toDate = (raw: string, order: SlashOrder = 'DMY'): Date | null => {
  */
 const stamp = (d: Date) => d.toISOString().slice(0, 16)
 
+/** Day names a timetable may use, French or English, whole or short: index = day of week. */
+const DAY_NAMES = [
+   ['sun', 'sunday', 'dim', 'dimanche'],
+   ['mon', 'monday', 'lun', 'lundi'],
+   ['tue', 'tuesday', 'mar', 'mardi'],
+   ['wed', 'wednesday', 'mer', 'mercredi'],
+   ['thu', 'thursday', 'jeu', 'jeudi'],
+   ['fri', 'friday', 'ven', 'vendredi'],
+   ['sat', 'saturday', 'sam', 'samedi'],
+]
+const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+/** "8:05" or "08:05" as "08:05", or null. */
+const clock = (raw: string) => {
+   const m = raw.trim().match(/^(\d{1,2})[:hH](\d{2})$/)
+   return m && Number(m[1]) <= 23 && Number(m[2]) <= 59 ? `${m[1].padStart(2, '0')}:${m[2]}` : null
+}
+
 const YES = ['yes', 'y', 'oui', 'o', 'true', 'vrai', '1']
 const NO = ['no', 'n', 'non', 'false', 'faux', '0']
 
@@ -788,6 +778,29 @@ const readCell = (
          if (NO.includes(want)) return { value: false }
          return { error: 'Must be yes or no' }
       }
+      case 'times': {
+         const parts = raw.split('|').map((t) => t.trim()).filter(Boolean)
+         const times = parts.map(clock)
+         if (!parts.length || times.some((t) => !t)) {
+            return { error: 'Must be times separated by a | bar, like 06:30 | 14:00' }
+         }
+         return { value: cleanTimetable({ dailyTimes: times }).dailyTimes }
+      }
+      case 'weekly': {
+         const parts = raw.split('|').map((t) => t.trim()).filter(Boolean)
+         const week: WeeklyTime[] = []
+         for (const part of parts) {
+            const [name, time] = part.split(/\s+/)
+            const day = DAY_NAMES.findIndex((names) => names.includes(String(name).toLowerCase().replace('.', '')))
+            const at = clock(time ?? '')
+            if (day < 0 || !at) {
+               return { error: `"${part}" is not a day and a time, like Mon 08:00 or Lun 08:00` }
+            }
+            week.push({ day, time: at })
+         }
+         if (!week.length) return { error: 'Give at least one day and time, like Mon 08:00' }
+         return { value: cleanTimetable({ weeklyTimes: week }).weeklyTimes }
+      }
    }
 }
 
@@ -836,7 +849,10 @@ const writeCell = (c: Column, doc: any, delimiter: Delimiter): string => {
       case 'datetime':
          return stamp(new Date(v))
       case 'list':
+      case 'times':
          return inert((v as string[]).join(' | '))
+      case 'weekly':
+         return (v as WeeklyTime[]).map((w) => `${DAY_SHORT[w.day]} ${w.time}`).join(' | ')
       case 'bool':
          return v ? 'yes' : 'no'
       case 'enum':
@@ -1051,16 +1067,18 @@ const delimiterOf = (req: Request): Delimiter =>
 
 const templateContext = async (spec: GroupSpec): Promise<TemplateContext> => {
    // A real city, so the untouched template passes its own validation.
-   const place = await Location.findOne({
+   const [place, other] = await Location.find({
       isActive: true,
       ...(spec.vertical ? { servesVerticals: spec.vertical } : {}),
    })
       .sort({ sortOrder: 1, name: 1 })
+      .limit(2)
       .select('name')
       .lean()
    const soon = new Date(Date.now() + 30 * DAY)
    return {
       city: (place as any)?.name ?? 'Kinshasa',
+      destination: (other as any)?.name ?? 'Matadi',
       departs: new Date(
          Date.UTC(soon.getUTCFullYear(), soon.getUTCMonth(), soon.getUTCDate(), 8, 0)
       ),
@@ -1118,6 +1136,13 @@ export const exportCsv = catchAsync(async (req: Request, res: Response) => {
       .sort({ _id: -1 })
       .limit(MAX_EXPORT_ROWS)
       .lean()
+   // A supplier leaves by its name, the way an import reads it back.
+   const names = new Map(
+      (await Supplier.find({}).select('name').lean()).map((x: any) => [String(x._id), x.name])
+   )
+   for (const doc of docs as any[]) {
+      if (doc.supplier) doc.supplier = names.get(String(doc.supplier)) ?? ''
+   }
 
    await recordAudit(req, {
       action: AUDIT_ACTIONS.INVENTORY_EXPORTED,
@@ -1212,6 +1237,12 @@ export const importCsv = catchAsync(
             (l: any) => [String(l.name).trim().toLowerCase(), l]
          )
       )
+      const suppliers = new Map(
+         (await Supplier.find({}).select('name isActive').lean()).map((x: any) => [
+            String(x.name).trim().toLowerCase(),
+            x,
+         ])
+      )
 
       let skipped = 0
       const failedRows = new Set<number>()
@@ -1243,17 +1274,36 @@ export const importCsv = catchAsync(
          }
 
          // §12: the Locations list is the single source of truth for where a
-         // listing may be sold, and a spreadsheet is not a way round it.
-         const typed = String(doc.city ?? '')
-         const place: any = places.get(typed.trim().toLowerCase())
-         if (place) doc.city = place.name // the spelling the list uses
-         if (typed && spec.vertical) {
+         // listing may be sold — both ends of a route — and a spreadsheet is
+         // not a way round it.
+         const serviced = (field: string, typed: string, put: (name: string) => void) => {
+            const place: any = places.get(typed.trim().toLowerCase())
+            if (place) put(place.name) // the spelling the list uses
+            if (!typed || !spec.vertical) return
             if (!place) {
-               fail('city', `${typed} is not in your serviced locations. Add it under Locations first.`)
+               fail(field, `${typed} is not in your serviced locations. Add it under Locations first.`)
             } else if (!place.isActive) {
-               fail('city', `${place.name} is switched off in Locations. Switch it back on first.`)
+               fail(field, `${place.name} is switched off in Locations. Switch it back on first.`)
             } else if (!place.servesVerticals?.includes(spec.vertical)) {
-               fail('city', `${place.name} is not set up for ${spec.label.toLowerCase()}. Tick it under Locations first.`)
+               fail(field, `${place.name} is not set up for ${spec.label.toLowerCase()}. Tick it under Locations first.`)
+            }
+         }
+         serviced('city', String(doc.city ?? ''), (name) => (doc.city = name))
+         if (doc.attributes?.destination !== undefined) {
+            serviced('destination', String(doc.attributes.destination), (name) => (doc.attributes.destination = name))
+         }
+
+         // A supplier by its name under Suppliers — never a new one made up by a typo.
+         if (doc.supplier !== undefined) {
+            const found: any = suppliers.get(String(doc.supplier).trim().toLowerCase())
+            if (!found) {
+               fail('supplier', `${doc.supplier} is not in your suppliers. Add it under Suppliers first.`)
+            } else {
+               doc.supplier = found._id
+               // A route's operator is its agency's name, as in the panel.
+               if (doc.attributes && ['BUS', 'FLIGHT'].includes(doc.vertical)) {
+                  doc.attributes.operator = found.name
+               }
             }
          }
 

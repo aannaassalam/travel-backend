@@ -5,6 +5,7 @@ import {
    VERTICALS,
    Vertical,
 } from '../constants/domain.constants'
+import { hasTimetable } from '../services/orders/schedule.service'
 import {
    baseAmount,
    Localized,
@@ -28,10 +29,31 @@ import {
  * Split a vertical out if its rules stop fitting `attributes`.
  */
 
+/** Buses and flights are sold as timetabled routes, with no seat count. */
+export const isScheduledRoute = (vertical: string) =>
+   vertical === VERTICALS.BUS || vertical === VERTICALS.FLIGHT
+
 /** §5.2 per-vertical fields. Validated per vertical in `publishBlockers`. */
 const attributesSchema = new Schema(
    {
-      // --- Flights (modelled as Offers) ---
+      // --- Bus and flight routes ---
+      /**
+       * A bus or flight is one route of one travel agency (the listing's
+       * supplier): from `city` to `destination`, on a timetable rather than a
+       * date. Buses leave at `dailyTimes` every day; flights at `weeklyTimes`
+       * on their days of the week. The customer picks the date and the time.
+       * See services/orders/schedule.service.
+       */
+      destination: { type: String, trim: true },
+      dailyTimes: { type: [String], default: undefined },
+      weeklyTimes: {
+         type: [{ _id: false, day: { type: Number, min: 0, max: 6 }, time: String }],
+         default: undefined,
+      },
+      /** The agency's name, shown as the operator. Kept from the supplier (`syncOperatorName`). */
+      operator: String,
+
+      // --- Flights: before routes, an offer was one dated flight. Kept for old records. ---
       tripType: { type: String, enum: ['ONE_WAY', 'RETURN', 'MULTI_CITY'] },
       segments: [
          {
@@ -49,7 +71,6 @@ const attributesSchema = new Schema(
       bookingDeadline: Date,
 
       // --- Bus ---
-      operator: String,
       routeStops: [String],
       vehicleClass: String,
       /** §5.2: without recurrence the same trip gets hand-entered 90 times. */
@@ -123,14 +144,20 @@ export interface IListing extends Document {
    images: string[]
    /** The optional video: the address its upload answered with (see `videoField`). */
    videoUrl?: string
-   supplier?: string
+   /** Who it is bought from; for a bus or flight route, its travel agency. */
+   supplier?: Types.ObjectId
    /**
-    * Per-currency, integer minor units. USD required (reporting base); CDF/EUR
-    * are explicit prices, never conversions. Cost is required except for
-    * Properties, which have no cost of goods.
+    * USD minor units (CDF/EUR are worked out — see moneyField). Cost is
+    * required except for Properties, which have no cost of goods. For a bus or
+    * flight these are the adult fare (12 and over).
     */
    costPrice: Money
    sellPrice: Money
+   /** Bus and flight fares for a child of 2 to 12, and for a baby under 2. */
+   childCostPrice: Money
+   childSellPrice: Money
+   infantCostPrice: Money
+   infantSellPrice: Money
    quantityTotal: number
    quantitySold: number
    quantityHeld: number
@@ -171,9 +198,13 @@ const listingSchema = new Schema<IListing>(
       geo: { lat: Number, lng: Number },
       images: { type: [String], default: [] },
       videoUrl: videoField(),
-      supplier: { type: String, trim: true, index: true },
+      supplier: { type: Schema.Types.ObjectId, ref: 'Supplier', index: true },
       costPrice: moneyField(),
       sellPrice: moneyField(),
+      childCostPrice: moneyField(),
+      childSellPrice: moneyField(),
+      infantCostPrice: moneyField(),
+      infantSellPrice: moneyField(),
       quantityTotal: { type: Number, default: 0, min: 0 },
       quantitySold: { type: Number, default: 0, min: 0 },
       quantityHeld: { type: Number, default: 0, min: 0 },
@@ -216,10 +247,11 @@ listingSchema.pre('validate', function () {
 listingSchema.methods.publishBlockers = function (): string[] {
    const b: string[] = []
    const isProperty = this.vertical === VERTICALS.PROPERTY
+   const isRoute = isScheduledRoute(this.vertical)
 
    if (!this.title?.fr) b.push('French title is required')
    if (!this.description?.fr) b.push('French description is required')
-   if (!this.city) b.push('City is required')
+   if (!this.city) b.push(isRoute ? 'The departure point is required' : 'City is required')
 
    if (isProperty) {
       // §5.2: properties need a gallery of at least 3 images.
@@ -237,9 +269,32 @@ listingSchema.methods.publishBlockers = function (): string[] {
       if (baseAmount(this.sellPrice) <= baseAmount(this.costPrice)) {
          b.push('USD sell price must be above cost price')
       }
-      if (this.quantityTotal <= 0) b.push('Quantity must be above zero')
+      // A route runs every day it is timetabled, with no seat count to keep.
+      if (!isRoute && this.quantityTotal <= 0) b.push('Quantity must be above zero')
       // validUntil is no longer managed from the panel, so it must not block:
       // a record that still carries an old date could never be published.
+   }
+
+   if (isRoute) {
+      const a = this.attributes ?? {}
+      if (!this.supplier) b.push('Choose the travel agency (supplier)')
+      if (!a.destination) b.push('The destination is required')
+      else if (a.destination === this.city) b.push('The destination must differ from the departure point')
+      if (!hasTimetable(a)) {
+         b.push(
+            this.vertical === VERTICALS.FLIGHT
+               ? 'Add at least one flight to the weekly timetable'
+               : 'Add at least one departure time'
+         )
+      }
+      if (baseAmount(this.childSellPrice) <= 0) b.push('A child fare (2–12 years) is required')
+      else if (baseAmount(this.childSellPrice) <= baseAmount(this.childCostPrice)) {
+         b.push('The child fare must be above its cost')
+      }
+      if (baseAmount(this.infantSellPrice) < baseAmount(this.infantCostPrice)) {
+         b.push('The baby fare (under 2) cannot be below its cost')
+      }
+      return b
    }
 
    // A departure that has already left cannot go back on sale; the nightly job
@@ -260,24 +315,6 @@ listingSchema.methods.publishBlockers = function (): string[] {
       b.push('An arrival time is not after its departure')
    }
 
-   if (this.vertical === VERTICALS.FLIGHT) {
-      if (!legs.length) b.push('At least one flight segment is required')
-      // Every leg, and both of its times: the website prints all of them. It is
-      // what a spreadsheet import insists on, so a flight made in the panel
-      // cannot go on sale half-filled either.
-      else if (
-         legs.some(
-            (s) => !s.carrier || !s.origin || !s.destination || !s.departsAt || !s.arrivesAt
-         )
-      ) {
-         b.push(
-            'Each flight needs its airline, both airport codes, and its departure and arrival times'
-         )
-      }
-   }
-   if (this.vertical === VERTICALS.BUS && !this.attributes?.operator) {
-      b.push('Operator is required')
-   }
    if (this.vertical === VERTICALS.CAR && !this.attributes?.make) {
       b.push('Make and model are required')
    }

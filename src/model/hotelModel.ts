@@ -15,8 +15,12 @@ import {
 } from './shared.schema'
 
 /**
- * Hotels are three levels (§5.2):
- *   Hotel  →  RoomType  →  RatePlan (the inventory lot that actually sells)
+ * Hotels are two levels: Hotel → RoomType. A room type carries one price per
+ * night that holds for every future night until the office changes it, and
+ * there is no limit on how many rooms are sold (the office's own decision).
+ *
+ * RatePlan below is the per-night calendar this replaced. Nothing writes it any
+ * more; it stays only so the records made with it can still be read.
  *
  * Nothing here is ever hard deleted (§5.1, §15). Status moves to ARCHIVED so
  * historical orders resolve to their listing forever.
@@ -38,8 +42,8 @@ export interface IHotel extends Document {
    images: string[]
    /** The optional video: the address its upload answered with (see `videoField`). */
    videoUrl?: string
-   /** §5.2: which hotel this stock was bought from (§18 Q9). */
-   supplier?: string
+   /** §5.2: who the rooms are bought from (§18 Q9) — see Supplier. */
+   supplier?: Types.ObjectId
    checkInTime: string
    checkOutTime: string
    policies: string
@@ -72,7 +76,7 @@ const hotelSchema = new Schema<IHotel>(
       amenities: { type: [String], default: [] },
       images: { type: [String], default: [] },
       videoUrl: videoField(),
-      supplier: { type: String, trim: true, index: true },
+      supplier: { type: Schema.Types.ObjectId, ref: 'Supplier', index: true },
       checkInTime: { type: String, default: '14:00' },
       checkOutTime: { type: String, default: '11:00' },
       policies: { type: String, default: '' },
@@ -113,6 +117,14 @@ export interface IRoomType extends Document {
    amenities: string[]
    images: string[]
    sizeSqm?: number
+   /**
+    * The nightly price, in USD minor units (CDF/EUR are worked out). One
+    * figure for every future night; a change applies from then on, and orders
+    * already made keep what they were charged.
+    */
+   costPrice: Money
+   sellPrice: Money
+   mealPlan: string
    status: ListingStatus
    createdAt: Date
    updatedAt: Date
@@ -134,6 +146,13 @@ const roomTypeSchema = new Schema<IRoomType>(
       amenities: { type: [String], default: [] },
       images: { type: [String], default: [] },
       sizeSqm: { type: Number, min: 0 },
+      costPrice: moneyField(),
+      sellPrice: moneyField(),
+      mealPlan: {
+         type: String,
+         enum: Object.values(MEAL_PLANS),
+         default: MEAL_PLANS.ROOM_ONLY,
+      },
       status: {
          type: String,
          enum: Object.values(LISTING_STATUS),

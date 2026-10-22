@@ -222,9 +222,11 @@ export const orderLink = (reference: string) => {
    return base ? `${base}/booking/confirmation/${reference}` : ''
 }
 
-/** Money for a template, from minor units. */
+/** Money for a template, from minor units — whole francs for CDF, cents otherwise. */
 export const money = (minor: number, currency = 'USD') =>
-   `${(minor / 100).toFixed(2)} ${currency}`
+   currency === 'CDF'
+      ? `${Math.round(minor)} ${currency}`
+      : `${(minor / 100).toFixed(2)} ${currency}`
 
 /** Dates read by a person, not an ISO string. */
 export const day = (d?: Date | string | null) =>
@@ -265,7 +267,13 @@ export const notifyOrder = async (event: NotificationEvent, orderId: Types.Objec
             order_ref: order.reference,
             amount: money(order.chargedTotal, order.chargedCurrency),
             currency: order.chargedCurrency,
-            departure_date: day(order.travelDate),
+            // A bus or flight leaves at a time the customer chose: say it.
+            departure_date:
+               order.travelDate &&
+               ['BUS', 'FLIGHT'].includes(order.items?.[0]?.vertical) &&
+               order.items?.[0]?.passengers
+                  ? new Date(order.travelDate).toISOString().slice(0, 16).replace('T', ' ')
+                  : day(order.travelDate),
             listing_title: order.items?.[0]?.listingLabel ?? '',
             deadline: day(order.cashDeadline),
             order_link: link,

@@ -6,11 +6,11 @@ import {
    presentHotels,
    presentListing,
    presentListings,
-   RoomTypeWithPrice,
 } from '../../dto/public/catalogue.dto'
-import { Hotel, RatePlan, RoomType } from '../../model/hotelModel'
+import { Hotel, IRoomType, RoomType } from '../../model/hotelModel'
 import { Money } from '../../model/shared.schema'
-import { Listing } from '../../model/listingModel'
+import { isScheduledRoute, Listing } from '../../model/listingModel'
+import { timesOn, weekdayOf } from '../../services/orders/schedule.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -74,6 +74,7 @@ const SORTS: Record<string, Record<string, 1 | -1>> = {
 // A flight's carrier lives on its segments, so an airline name matches there.
 const SEARCHED_ATTRIBUTES = [
    'operator',
+   'destination',
    'segments.carrier',
    'meetingPoint',
    'model',
@@ -116,16 +117,40 @@ export const searchListings = catchAsync(async (req: Request, res: Response) => 
 
    if (str(q.city)) filter.city = rx(str(q.city)!)
 
+   /**
+    * A bus or flight is a route: it leaves from `city` for
+    * `attributes.destination`, on the days its timetable runs. Searching one
+    * is those three things and nothing looser — a route leaving Kinshasa is
+    * not an answer to "going to Kinshasa".
+    */
+   const route = Boolean(vertical && isScheduledRoute(vertical))
+   const day = parseDay(q.from)
+   if (route) {
+      if (str(q.origin)) filter.city = rx(str(q.origin)!)
+      if (str(q.destination)) filter['attributes.destination'] = rx(str(q.destination)!)
+      if (day) {
+         filter.$and = [
+            ...(filter.$and ?? []),
+            {
+               $or: [
+                  { 'attributes.dailyTimes.0': { $exists: true } },
+                  { 'attributes.weeklyTimes.day': weekdayOf(day) },
+               ],
+            },
+         ]
+      }
+   }
+
    // Origin matches the departure city or the first segment's IATA code;
    // destination matches any segment destination, bus stop, or the title.
-   if (str(q.origin)) {
+   if (!route && str(q.origin)) {
       const value = rx(str(q.origin)!)
       filter.$and = [
          ...(filter.$and ?? []),
          { $or: [{ city: value }, { 'attributes.segments.origin': value }] },
       ]
    }
-   if (str(q.destination)) {
+   if (!route && str(q.destination)) {
       const value = rx(str(q.destination)!)
       filter.$and = [
          ...(filter.$and ?? []),
@@ -192,10 +217,17 @@ export const searchListings = catchAsync(async (req: Request, res: Response) => 
 
    // "Recommended" puts anything still in stock above anything sold out. Doing
    // it here rather than in Mongo keeps the sort explainable; the page size is
-   // capped at 60 so the cost is irrelevant.
+   // capped at 60 so the cost is irrelevant. A route has no stock count.
    const items = presentListings(docs as any)
    if ((str(q.sort) ?? 'recommended') === 'recommended') {
-      items.sort((a: any, b: any) => Number(b.available > 0) - Number(a.available > 0))
+      const inStock = (l: any) => l.available === undefined || l.available > 0
+      items.sort((a: any, b: any) => Number(inStock(b)) - Number(inStock(a)))
+   }
+   // Routes by their first departure that day — or, with no day asked, any day.
+   if (route && str(q.sort) === 'departure') {
+      const first = (l: any) =>
+         (day ? timesOn(l.attributes, day) : [...(l.attributes.dailyTimes ?? []), ...(l.attributes.weeklyTimes ?? []).map((w: any) => w.time)].sort())[0] ?? '99:99'
+      items.sort((a: any, b: any) => first(a).localeCompare(first(b)))
    }
 
    sendResponse(res, 200, 'Listings', { items, total, limit })
@@ -227,73 +259,27 @@ export const getListing = catchAsync(async (req: Request, res: Response) => {
 
 /* ------------------------------------------------------------------- hotels */
 
-/**
- * Resolves nightly price and availability for a set of room types over a date
- * range. One aggregation for the whole hotel rather than a query per room —
- * the N+1 version was the first thing that would fall over on a 3G connection.
- */
-async function priceRoomTypes(
-   roomTypeIds: any[],
-   from?: Date,
-   to?: Date
-): Promise<Map<string, { sellPrice: Money; available: number; mealPlan: string }>> {
-   const match: Record<string, any> = { roomType: { $in: roomTypeIds }, blocked: false }
-   if (from && to) match.date = { $gte: from, $lt: to }
+/** The live room types of these hotels, each with its own nightly price. */
+const roomsOf = (hotelIds: any[]) =>
+   RoomType.find({
+      hotel: { $in: hotelIds },
+      status: LISTING_STATUS.PUBLISHED,
+   }).lean({ virtuals: false }) as Promise<IRoomType[]>
 
-   const rows = await RatePlan.aggregate([
-      { $match: match },
-      {
-         $group: {
-            _id: '$roomType',
-            // The nightly rate the customer sees is the cheapest night in the
-            // range; availability is the tightest night, because a stay needs
-            // every night of it. Each currency is minimised independently —
-            // taking $min of the whole sub-document would compare objects.
-            usd: { $min: '$sellPrice.USD' },
-            cdf: { $min: '$sellPrice.CDF' },
-            eur: { $min: '$sellPrice.EUR' },
-            available: { $min: { $subtract: ['$allotment', { $add: ['$sold', '$held'] }] } },
-            mealPlan: { $first: '$mealPlan' },
-            nights: { $sum: 1 },
-         },
-      },
-   ])
-
-   const nightsNeeded =
-      from && to ? Math.max(1, Math.round((+to - +from) / 86400000)) : undefined
-
-   return new Map(
-      rows.map((r: any) => [
-         String(r._id),
-         {
-            sellPrice: asMoney(r),
-            // A room with no rate loaded for one of the nights is not bookable
-            // for that stay, however much allotment the other nights have.
-            available:
-               nightsNeeded && r.nights < nightsNeeded ? 0 : Math.max(r.available ?? 0, 0),
-            mealPlan: r.mealPlan ?? 'ROOM_ONLY',
-         },
-      ])
-   )
-}
-
-/** Aggregation row → Money, dropping currencies with no price loaded. */
-const asMoney = (r: { usd?: number; cdf?: number; eur?: number }): Money => {
-   const out: Money = { USD: r.usd ?? 0 }
-   if (typeof r.cdf === 'number' && r.cdf > 0) out.CDF = r.cdf
-   if (typeof r.eur === 'number' && r.eur > 0) out.EUR = r.eur
-   return out
+/** A hotel with its rooms and its "from" price: the cheapest room per night. */
+const withRooms = (h: any, rooms: IRoomType[]): HotelWithRooms => {
+   const mine = rooms.filter((r) => String(r.hotel) === String(h._id))
+   return { ...h, roomTypes: mine, fromPrice: cheapestRoom(mine)?.sellPrice ?? { USD: 0 } }
 }
 
 /** The base-currency amount, which is what sorting and filtering compare. */
 const base = (m: Money | number | undefined) =>
    typeof m === 'number' ? m : (m?.USD ?? 0)
 
-const parseDate = (v: unknown) => {
+/** A YYYY-MM-DD the search sent, or nothing. */
+const parseDay = (v: unknown) => {
    const s = str(v)
-   if (!s) return undefined
-   const d = new Date(`${s}T00:00:00.000Z`)
-   return Number.isNaN(+d) ? undefined : d
+   return s && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(+new Date(s)) ? s : undefined
 }
 
 /** GET /api/v1/hotels */
@@ -327,37 +313,11 @@ export const searchHotels = catchAsync(async (req: Request, res: Response) => {
    const amenities = str(q.amenities)?.split(',').filter(Boolean)
    if (amenities?.length) filter.amenities = { $all: amenities }
 
-   const from = parseDate(q.from)
-   const to = parseDate(q.to)
    const limit = clampLimit(q.limit)
 
    const hotels = await Hotel.find(filter).limit(limit).lean({ virtuals: false })
-   const hotelIds = hotels.map((h: any) => h._id)
-
-   const rooms = await RoomType.find({
-      hotel: { $in: hotelIds },
-      status: LISTING_STATUS.PUBLISHED,
-   }).lean({ virtuals: false })
-
-   const prices = await priceRoomTypes(
-      rooms.map((r: any) => r._id),
-      from,
-      to
-   )
-
-   const withPrice: HotelWithRooms[] = hotels.map((h: any) => {
-      const mine = rooms.filter((r: any) => String(r.hotel) === String(h._id))
-      const priced = mine.map((r: any) => ({
-         ...r,
-         ...(prices.get(String(r._id)) ?? { sellPrice: 0, available: 0 }),
-      })) as RoomTypeWithPrice[]
-      const cheapest = cheapestRoom(priced)
-      return {
-         ...h,
-         roomTypes: priced,
-         fromPrice: cheapest?.sellPrice ?? { USD: 0 },
-      } as HotelWithRooms
-   })
+   const rooms = await roomsOf(hotels.map((h: any) => h._id))
+   const withPrice = hotels.map((h: any) => withRooms(h, rooms))
 
    const min = int(q.minPrice)
    const max = int(q.maxPrice)
@@ -389,21 +349,7 @@ export const getHotel = catchAsync(async (req: Request, res: Response) => {
    }).lean({ virtuals: false })
    if (!hotel) throw new AppError('Hotel not found', 404)
 
-   const rooms = await RoomType.find({
-      hotel: (hotel as any)._id,
-      status: LISTING_STATUS.PUBLISHED,
-   }).lean({ virtuals: false })
-
-   const prices = await priceRoomTypes(
-      rooms.map((r: any) => r._id),
-      parseDate(req.query.from),
-      parseDate(req.query.to)
-   )
-
-   const priced = rooms.map((r: any) => ({
-      ...r,
-      ...(prices.get(String(r._id)) ?? { sellPrice: { USD: 0 }, available: 0 }),
-   })) as RoomTypeWithPrice[]
+   const rooms = await roomsOf([(hotel as any)._id])
 
    const others = await Hotel.find({
       _id: { $ne: (hotel as any)._id },
@@ -414,41 +360,16 @@ export const getHotel = catchAsync(async (req: Request, res: Response) => {
       .lean({ virtuals: false })
 
    /**
-    * `fromPrice` is computed from room rates, not stored on the hotel — so raw
-    * documents carry none, and `presentHotels` was emitting `{ USD: 0 }` for
-    * every related hotel. The card renders that as "from $0", which on the one
-    * surface whose entire job is the price is worse than showing nothing.
-    *
-    * Same two queries the list endpoint already does, for four documents.
+    * `fromPrice` is computed from room prices, not stored on the hotel — so raw
+    * documents carry none, and a related hotel without it would read "from $0",
+    * which on the one surface whose entire job is the price is worse than
+    * showing nothing.
     */
-   const otherRooms = await RoomType.find({
-      hotel: { $in: others.map((h: any) => h._id) },
-      status: LISTING_STATUS.PUBLISHED,
-   }).lean({ virtuals: false })
-
-   const otherPrices = await priceRoomTypes(
-      otherRooms.map((r: any) => r._id),
-      parseDate(req.query.from),
-      parseDate(req.query.to)
-   )
-
-   const othersWithPrice = others.map((h: any) => {
-      const mine = otherRooms
-         .filter((r: any) => String(r.hotel) === String(h._id))
-         .map((r: any) => ({
-            ...r,
-            ...(otherPrices.get(String(r._id)) ?? { sellPrice: { USD: 0 }, available: 0 }),
-         })) as RoomTypeWithPrice[]
-      return { ...h, roomTypes: mine, fromPrice: cheapestRoom(mine)?.sellPrice ?? { USD: 0 } }
-   })
+   const otherRooms = await roomsOf(others.map((h: any) => h._id))
 
    sendResponse(res, 200, 'Hotel', {
-      hotel: presentHotel({
-         ...(hotel as any),
-         roomTypes: priced,
-         fromPrice: cheapestRoom(priced)?.sellPrice ?? { USD: 0 },
-      }),
-      others: presentHotels(othersWithPrice as any),
+      hotel: presentHotel(withRooms(hotel, rooms)),
+      others: presentHotels(others.map((h: any) => withRooms(h, otherRooms))),
    })
 })
 
@@ -463,10 +384,11 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
    const [cities, carriers, operators, categories, vehicleClasses, hotelAmenities, ranges] =
       await Promise.all([
          Listing.distinct('city', { status: { $in: PUBLIC_STATUSES } }),
-         Listing.distinct('attributes.segments.carrier', { vertical: VERTICALS.FLIGHT }),
-         Listing.distinct('attributes.operator', { vertical: VERTICALS.BUS }),
-         Listing.distinct('attributes.category', { vertical: VERTICALS.CAR }),
-         Listing.distinct('attributes.vehicleClass', { vertical: VERTICALS.BUS }),
+         // On sale only: an inactive route's agency is not a choice anyone can book.
+         Listing.distinct('attributes.operator', { vertical: VERTICALS.FLIGHT, status: { $in: PUBLIC_STATUSES } }),
+         Listing.distinct('attributes.operator', { vertical: VERTICALS.BUS, status: { $in: PUBLIC_STATUSES } }),
+         Listing.distinct('attributes.category', { vertical: VERTICALS.CAR, status: { $in: PUBLIC_STATUSES } }),
+         Listing.distinct('attributes.vehicleClass', { vertical: VERTICALS.BUS, status: { $in: PUBLIC_STATUSES } }),
          Hotel.distinct('amenities', { status: { $in: PUBLIC_STATUSES } }),
          Listing.aggregate([
             { $match: { status: { $in: PUBLIC_STATUSES } } },
@@ -487,13 +409,12 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
       { $match: { status: { $in: PUBLIC_STATUSES } } },
       { $lookup: { from: 'roomtypes', localField: '_id', foreignField: 'hotel', as: 'rt' } },
       { $unwind: '$rt' },
-      { $lookup: { from: 'rateplans', localField: 'rt._id', foreignField: 'roomType', as: 'rp' } },
-      { $unwind: '$rp' },
+      { $match: { 'rt.status': LISTING_STATUS.PUBLISHED, 'rt.sellPrice.USD': { $gt: 0 } } },
       {
          $group: {
             _id: null,
-            min: { $min: '$rp.sellPrice.USD' },
-            max: { $max: '$rp.sellPrice.USD' },
+            min: { $min: '$rt.sellPrice.USD' },
+            max: { $max: '$rt.sellPrice.USD' },
          },
       },
    ])
@@ -535,7 +456,10 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
             Listing.find({
                status: LISTING_STATUS.PUBLISHED,
                vertical,
-               $expr: { $gt: [{ $subtract: ['$quantityTotal', '$quantitySold'] }, 0] },
+               // A route has no seat count; anything else must have stock left.
+               ...(isScheduledRoute(vertical)
+                  ? {}
+                  : { $expr: { $gt: [{ $subtract: ['$quantityTotal', '$quantitySold'] }, 0] } }),
             })
                .sort({ rating: -1, 'sellPrice.USD': 1 })
                .limit(2)
@@ -552,22 +476,8 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
          .lean({ virtuals: false }),
    ])
 
-   const rooms = await RoomType.find({
-      hotel: { $in: hotels.map((h: any) => h._id) },
-      status: LISTING_STATUS.PUBLISHED,
-   }).lean({ virtuals: false })
-   const prices = await priceRoomTypes(rooms.map((r: any) => r._id))
-
-   const hotelsWithPrice: HotelWithRooms[] = hotels.map((h: any) => {
-      const mine = rooms
-         .filter((r: any) => String(r.hotel) === String(h._id))
-         .map((r: any) => ({ ...r, ...(prices.get(String(r._id)) ?? {}) }))
-      return {
-         ...h,
-         roomTypes: mine,
-         fromPrice: cheapestRoom(mine as any)?.sellPrice ?? { USD: 0 },
-      } as HotelWithRooms
-   })
+   const rooms = await roomsOf(hotels.map((h: any) => h._id))
+   const hotelsWithPrice = hotels.map((h: any) => withRooms(h, rooms))
 
    // Interleave so the rail alternates verticals instead of grouping them.
    const deals: any[] = []

@@ -2,8 +2,11 @@ import { NextFunction, Request, Response } from 'express'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LISTING_STATUS, LOCALES, VERTICALS } from '../../constants/domain.constants'
-import { IListing, Listing } from '../../model/listingModel'
-import { Location } from '../../model/locationModel'
+import { IListing, isScheduledRoute, Listing } from '../../model/listingModel'
+import { Location, ServicedRoute } from '../../model/locationModel'
+import { Supplier } from '../../model/supplierModel'
+import { cleanTimetable } from '../../services/orders/schedule.service'
+import { supplierRef } from './supplierController'
 import {
    availableCurrencies,
    baseAmount,
@@ -49,7 +52,6 @@ const LISTING_EDITABLE = [
    'country',
    'images',
    'videoUrl',
-   'supplier',
    'quantityTotal',
    'validFrom',
    'validUntil',
@@ -71,10 +73,16 @@ const listingFields: FieldMap<IListing> = {
    geo: (l) => geoPoint(l.geo),
    images: (l) => l.images,
    videoUrl: (l) => l.videoUrl,
-   supplier: (l) => l.supplier,
+   // The id, whether or not the record was read with its supplier alongside.
+   supplier: (l) => ((l.supplier as any)?._id ?? l.supplier)?.toString(),
+   supplierName: (l) => (l.supplier as any)?.name,
    // Admin surface only — §2.1's canonical example of what must never leak.
    costPrice: (l) => l.costPrice,
    sellPrice: (l) => l.sellPrice,
+   childCostPrice: (l) => (isScheduledRoute(l.vertical) ? l.childCostPrice : undefined),
+   childSellPrice: (l) => (isScheduledRoute(l.vertical) ? l.childSellPrice : undefined),
+   infantCostPrice: (l) => (isScheduledRoute(l.vertical) ? l.infantCostPrice : undefined),
+   infantSellPrice: (l) => (isScheduledRoute(l.vertical) ? l.infantSellPrice : undefined),
    costPriceBase: (l) => baseAmount(l.costPrice),
    sellPriceBase: (l) => baseAmount(l.sellPrice),
    currencies: (l) => availableCurrencies(l.sellPrice),
@@ -131,6 +139,7 @@ export const listListings = catchAsync(async (req: Request, res: Response) => {
          { 'attributes.segments.origin': rx },
          { 'attributes.segments.destination': rx },
          { 'attributes.operator': rx },
+         { 'attributes.destination': rx },
          { 'attributes.make': rx },
          { 'attributes.model': rx },
       ]
@@ -143,7 +152,7 @@ export const listListings = catchAsync(async (req: Request, res: Response) => {
       // One key per column of the panel's listing tables (the properties
       // table shows `sell` as Price). Margin and what is left to sell are
       // worked out, as the list itself works them out for display.
-      sortBy(req.query.sort, {
+      { populate: 'supplier', ...sortBy(req.query.sort, {
          name: 'title.fr',
          city: 'city',
          status: 'status',
@@ -169,7 +178,7 @@ export const listListings = catchAsync(async (req: Request, res: Response) => {
          },
          translations: { value: translatedCount('title', LOCALES) },
          updated: 'updatedAt',
-      })
+      }) }
    )
    return sendResponse(res, 200, 'OK', {
       items: presentList(items as any, listingFields),
@@ -179,7 +188,7 @@ export const listListings = catchAsync(async (req: Request, res: Response) => {
 
 export const getListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const listing = await Listing.findById(req.params.id)
+      const listing = await Listing.findById(req.params.id).populate('supplier')
       if (!listing) return next(new AppError('Listing not found', 404))
       return sendResponse(res, 200, 'OK', {
          listing: presentListing(listing),
@@ -230,6 +239,64 @@ const checkCity = async (city: unknown, vertical?: string) => {
    return null
 }
 
+/** The four bus and flight fares besides the adult one, as sent (undefined = untouched). */
+const FARES = ['childCostPrice', 'childSellPrice', 'infantCostPrice', 'infantSellPrice'] as const
+
+/**
+ * What a save writes besides the plain fields: the supplier (an id from the
+ * list), the extra fares, and for a bus or flight route its timetable — real
+ * times only — and its operator name, which is its agency's name. The
+ * destination of a route is a serviced place, like its departure point.
+ */
+const routeAndSupplier = async (
+   body: any,
+   vertical: string,
+   patch: Record<string, any>,
+   currentDestination?: string
+) => {
+   const supplier = await supplierRef(body.supplier)
+   if (supplier !== undefined) patch.supplier = supplier
+   for (const key of FARES) {
+      if (body[key] !== undefined) patch[key] = parseMoney(body[key])
+   }
+   if (!isScheduledRoute(vertical) || !patch.attributes) return
+   const attributes = { ...patch.attributes, ...cleanTimetable(patch.attributes) }
+   // A route has no single departure: what an old dated offer carried would
+   // only have the nightly job expire it once that day had passed.
+   for (const dated of ['departsAt', 'arrivesAt', 'segments', 'tripType', 'recurrence', 'bookingDeadline']) {
+      delete attributes[dated]
+   }
+   // Like the city: only when it changes — a place switched off later must not
+   // stop the office editing a route's fares.
+   if (attributes.destination && attributes.destination !== currentDestination) {
+      const problem = await checkCity(attributes.destination, vertical)
+      if (problem) throw problem
+   }
+   if (supplier) attributes.operator = (await Supplier.findById(supplier).select('name'))?.name
+   else if (supplier === null) delete attributes.operator
+   patch.attributes = attributes
+}
+
+/**
+ * Once a route is on sale, the search box offers it: the pair of places goes
+ * on the serviced routes, the list it builds its "To" choices from. A pair the
+ * office switched off by hand stays off.
+ */
+const offerRoute = async (l: IListing) => {
+   const destination = (l.attributes as any)?.destination
+   if (!isScheduledRoute(l.vertical) || !destination) return
+   const [from, to] = await Promise.all([
+      Location.findOne({ name: l.city }).select('_id'),
+      Location.findOne({ name: destination }).select('_id'),
+   ])
+   if (!from || !to) return
+   await ServicedRoute.updateOne(
+      { vertical: l.vertical, origin: from._id, destination: to._id },
+      { $setOnInsert: { isActive: true } },
+      { upsert: true }
+   )
+}
+
 export const createListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const { vertical, city } = req.body
@@ -245,20 +312,17 @@ export const createListing = catchAsync(
       }
       const cityProblem = await checkCity(city, vertical)
       if (cityProblem) return next(cityProblem)
-      const listing = await createDoc<IListing>(
-         req,
-         Listing,
-         {
-            ...pick(req.body, LISTING_EDITABLE),
-            vertical,
-            costPrice: parseMoney(req.body.costPrice),
-            sellPrice: parseMoney(req.body.sellPrice),
-            geo: parseGeo(req.body.geo),
-            slug: await uniqueSlug(Listing, [title, city]),
-            createdBy: (req as any).admin._id,
-         },
-         { entityType: ENTITY }
-      )
+      const data: Record<string, any> = {
+         ...pick(req.body, LISTING_EDITABLE),
+         vertical,
+         costPrice: parseMoney(req.body.costPrice),
+         sellPrice: parseMoney(req.body.sellPrice),
+         geo: parseGeo(req.body.geo),
+         slug: await uniqueSlug(Listing, [title, city]),
+         createdBy: (req as any).admin._id,
+      }
+      await routeAndSupplier(req.body, vertical, data)
+      const listing = await createDoc<IListing>(req, Listing, data, { entityType: ENTITY })
       return sendResponse(res, 201, 'Listing created', {
          listing: presentListing(listing),
       })
@@ -267,11 +331,12 @@ export const createListing = catchAsync(
 
 export const updateListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
+      const current = await Listing.findById(req.params.id).select('vertical city attributes.destination')
+      if (!current) return next(new AppError('Listing not found', 404))
       // Only when the city is actually being changed — an edit to the price of
       // a listing in a city that was later deactivated must still be possible.
-      if (req.body.city !== undefined) {
-         const current = await Listing.findById(req.params.id).select('vertical')
-         const problem = await checkCity(req.body.city, current?.vertical)
+      if (req.body.city !== undefined && req.body.city !== current.city) {
+         const problem = await checkCity(req.body.city, current.vertical)
          if (problem) return next(problem)
       }
       /**
@@ -303,6 +368,12 @@ export const updateListing = catchAsync(
       if (req.body.costPrice !== undefined) patch.costPrice = parseMoney(req.body.costPrice)
       if (req.body.sellPrice !== undefined) patch.sellPrice = parseMoney(req.body.sellPrice)
       patch.geo = parseGeo(req.body.geo)
+      await routeAndSupplier(
+         req.body,
+         current.vertical,
+         patch,
+         (current.attributes as any)?.destination
+      )
 
       const listing = await updateDoc<IListing>(req, Listing, req.params.id, patch, {
          entityType: ENTITY,
@@ -365,6 +436,7 @@ export const publishListing = catchAsync(
       if (blockers.length) {
          return next(new AppError(`Cannot publish: ${blockers.join('; ')}`, 400))
       }
+      await offerRoute(listing)
       /**
        * Publishing is also how an inactive or expired listing comes back, so it
        * has to stick. A sell-by date the panel can no longer show or change
@@ -490,119 +562,6 @@ export const duplicateListing = catchAsync(
       })
       return sendResponse(res, 201, 'Listing duplicated', {
          listing: presentListing(listing),
-      })
-   }
-)
-
-const DAY = 86_400_000
-const MAX_RECURRENCE_DAYS = 366
-
-/**
- * §5.2 bus recurrence: "repeat daily/weekly until date", or the same trip gets
- * hand-entered 90 times.
- */
-export const expandRecurrence = catchAsync(
-   async (req: Request, res: Response, next: NextFunction) => {
-      const source = await Listing.findById(req.params.id)
-      if (!source) return next(new AppError('Listing not found', 404))
-
-      const { frequency, daysOfWeek, until } = req.body
-      // Spelled out: anything else used to count as "daily", so `weekly` in
-      // lower case made a departure every day.
-      if (frequency !== 'DAILY' && frequency !== 'WEEKLY') {
-         return next(new AppError('frequency must be DAILY or WEEKLY', 400))
-      }
-      // The last day as written: midnight in Kinshasa is still the day before
-      // in UTC, and read as a moment it dropped that day.
-      const end = writtenDay(until)
-      if (!end) return next(new AppError('until must be a date (YYYY-MM-DD)', 400))
-      const start = anchorDay(source) || new Date(new Date().toISOString().slice(0, 10))
-      const days = Math.round((end.getTime() - start.getTime()) / DAY)
-      if (days < 1) return next(new AppError('until must be after the start', 400))
-      // A year of departures at a time; the bound is also what keeps a date in
-      // the year 275760 from being walked day by day.
-      if (days > MAX_RECURRENCE_DAYS) {
-         return next(new AppError('until is more than a year after the start', 400))
-      }
-      // 0 (Sunday) to 6, as numbers or as digits. Nothing else names a day —
-      // Number(null) is 0, which is how a blank became "every Sunday".
-      const weekdays = (Array.isArray(daysOfWeek) ? daysOfWeek : [])
-         .filter((d) => ['number', 'string'].includes(typeof d) && /^[0-6]$/.test(String(d)))
-         .map(Number)
-
-      const wanted: Date[] = []
-      for (let n = 1; n <= days; n++) {
-         const date = new Date(start.getTime() + n * DAY)
-         if (frequency === 'WEEKLY' && !weekdays.includes(date.getUTCDay())) continue
-         wanted.push(date)
-      }
-      if (!wanted.length) {
-         return next(new AppError('That pattern produces no additional dates', 400))
-      }
-      // Asked again with a later "until", only the new days are added: the
-      // ones already made keep whatever was changed on them since. Known by
-      // what they were repeated from — archived ones aside, which are gone as
-      // far as the office is concerned and may be made again.
-      const family = source.repeatOf ?? source._id
-      const made = await Listing.find({
-         $or: [{ repeatOf: family }, { _id: family }],
-         status: { $ne: LISTING_STATUS.ARCHIVED },
-         validFrom: { $in: wanted },
-      }).select('validFrom')
-      const have = new Set(made.map((l) => l.validFrom!.getTime()))
-      const missing = wanted.filter((date) => !have.has(date.getTime()))
-      if (!missing.length) {
-         return next(new AppError('Those departures already exist', 409))
-      }
-
-      const base = source.toObject() as any
-      const title = resolveLocalized(source.title)
-      const copies = []
-      for (const date of missing) {
-         const copy = { ...base }
-         delete copy._id
-         delete copy.__v
-         delete copy.id
-         delete copy.createdAt
-         delete copy.updatedAt
-         // Each departure is published by hand, not by the source's schedule.
-         delete copy.publishAt
-         delete copy.unpublishAt
-         // Earned by the original, not by a departure nobody has taken yet.
-         delete copy.rating
-         copy.reviewCount = 0
-         copy.createdBy = (req as any).admin._id
-         copy.repeatOf = family
-         copy.attributes = shiftTimes(base.attributes, date.getTime() - start.getTime())
-         copy.validFrom = date
-         copy.validUntil = source.validUntil
-            ? new Date(date.getTime() + (source.validUntil.getTime() - start.getTime()))
-            : undefined
-         // Title, city and day — with a number after it when another service
-         // of the same name already runs there that day.
-         copy.slug = await uniqueSlug(Listing, [
-            title,
-            source.city,
-            date.toISOString().slice(0, 10),
-         ])
-         copy.status = LISTING_STATUS.INACTIVE
-         copy.quantitySold = 0
-         copy.quantityHeld = 0
-         copies.push(copy)
-      }
-      const created = await Listing.insertMany(copies)
-
-      // One audit entry for the batch — 90 rows of noise would bury the signal.
-      await recordAudit(req, {
-         action: AUDIT_ACTIONS.CREATE,
-         entityType: ENTITY,
-         entityId: source._id.toString(),
-         after: { expandedFrom: source.slug, created: created.length, frequency, until },
-      })
-
-      return sendResponse(res, 201, `${created.length} departure(s) created`, {
-         created: created.length,
-         alreadyThere: wanted.length - missing.length,
       })
    }
 )

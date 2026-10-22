@@ -1,6 +1,5 @@
 import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
-import { Types } from 'mongoose'
 import {
    BASE_CURRENCY,
    FULFILMENT_STATUS,
@@ -17,12 +16,9 @@ import { Order } from '../../model/orderModel'
 import { Restaurant } from '../../model/restaurantModel'
 import { PolicyVersion, getSettings } from '../../model/settingsModel'
 import {
-   commitListing,
-   commitStay,
    holdListing,
-   holdStay,
+   holdsStock,
    releaseListing,
-   releaseStay,
 } from '../../services/orders/inventory.service'
 import {
    PricedItem,
@@ -107,11 +103,24 @@ const normalisePhone = (raw: string) => {
 }
 
 /** Undo every hold taken so far. Used when a later step fails. */
-const rollback = async (taken: { item: PricedItem; nights: Types.ObjectId[] }[]) => {
-   for (const t of taken) {
-      if (t.nights.length) await releaseStay(t.nights, t.item.quantity)
-      else await releaseListing(t.item.listingId, t.item.quantity)
-   }
+const rollback = async (taken: PricedItem[]) => {
+   for (const item of taken) await releaseListing(item.listingId, item.quantity)
+}
+
+/** What a refused line means, said so the website and the app can translate it. */
+const LINE_REFUSALS: Record<string, [string, string]> = {
+   INVALID_DEPARTURE: [
+      'That departure is not available. Choose another date or time.',
+      'DEPARTURE_UNAVAILABLE',
+   ],
+   INVALID_PASSENGERS: [
+      'At least one adult must travel, with no more babies than adults.',
+      'INVALID_PASSENGERS',
+   ],
+   INVALID_BAGGAGE: [
+      'Enter the cabin and checked baggage weights, in kg.',
+      'BAGGAGE_REQUIRED',
+   ],
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +344,10 @@ export const createOrder = catchAsync(
             return next(new AppError('This listing is enquiry-only', 400))
          }
          if (code === 'INVALID_QUANTITY') return next(new AppError('Invalid quantity', 400))
+         if (LINE_REFUSALS[code]) {
+            const [message, refusal] = LINE_REFUSALS[code]
+            return next(new AppError(message, 400, refusal))
+         }
          // §BUG-008: bad/reversed/past/over-long dates are a 400, not a 409.
          if (code === 'INVALID_DATES') {
             return next(new AppError('Those dates are not valid', 400))
@@ -405,39 +418,21 @@ export const createOrder = catchAsync(
       }
 
       // --- 2. Hold the stock ------------------------------------------------
-      const taken: { item: PricedItem; nights: Types.ObjectId[] }[] = []
+      /**
+       * Only cars and activities are sold from a counted stock. Hotel rooms
+       * and bus and flight seats are not limited (the office's decision: the
+       * hotel or agency confirms), and a kitchen either can cook a dish today
+       * or it cannot, which `isAvailable` already answered when it was priced.
+       */
+      const taken: PricedItem[] = []
       for (const item of priced) {
-         /**
-          * Dishes have no allotment to hold. A kitchen is not a seat map: it
-          * either can cook the dish today or it cannot, which `isAvailable`
-          * already answered when the line was priced. Calling holdListing here
-          * would decrement a counter that does not exist and fail every
-          * restaurant order.
-          */
-         if (item.vertical === VERTICALS.RESTAURANT) {
-            taken.push({ item, nights: [] })
-            continue
+         if (!holdsStock(item.vertical)) continue
+         const ok = await holdListing(item.listingId, item.quantity)
+         if (!ok) {
+            await rollback(taken)
+            return next(new AppError('That just sold out', 409))
          }
-         if (item.vertical === VERTICALS.HOTEL && item.roomTypeId) {
-            const { ok, held } = await holdStay(
-               item.roomTypeId,
-               item.startDate!,
-               item.endDate!,
-               item.quantity
-            )
-            if (!ok) {
-               await rollback(taken)
-               return next(new AppError('Those dates just sold out', 409))
-            }
-            taken.push({ item, nights: held })
-         } else {
-            const ok = await holdListing(item.listingId, item.quantity)
-            if (!ok) {
-               await rollback(taken)
-               return next(new AppError('That just sold out', 409))
-            }
-            taken.push({ item, nights: [] })
-         }
+         taken.push(item)
       }
 
       try {
@@ -539,6 +534,10 @@ export const createOrder = catchAsync(
                startDate: p.startDate,
                endDate: p.endDate,
                quantity: p.quantity,
+               passengers: p.passengers,
+               baggage: p.baggage,
+               origin: p.origin,
+               destination: p.destination,
                unitSellPrice: p.unitSellPrice,
                unitCostPrice: p.unitCostPrice,
                lineTotal: p.lineTotal,
@@ -577,15 +576,6 @@ export const createOrder = catchAsync(
             travelDate: priced.find((p) => p.startDate)?.startDate,
             timeline: [{ event: 'ORDER_CREATED', detail: `channel=WEB method=${method}` }],
          })
-
-         // The held rate-plan ids live on the order so payment can commit
-         // exactly what was held, without recomputing the date range.
-         if (taken.some((t) => t.nights.length)) {
-            await Order.updateOne(
-               { _id: order._id },
-               { $set: { heldRatePlanIds: taken.flatMap((t) => t.nights) } }
-            )
-         }
 
          /**
           * Only an order collected off-platform is told about at creation.
