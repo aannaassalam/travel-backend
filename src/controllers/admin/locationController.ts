@@ -6,6 +6,7 @@ import { Hotel } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
 import { Location, ServicedRoute } from '../../model/locationModel'
 import { Restaurant } from '../../model/restaurantModel'
+import { geoPoint, parseGeo } from '../../model/shared.schema'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -49,6 +50,8 @@ const present = (l: any) => ({
    isActive: l.isActive,
    sortOrder: l.sortOrder,
    image: l.image,
+   // The city centre, where a transfer's place search looks first.
+   geo: geoPoint(l.geo),
 })
 
 export const listLocations = catchAsync(async (req: Request, res: Response) => {
@@ -126,6 +129,7 @@ export const createLocation = catchAsync(
          isActive: req.body?.isActive !== false,
          sortOrder: Number(req.body?.sortOrder) || 0,
          image: req.body?.image,
+         geo: parseGeo(req.body?.geo) ?? undefined,
       })
 
       await recordAudit(req, {
@@ -187,6 +191,8 @@ export const updateLocation = catchAsync(
       if (req.body?.iata !== undefined) {
          location.iata = req.body.iata ? String(req.body.iata).toUpperCase() : undefined
       }
+      // `{ lat, lng }` sets the pin, `null` clears it; anything else is refused.
+      if (req.body?.geo !== undefined) location.geo = parseGeo(req.body.geo) ?? undefined
       await location.save()
 
       // Carried along with the rename, or everything sold there would be left

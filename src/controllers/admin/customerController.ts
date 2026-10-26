@@ -11,6 +11,7 @@ import { Order } from '../../model/orderModel'
 import { getSettings } from '../../model/settingsModel'
 import { DeviceToken } from '../../model/deviceTokenModel'
 import { PhoneVerification } from '../../model/phoneVerificationModel'
+import { Review } from '../../model/reviewModel'
 import { deleteDoc, paginate, sortBy, updateDoc } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
@@ -193,6 +194,8 @@ export const deleteCustomer = catchAsync(
       await Promise.all([
          DeviceToken.deleteMany({ customer: customer._id }),
          PhoneVerification.deleteMany({ phone: customer.phone }),
+         // Their reviews stay, and keep counting, but no longer carry their name.
+         Review.updateMany({ customer: customer._id }, { $set: { authorName: 'Client' } }),
       ])
       return sendResponse(res, 200, 'Customer deleted', {})
    }

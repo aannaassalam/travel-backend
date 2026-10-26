@@ -22,5 +22,8 @@ assert.strictEqual(smsAfterPush(E.ORDER_CANCELLED, false), true)
 // Ordinary events: push-only when the push delivered, SMS only as fallback.
 assert.strictEqual(smsAfterPush(E.ORDER_CONFIRMED, true), false, 'confirmed must be push-only when delivered')
 assert.strictEqual(smsAfterPush(E.ORDER_CONFIRMED, false), true)
+// A cash ride's booking text takes ORDER_CONFIRMED's place and goes the same way.
+assert.strictEqual(smsAfterPush(E.TRANSFER_BOOKED, true), false, 'transfer booking must be push-only when delivered')
+assert.strictEqual(smsAfterPush(E.TRANSFER_BOOKED, false), true, 'transfer booking must SMS when push failed')
 
 console.log('checkSmsRouting: OK — cash reminders are push-first; only cancellations are SMS-always')

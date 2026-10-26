@@ -1,5 +1,7 @@
+import { BASE_CURRENCY } from '../../constants/domain.constants'
 import { paymentAwaited } from '../../services/payments/maxicash.service'
 import { FieldMap, present } from '../../utils/present'
+import { presentPublicRide } from './transfer.dto'
 
 /**
  * Public order serialiser. §14.3 rule 2: no shared base object with the admin
@@ -13,17 +15,20 @@ import { FieldMap, present } from '../../utils/present'
  * reference, and nothing else.
  */
 
-/** Minor units, per currency, the shape the site's money helpers expect. */
-const money = (usd: number, currency?: string, charged?: number) => {
-   const out: Record<string, number> = { USD: usd ?? 0 }
-   if (currency && currency !== 'USD' && typeof charged === 'number') out[currency] = charged
+/**
+ * Per currency, the shape the site's money helpers expect: the francs (the
+ * base), and what was charged when that is another currency, in its cents.
+ */
+const money = (base: number, currency?: string, charged?: number) => {
+   const out: Record<string, number> = { [BASE_CURRENCY]: base ?? 0 }
+   if (currency && currency !== BASE_CURRENCY && typeof charged === 'number') out[currency] = charged
    return out
 }
 
-const itemFields = (currency: string, orderTotalUsd: number, chargedTotal: number) => {
-   /** Split the charged total across lines in proportion to their USD share. */
-   const share = (lineUsd: number) =>
-      orderTotalUsd ? Math.round((lineUsd / orderTotalUsd) * chargedTotal) : 0
+const itemFields = (currency: string, orderTotalBase: number, chargedTotal: number) => {
+   /** Split the charged total across lines in proportion to their francs. */
+   const share = (lineBase: number) =>
+      orderTotalBase ? Math.round((lineBase / orderTotalBase) * chargedTotal) : 0
    const map: FieldMap<any> = {
       vertical: (i) => i.vertical,
       listingId: (i) => i.listingId?.toString(),
@@ -36,6 +41,12 @@ const itemFields = (currency: string, orderTotalUsd: number, chargedTotal: numbe
          ['BUS', 'FLIGHT'].includes(i.vertical) && i.passengers
             ? i.startDate?.toISOString?.().slice(11, 16)
             : undefined,
+      /** A car hired by the hour: the hours, and the pick-up and return times, "HH:MM". */
+      rentalHours: (i) => i.rentalHours,
+      pickupTime: (i) =>
+         i.vertical === 'CAR' && i.rentalHours ? i.startDate?.toISOString?.().slice(11, 16) : undefined,
+      returnTime: (i) =>
+         i.vertical === 'CAR' && i.rentalHours ? i.endDate?.toISOString?.().slice(11, 16) : undefined,
       origin: (i) => i.origin,
       destination: (i) => i.destination,
       quantity: (i) => i.quantity,
@@ -139,11 +150,14 @@ export const currentDocuments = (documents: any[] = []) => {
    return [...latest.values()]
 }
 
-export const presentOrder = (o: any) => {
-   const currency = o.chargedCurrency ?? 'USD'
-   const items = (o.items ?? []).map((i: any) =>
-      present(i, itemFields(currency, o.total ?? 0, o.chargedTotal ?? 0))
-   )
+/** `ride`: the order's Ride when it is a transfer (callers load it; see transfers/rideLookup). */
+export const presentOrder = (o: any, ride?: any) => {
+   const currency = o.chargedCurrency ?? BASE_CURRENCY
+   const items = (o.items ?? []).map((i: any) => ({
+      ...present(i, itemFields(currency, o.total ?? 0, o.chargedTotal ?? 0)),
+      // A transfer line carries its ride: the points, the status, the driver once assigned.
+      ...(ride && i.vertical === 'TRANSFER' ? { ride: presentPublicRide(ride) } : {}),
+   }))
    return {
       reference: o.reference,
       // Populated only when the caller asked for it; absent otherwise.

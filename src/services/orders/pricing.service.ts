@@ -6,7 +6,9 @@ import { MenuItem, Restaurant } from '../../model/restaurantModel'
 import { baseAmount, Money } from '../../model/shared.schema'
 import { currentRates, inAllCurrencies } from '../fx.service'
 import { nightsBetween } from './inventory.service'
+import { carRates, parseRental, planBlocks } from './rental.service'
 import { scheduledDeparture } from './schedule.service'
+import { priceTransferItem, RideDraft } from '../transfers/quote.service'
 
 /**
  * Server-side re-pricing.
@@ -18,9 +20,9 @@ import { scheduledDeparture } from './schedule.service'
  * public client in either direction — so the only place it can come from is a
  * lookup like this one.
  *
- * Prices are stored in USD; the other currencies of a line are worked out from
- * the office's exchange rates (fx.service), per unit and then multiplied, so a
- * CDF total is exactly the CDF prices the customer was shown added up.
+ * Prices are stored in francs; the other currencies of a line are worked out
+ * from the office's exchange rates (fx.service), per unit and then multiplied,
+ * so a USD total is exactly the USD prices the customer was shown added up.
  */
 
 export interface Passengers {
@@ -45,6 +47,8 @@ export interface RequestedItem {
    passengers?: Partial<Passengers>
    /** Flights: what the customer will carry, in kg. */
    baggage?: Partial<Baggage>
+   /** A ride with a driver: the quote request, re-priced here (transfers/quote.service). */
+   transfer?: Record<string, unknown>
 }
 
 export interface PricedItem {
@@ -65,6 +69,10 @@ export interface PricedItem {
    baggage?: Baggage
    origin?: string
    destination?: string
+   /** A car hired by the hour: pick-up to return. Absent when it was booked by the day. */
+   rentalHours?: number
+   /** A transfer: what its Ride is created from, under `listingId`, once the order exists. */
+   transfer?: RideDraft
 }
 
 const label = (value: any): string =>
@@ -89,10 +97,10 @@ const validateDates = (startRaw: string, endRaw: string) => {
    if ((end - start) / DAY_MS > MAX_SPAN_DAYS) throw new Error('INVALID_DATES')
 }
 
-/** A USD price times a count, in every currency it converts to. */
-const scaled = (usdMinor: number, times: number): Record<string, number> => {
+/** A franc price times a count, in every currency it converts to. */
+const scaled = (cdf: number, times: number): Record<string, number> => {
    const out: Record<string, number> = {}
-   for (const [c, v] of Object.entries(inAllCurrencies(usdMinor))) out[c] = (v ?? 0) * times
+   for (const [c, v] of Object.entries(inAllCurrencies(cdf))) out[c] = (v ?? 0) * times
    return out
 }
 
@@ -176,6 +184,40 @@ const priceRouteItem = (listing: any, item: RequestedItem): PricedItem => {
    }
 }
 
+/**
+ * A car: from a pick-up time to a return time, at the cheapest mix of its
+ * rates that covers the hours (rental.service). Each block is converted on its
+ * own and the blocks added up, so a USD total is the USD prices shown, added
+ * up. A booking sent as days only (older app builds) is priced the same way,
+ * on whole days, and keeps no hours: its views go on showing dates.
+ */
+const priceCarItem = (listing: any, item: RequestedItem): PricedItem => {
+   if (!item.startDate || !item.endDate) throw new Error('INVALID_DATES')
+   const rental = parseRental(item.startDate, item.endDate)
+   const rates = carRates(listing)
+   const blocks = planBlocks(rates.map((r) => ({ hours: r.hours, base: r.sell })), rental.hours).map(
+      (b) => ({ ...b, rate: rates.find((r) => r.hours === b.hours)! })
+   )
+   if (!blocks.length) throw new Error('ITEM_UNAVAILABLE')
+   // Per car, for the whole rental.
+   const sell = blocks.reduce((s, b) => s + b.rate.sell * b.count, 0)
+   const cost = blocks.reduce((s, b) => s + b.rate.cost * b.count, 0)
+   return {
+      vertical: listing.vertical,
+      listingId: listing._id,
+      listingLabel: label(listing.title),
+      startDate: rental.start,
+      endDate: rental.end,
+      quantity: item.quantity,
+      unitSellPrice: sell,
+      unitCostPrice: cost,
+      lineTotal: sell * item.quantity,
+      lineCost: cost * item.quantity,
+      lineTotalByCurrency: added(...blocks.map((b) => scaled(b.rate.sell, b.count * item.quantity))),
+      rentalHours: rental.timed ? rental.hours : undefined,
+   }
+}
+
 export const priceListingItem = async (item: RequestedItem): Promise<PricedItem> => {
    const listing = await Listing.findOne({
       _id: item.listingId,
@@ -191,8 +233,9 @@ export const priceListingItem = async (item: RequestedItem): Promise<PricedItem>
    const attrs = listing.attributes as any
    const departs = attrs?.departsAt ?? attrs?.segments?.[0]?.departsAt
    if (departs && new Date(departs).getTime() < Date.now()) throw new Error('ITEM_UNAVAILABLE')
+   if (listing.vertical === VERTICALS.CAR) return priceCarItem(listing, item)
 
-   // §BUG-008: a dated product (car hire, dated activity) carries a range — guard it.
+   // §BUG-008: a dated product (a dated activity) carries a range — guard it.
    if (item.startDate && item.endDate) validateDates(item.startDate, item.endDate)
 
    // Nights for a dated product, otherwise a single unit. Same helper the
@@ -305,6 +348,7 @@ export const priceMenuItem = async (item: RequestedItem): Promise<PricedItem> =>
 export const priceItem = (item: RequestedItem) => {
    if (item.vertical === VERTICALS.HOTEL) return priceStayItem(item)
    if (item.vertical === VERTICALS.RESTAURANT) return priceMenuItem(item)
+   if (item.vertical === VERTICALS.TRANSFER) return priceTransferItem(item)
    return priceListingItem(item)
 }
 
@@ -329,25 +373,45 @@ export const priceDelivery = (zone: any, restaurantLabel: string): PricedItem =>
 
 /**
  * What the customer is actually charged: the lines in the currency they chose,
- * at today's rate — or USD when that currency has no rate set. The rate goes
- * on the order (`fxRate`, what 1 USD was worth) so a later change of rate never
- * moves a booking already made.
+ * at today's rate — or francs when that currency has no rate set. The rate goes
+ * on the order (`fxRate`, francs per 1 unit of the charged currency) so a later
+ * change of rate never moves a booking already made.
  */
 export const settle = (items: PricedItem[], requested: string) => {
-   const totalUsd = items.reduce((s, i) => s + i.lineTotal, 0)
+   const totalBase = items.reduce((s, i) => s + i.lineTotal, 0)
    const everyLineHasIt =
       requested !== BASE_CURRENCY &&
       CURRENCIES.includes(requested as any) &&
       items.every((i) => typeof i.lineTotalByCurrency[requested] === 'number')
 
    if (!everyLineHasIt) {
-      return { chargedCurrency: BASE_CURRENCY, chargedTotal: totalUsd, fxRate: 1, totalUsd }
+      return { chargedCurrency: BASE_CURRENCY, chargedTotal: totalBase, fxRate: 1, totalBase }
    }
    const chargedTotal = items.reduce((s, i) => s + i.lineTotalByCurrency[requested], 0)
    return {
       chargedCurrency: requested,
       chargedTotal,
       fxRate: currentRates()[requested as Currency] ?? 1,
-      totalUsd,
+      totalBase,
    }
+}
+
+/** A ride's cash is handed to the driver at the end of it: its deadline waits a day past the pick-up. */
+export const TRANSFER_CASH_GRACE_MS = 24 * 3600_000
+
+/**
+ * When an unpaid cash booking lapses (the cash-deadline job cancels it then):
+ * the office's hold from now — or, for a ride, a day after the pick-up time
+ * and never before the ride, since the fare is paid to the driver at the end
+ * of it, not brought to a counter first. Pure; the items as priced or stored.
+ */
+export const cashDeadlineFor = (
+   items: { vertical?: string; startDate?: Date | string | null }[],
+   holdTtlCashHours: number,
+   now = Date.now()
+) => {
+   const ride = items.find((i) => i.vertical === VERTICALS.TRANSFER && i.startDate)
+   return ride
+      ? new Date(new Date(ride.startDate!).getTime() + TRANSFER_CASH_GRACE_MS)
+      : new Date(now + holdTtlCashHours * 3600_000)
 }

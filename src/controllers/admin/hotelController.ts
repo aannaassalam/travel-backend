@@ -66,7 +66,7 @@ const ROOMTYPE_EDITABLE = [
 ] as const
 
 /**
- * A room type's nightly price, as sent: USD only, for every future night. The
+ * A room type's nightly price, as sent: francs only, for every future night. The
  * same rule as any listing — a cost, and a sell price above it — because a
  * room sold below cost is a loss on every night of every stay.
  */
@@ -76,8 +76,8 @@ const roomPrices = (body: any, patch: Record<string, any>) => {
    if (patch.sellPrice === undefined && patch.costPrice === undefined) return patch
    const sell = baseAmount(patch.sellPrice)
    const cost = baseAmount(patch.costPrice)
-   if (sell <= 0) throw new AppError('Enter the nightly sell price in USD', 400)
-   if (cost <= 0) throw new AppError('Enter the nightly cost price in USD', 400)
+   if (sell <= 0) throw new AppError('Enter the nightly sell price in francs (FC)', 400)
+   if (cost <= 0) throw new AppError('Enter the nightly cost price in francs (FC)', 400)
    if (sell <= cost) throw new AppError('The sell price must be above the cost price', 400)
    return patch
 }
@@ -183,7 +183,7 @@ export const publishHotel = catchAsync(
       const priced = await RoomType.exists({
          hotel: hotel._id,
          status: LISTING_STATUS.PUBLISHED,
-         'sellPrice.USD': { $gt: 0 },
+         'sellPrice.CDF': { $gt: 0 },
       })
       if (!priced) blockers.push('Add at least one room type with its nightly price')
       if (blockers.length) {
@@ -247,6 +247,8 @@ export const duplicateHotel = catchAsync(
       // Earned by the original, not by a copy nobody has stayed in.
       delete copy.rating
       copy.reviewCount = 0
+      // Its reviews stay with the original, and so does the rating they make.
+      delete copy.reviewStats
       copy.name = req.body.name || {
          ...source.name,
          fr: `${resolveLocalized(source.name)} (copie)`,

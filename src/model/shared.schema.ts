@@ -94,30 +94,31 @@ export const translationStatus = (value: Localized | string | undefined) => {
 export type Money = Partial<Record<Currency, number>>
 
 /**
- * A price, in integer minor units of USD.
+ * A price, in whole Congolese francs.
  *
- * Prices are entered in USD only. CDF and EUR are worked out at read time from
- * the office's exchange rates (services/fx.service), so changing a rate moves
- * every price at once and nobody retypes a catalogue. What a customer pays is
- * fixed when their order is made: the order keeps its converted total and the
- * rate it used.
+ * Prices are entered in francs only. USD and EUR are worked out at read time
+ * from the office's exchange rates (services/fx.service), so changing a rate
+ * moves every price at once and nobody retypes a catalogue. What a customer
+ * pays is fixed when their order is made: the order keeps its converted total
+ * and the rate it used.
  *
- * Stored as `{ USD }` so it stays the shape every reader already takes. CDF and
- * EUR typed before conversion existed may still be on old records; nothing
- * reads them, and the next save of that record drops them.
+ * Stored as `{ CDF }`. `USD` and `EUR` stay in the schema, unread: prices were
+ * dollars until 2026-10-24, and a record the conversion (scripts/migrateCdfBase)
+ * has not reached yet must not lose its dollar figure when this code saves it.
+ * A price is always written whole, so a new one never carries them.
  *
- * USD is the reporting base: margin, spoilage and every dashboard total sum it.
+ * CDF is the reporting base: margin, spoilage and every dashboard total sum it.
  */
 export const moneyField = (opts: { required?: boolean } = {}) => ({
-   USD: {
+   CDF: {
       type: Number,
       min: 0,
       required: opts.required
-         ? [true, 'A USD price is required — it is the reporting base']
+         ? [true, 'A price in francs (CDF) is required — it is the reporting base']
          : false,
       default: opts.required ? undefined : 0,
    },
-   CDF: { type: Number, min: 0 },
+   USD: { type: Number, min: 0 },
    EUR: { type: Number, min: 0 },
 })
 
@@ -127,21 +128,28 @@ export const baseAmount = (money: Money | number | undefined): number => {
    return money?.[BASE_CURRENCY as Currency] ?? 0
 }
 
-/** Currencies this record can be sold in: USD, and each one with a rate set. */
+/** Currencies this record can be sold in: CDF, and each one with a rate set. */
 export const availableCurrencies = (money: Money | number | undefined): Currency[] =>
    baseAmount(money) > 0 ? (Object.keys(inAllCurrencies(money)) as Currency[]) : []
 
 /**
- * Form input to a stored price: the USD amount only (any other currency sent
- * is ignored — it is worked out, never typed). A blank box is "not set", never
- * 0, so `{}` comes back for it.
+ * Form input to a stored price: whole francs only (any other currency sent is
+ * ignored — it is worked out, never typed). A blank box is "not set", never 0,
+ * so `{}` comes back for it.
+ *
+ * A dollar price with no francs is a panel still open from before prices were
+ * in francs: refused, because read as blank it would wipe the price it meant to set.
  */
 export const parseMoney = (input: any): Money | undefined => {
    if (input === undefined || input === null) return undefined
    const v = typeof input === 'number' ? input : input[BASE_CURRENCY]
-   if (v === '' || v === null || v === undefined) return {}
+   const blank = v === '' || v === null || v === undefined
+   if (blank && ![undefined, null, ''].includes(input.USD)) {
+      throw new AppError('Prices are now entered in Congolese francs: reload the page and enter the price in FC', 400)
+   }
+   if (blank) return {}
    const n = Number(v)
-   return Number.isNaN(n) ? {} : { USD: Math.round(n) }
+   return Number.isNaN(n) ? {} : { CDF: Math.round(n) }
 }
 
 // ---------------------------------------------------------------------------

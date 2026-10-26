@@ -1,8 +1,10 @@
+import { VERTICALS } from '../../constants/domain.constants'
 import { IHotel, IRoomType } from '../../model/hotelModel'
 import { IListing, isScheduledRoute } from '../../model/listingModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
-import { geoPoint, Localized, Money } from '../../model/shared.schema'
+import { baseAmount, geoPoint, Localized, Money } from '../../model/shared.schema'
 import { inAllCurrencies } from '../../services/fx.service'
+import { carRates } from '../../services/orders/rental.service'
 import { FieldMap, present, presentList } from '../../utils/present'
 
 /** Only the locales that actually have text — blanks are noise on the wire. */
@@ -15,10 +17,20 @@ const localized = (value: Localized | string | undefined) => {
 }
 
 /**
- * A price in every currency on offer: the USD stored, and CDF and EUR worked
+ * A price in every currency on offer: the francs stored, and USD and EUR worked
  * out at the office's rates (fx.service). A currency with no rate is left out.
  */
 const pickMoney = (value: Money | number | undefined) => inAllCurrencies(value)
+
+/**
+ * The rating and review count the public sees: approved customer reviews only
+ * (`reviewStats`, see reviews.service). The stored `rating`/`reviewCount` came
+ * from seeds and imports, not customers, so they are not published. Absent
+ * until an item has its first approved review.
+ */
+type Reviewed = { reviewStats?: { rating?: number; count?: number } }
+const ratingOf = (d: Reviewed) => (d.reviewStats?.count ? d.reviewStats.rating : undefined)
+const reviewCountOf = (d: Reviewed) => d.reviewStats?.count || undefined
 
 /**
  * Public catalogue DTOs. §14.3 rule 2: nothing here is shared with src/dto/admin
@@ -46,13 +58,22 @@ const listingFields: FieldMap<IListing> = {
    // The address of the uploaded video, in our own storage (see `videoField`).
    videoUrl: (l) => l.videoUrl,
    /**
-    * Per-currency integer minor units, converted from USD. Sell only: cost
-    * never leaves the admin surface. For a bus or flight, the adult fare.
+    * Per currency: whole francs as stored, and USD and EUR in cents, worked
+    * out from them. Sell only: cost never leaves the admin surface. For a bus
+    * or flight, the adult fare.
     */
    sellPrice: (l) => pickMoney(l.sellPrice),
    /** Bus and flight fares for a child of 2 to 12 and a baby under 2. */
    childPrice: (l) => (isScheduledRoute(l.vertical) ? pickMoney(l.childSellPrice) : undefined),
    infantPrice: (l) => (isScheduledRoute(l.vertical) ? pickMoney(l.infantSellPrice) : undefined),
+   /**
+    * A car's prices for 1, 6, 12 and 24 hours, the ones it is offered at,
+    * shortest first. The 24-hour one is `sellPrice`. Sell only, like the rest.
+    */
+   rentalRates: (l) =>
+      l.vertical === VERTICALS.CAR
+         ? carRates(l).map((r) => ({ hours: r.hours, price: pickMoney(r.sell) }))
+         : undefined,
    /**
     * §4.5 availability, computed. The raw sold/held columns stay internal.
     * Absent for a bus or flight route: its seats are not counted.
@@ -63,8 +84,8 @@ const listingFields: FieldMap<IListing> = {
          : Math.max((l.quantityTotal ?? 0) - (l.quantitySold ?? 0) - (l.quantityHeld ?? 0), 0),
    validFrom: (l) => l.validFrom?.toISOString(),
    validUntil: (l) => l.validUntil?.toISOString(),
-   rating: (l) => (l as any).rating,
-   reviewCount: (l) => (l as any).reviewCount,
+   rating: ratingOf,
+   reviewCount: reviewCountOf,
    attributes: (l) => {
       const a = (l.attributes as any)?.toObject
          ? (l.attributes as any).toObject()
@@ -134,8 +155,8 @@ const hotelFields: FieldMap<HotelWithRooms> = {
    checkInTime: (h) => h.checkInTime,
    checkOutTime: (h) => h.checkOutTime,
    policies: (h) => h.policies,
-   rating: (h) => (h as any).rating,
-   reviewCount: (h) => (h as any).reviewCount,
+   rating: ratingOf,
+   reviewCount: reviewCountOf,
    fromPrice: (h) => pickMoney(h.fromPrice),
    roomTypes: (h) => presentList(h.roomTypes ?? [], roomTypeFields),
 }
@@ -178,7 +199,7 @@ const deliveryZoneFields: FieldMap<any> = {
    id: (z) => z._id.toString(),
    name: (z) => z.name,
    fee: (z) => pickMoney(z.fee),
-   minOrder: (z) => (z.minOrder?.USD ? pickMoney(z.minOrder) : undefined),
+   minOrder: (z) => (baseAmount(z.minOrder) > 0 ? pickMoney(z.minOrder) : undefined),
    etaMinutes: (z) => z.etaMinutes,
 }
 
@@ -202,8 +223,8 @@ const restaurantFields: FieldMap<RestaurantWithMenu> = {
    openingHours: (r) => r.openingHours,
    prepTimeMinutes: (r) => r.prepTimeMinutes,
    phone: (r) => r.phone,
-   rating: (r) => (r as any).rating,
-   reviewCount: (r) => (r as any).reviewCount,
+   rating: ratingOf,
+   reviewCount: reviewCountOf,
    // Inactive zones are not offered, so they are not published either.
    deliveryZones: (r) =>
       presentList((r.deliveryZones ?? []).filter((z: any) => z.isActive), deliveryZoneFields),

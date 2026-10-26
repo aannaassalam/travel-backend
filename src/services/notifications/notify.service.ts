@@ -7,6 +7,8 @@ import {
 } from '../../model/enquiryModel'
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
+import { Ride } from '../../model/rideModel'
+import { rideVars } from '../transfers/rideVars'
 import { sendSms, smsConfigured } from './sms.service'
 import { activeDevices, pushConfigured, sendPush } from './push.service'
 
@@ -222,10 +224,14 @@ export const orderLink = (reference: string) => {
    return base ? `${base}/booking/confirmation/${reference}` : ''
 }
 
-/** Money for a template, from minor units — whole francs for CDF, cents otherwise. */
-export const money = (minor: number, currency = 'USD') =>
+/**
+ * Money for a template, from minor units: "28 500 FC" for francs (grouped with
+ * plain spaces — a no-break space is not GSM-7 and would halve the length an
+ * SMS can carry), "60.00 USD" otherwise.
+ */
+export const money = (minor: number, currency = 'CDF') =>
    currency === 'CDF'
-      ? `${Math.round(minor)} ${currency}`
+      ? `${String(Math.round(minor)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} FC`
       : `${(minor / 100).toFixed(2)} ${currency}`
 
 /** Dates read by a person, not an ISO string. */
@@ -247,9 +253,26 @@ export const notifyOrder = async (event: NotificationEvent, orderId: Types.Objec
       if (!customer?.phone) return 0
 
       const link = orderLink(order.reference)
+      // A transfer: its ride says where, with whom and in what.
+      const ride =
+         order.items?.[0]?.vertical === 'TRANSFER'
+            ? await Ride.findOne({ order: order._id })
+                 .populate('driver', 'name phone')
+                 .populate('vehicle', 'make model color plate')
+            : null
+      const rv = ride ? rideVars(ride, ride.driver as any, ride.vehicle as any) : null
+
+      // A cash ride is paid to the driver at the end of it, so its booking
+      // text is not "pay at the office by…". The usual text when the office
+      // has no TRANSFER_BOOKED template yet: a guest must still get the link.
+      const booked =
+         event === NOTIFICATION_EVENTS.ORDER_CONFIRMED &&
+         ride &&
+         order.paymentMethod === 'CASH' &&
+         (await NotificationTemplate.exists({ event: NOTIFICATION_EVENTS.TRANSFER_BOOKED, isActive: true }))
 
       return await notify({
-         event,
+         event: booked ? NOTIFICATION_EVENTS.TRANSFER_BOOKED : event,
          recipient: customer.phone,
          /**
           * The tracking link is appended when the template does not already
@@ -267,16 +290,30 @@ export const notifyOrder = async (event: NotificationEvent, orderId: Types.Objec
             order_ref: order.reference,
             amount: money(order.chargedTotal, order.chargedCurrency),
             currency: order.chargedCurrency,
-            // A bus or flight leaves at a time the customer chose: say it.
+            // A bus or flight leaves at a time the customer chose, and a car
+            // hired by the hour is collected at one: say it.
             departure_date:
                order.travelDate &&
-               ['BUS', 'FLIGHT'].includes(order.items?.[0]?.vertical) &&
-               order.items?.[0]?.passengers
+               ((['BUS', 'FLIGHT'].includes(order.items?.[0]?.vertical) && order.items?.[0]?.passengers) ||
+                  (order.items?.[0]?.vertical === 'CAR' && order.items?.[0]?.rentalHours))
                   ? new Date(order.travelDate).toISOString().slice(0, 16).replace('T', ' ')
                   : day(order.travelDate),
             listing_title: order.items?.[0]?.listingLabel ?? '',
             deadline: day(order.cashDeadline),
             order_link: link,
+            // A transfer leaves at a time, from a place, with a named driver.
+            ...(rv
+               ? {
+                    departure_date: rv.departure_date,
+                    pickup: rv.pickup,
+                    dropoff: rv.dropoff,
+                    driver_name: rv.driver_name,
+                    driver_phone: rv.driver_phone,
+                    vehicle: rv.vehicle,
+                    customer_phone: rv.customer_phone,
+                    ride_link: link,
+                 }
+               : {}),
          },
       })
    } catch (err) {

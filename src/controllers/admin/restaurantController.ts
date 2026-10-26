@@ -256,6 +256,8 @@ export const duplicateRestaurant = catchAsync(
       // Earned by the original, not by a copy that has served nobody.
       delete copy.rating
       copy.reviewCount = 0
+      // Its reviews stay with the original, and so does the rating they make.
+      delete copy.reviewStats
       copy.name = {
          ...source.name,
          fr: `${resolveLocalized(source.name)} (copie)`,
@@ -373,7 +375,7 @@ export const publishMenuItem = catchAsync(
 
       const blockers: string[] = []
       if (!dish.name?.fr) blockers.push('French name is required')
-      if (!(baseAmount(dish.sellPrice) > 0)) blockers.push('A USD sell price is required')
+      if (!(baseAmount(dish.sellPrice) > 0)) blockers.push('A sell price in francs is required')
       if (blockers.length) {
          return next(new AppError(`Cannot publish: ${blockers.join('; ')}`, 400))
       }

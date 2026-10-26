@@ -63,11 +63,11 @@ export interface ISettings extends Document {
    enabledCurrencies: string[]
    baseCurrency: string
    /**
-    * What 1 USD is worth in each other currency. Prices are entered in USD
-    * only; every CDF and EUR price is worked out from these (fx.service).
-    * Unset means that currency is not offered.
+    * How many francs 1 USD and 1 EUR are worth, as the office types them.
+    * Prices are entered in francs only; every USD and EUR price is worked out
+    * from these (fx.service). Unset means that currency is not offered.
     */
-   exchangeRates: { CDF?: number; EUR?: number }
+   exchangeRates: { USD?: number; EUR?: number }
    /** §5.1: price edits beyond this percentage need typed confirmation. */
    priceChangeGuardPercent: number
    /** §12 inventory rules. */
@@ -76,13 +76,24 @@ export interface ISettings extends Document {
    maxConcurrentCashHolds: number
    /** §14.4: PII exports capped per period; raising the cap itself alerts. */
    customerExportRowCap: number
-   /** §4.2: at-risk window in days. */
+   /**
+    * §4.2: at-risk window in days. Nothing reads it since the dashboard dropped
+    * its unsold-stock figures (2026-10-23), so Settings no longer shows it; the
+    * field stays so stored documents need no migration if it comes back.
+    */
    atRiskWindowDays: number
    /** §7: first contact within this many working hours. */
    enquirySlaHours: number
    /** §14.5: purge passport data this many days after travel. */
    passportRetentionDays: number
    maintenanceMode: boolean
+   /**
+    * Transfers. Where a security alert from a ride is texted (E.164); blank
+    * means the primary office's phone. The detour factor turns a straight line
+    * into a road estimate when the routing service cannot be reached.
+    */
+   transferAlertPhone: string
+   transferDetourFactor: number
    updatedAt: Date
 }
 
@@ -97,7 +108,7 @@ const settingsSchema = new Schema<ISettings>(
       enabledCurrencies: { type: [String], default: [...CURRENCIES] },
       baseCurrency: { type: String, default: BASE_CURRENCY },
       exchangeRates: {
-         CDF: { type: Number, min: 0.000001, max: 10_000_000 },
+         USD: { type: Number, min: 0.000001, max: 10_000_000 },
          EUR: { type: Number, min: 0.000001, max: 10_000_000 },
       },
       // Bounded + required: updateSettings copies the body onto the doc and
@@ -112,6 +123,8 @@ const settingsSchema = new Schema<ISettings>(
       enquirySlaHours: { type: Number, default: 4, required: true, min: 1, max: 720 },
       passportRetentionDays: { type: Number, default: 90, required: true, min: 1, max: 3650 },
       maintenanceMode: { type: Boolean, default: false },
+      transferAlertPhone: { type: String, default: '', trim: true, maxlength: 20 },
+      transferDetourFactor: { type: Number, default: 1.3, required: true, min: 1, max: 3 },
    },
    { timestamps: true }
 )

@@ -40,9 +40,9 @@ const byMenuOrder = (a: any, b: any) =>
 const fromPrices = async (ids: any[]) => {
    const rows = await MenuItem.aggregate([
       { $match: { restaurant: { $in: ids }, status: PUBLIC_STATUS, isAvailable: true } },
-      { $group: { _id: '$restaurant', usd: { $min: '$sellPrice.USD' } } },
+      { $group: { _id: '$restaurant', cdf: { $min: '$sellPrice.CDF' } } },
    ])
-   return new Map(rows.map((r: any) => [String(r._id), { USD: r.usd ?? 0 }]))
+   return new Map(rows.map((r: any) => [String(r._id), { CDF: r.cdf ?? 0 }]))
 }
 
 /**
@@ -82,7 +82,10 @@ export const searchRestaurants = catchAsync(async (req: Request, res: Response) 
    const limit = Math.min(Math.max(Number(req.query.limit) || 24, 1), 60)
 
    const sort: Record<string, 1 | -1> =
-      req.query.sort === 'rating' ? { rating: -1 } : { rating: -1, createdAt: -1 }
+      // Customers' approved reviews only, never the legacy `rating`.
+      req.query.sort === 'rating'
+         ? { 'reviewStats.rating': -1 }
+         : { 'reviewStats.rating': -1, createdAt: -1 }
 
    const [items, total] = await Promise.all([
       Restaurant.find(filter).sort(sort).limit(limit),
@@ -92,7 +95,7 @@ export const searchRestaurants = catchAsync(async (req: Request, res: Response) 
    const prices = await fromPrices(items.map((r) => r._id))
    const withPrice = items.map((r) => {
       const doc = r.toObject() as any
-      doc.fromPrice = prices.get(String(r._id)) ?? { USD: 0 }
+      doc.fromPrice = prices.get(String(r._id)) ?? { CDF: 0 }
       return doc
    })
 
@@ -124,7 +127,7 @@ export const getRestaurant = catchAsync(async (req: Request, res: Response, next
    const doc = restaurant.toObject() as any
    doc.menu = menu
    doc.fromPrice = (await fromPrices([restaurant._id])).get(String(restaurant._id)) ?? {
-      USD: 0,
+      CDF: 0,
    }
 
    return sendResponse(res, 200, 'Restaurant', { restaurant: presentRestaurant(doc) })

@@ -75,7 +75,13 @@ const orderItemSchema = new Schema(
       /** The route's departure point and destination, as sold. */
       origin: String,
       destination: String,
-      /** Minor units, USD base. Snapshotted so later price edits never
+      /**
+       * A car hired by the hour: the hours from pick-up (`startDate`) to return
+       * (`endDate`), both times as written. Absent on a car booked by the day
+       * (older app builds), whose dates are days.
+       */
+      rentalHours: { type: Number, min: 1 },
+      /** Whole francs, the base. Snapshotted so later price edits never
        *  retroactively change what a customer was charged. */
       unitSellPrice: { type: Number, required: true },
       unitCostPrice: { type: Number, required: true },
@@ -94,9 +100,8 @@ const orderItemSchema = new Schema(
  * every price on an order is: the office re-drawing its zones next month must
  * not retroactively change what this customer agreed to pay.
  *
- * `fee` is the USD base that reporting sums; `feeCharged` is that fee in the
- * currency actually charged, taken from the typed per-currency price rather
- * than converted (§5).
+ * `fee` is the base (francs) that reporting sums; `feeCharged` is that fee in
+ * the currency actually charged, converted per unit like the food (§5).
  */
 const deliverySchema = new Schema(
    {
@@ -163,11 +168,26 @@ export interface IOrder extends Document {
    customer: Types.ObjectId
    items: any
    travellers: any
+   /**
+    * The base when the order was made: 'USD' on one from before francs, also
+    * after scripts/migrateCdfBase turned its amounts into francs. Not what
+    * `total` is in (that is the base, `baseCurrency`), nor the customer's
+    * choice (`chargedCurrency`).
+    */
    currency: string
-   /** Minor units. `total` is USD base; `chargedTotal` is what they actually paid. */
+   /**
+    * 'CDF' on every order made since prices are francs. Absent on an order
+    * still in USD cents, which is how scripts/migrateCdfBase finds those.
+    */
+   baseCurrency?: string
+   /**
+    * `total` is whole francs (the base); `chargedTotal` is what they actually
+    * paid, in the minor units of `chargedCurrency` (cents for USD and EUR).
+    */
    total: number
    chargedCurrency: string
    chargedTotal: number
+   /** Francs per 1 unit of `chargedCurrency` when the order was made (1 for CDF). */
    fxRate: number
    paymentMethod: string
    /** The instrument: MOBILE_MONEY | CARD | WALLET | BANK_TRANSFER | CASH. */
@@ -261,6 +281,10 @@ const orderSchema = new Schema<IOrder>(
       items: { type: [orderItemSchema], default: [] },
       travellers: { type: [travellerSchema], default: [] },
       currency: { type: String, default: BASE_CURRENCY },
+      // No default on purpose: one would be filled into an order still in
+      // dollars the first time this code saved it, and the conversion would
+      // then pass it by.
+      baseCurrency: { type: String, enum: CURRENCIES },
       total: { type: Number, required: true, default: 0 },
       chargedCurrency: { type: String, enum: CURRENCIES, default: BASE_CURRENCY },
       chargedTotal: { type: Number, default: 0 },

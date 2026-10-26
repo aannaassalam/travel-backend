@@ -37,9 +37,8 @@ import {
 /**
  * A delivery zone the restaurant serves, with the fee charged to reach it.
  *
- * Per-currency like every other price (§5): the fee is added to the order total
- * and settled in the same currency as the food, so a fee typed only in USD is
- * what stops an order settling in CDF. Never a conversion.
+ * In francs like every other price (§5): the fee is added to the order total
+ * and settled in the same currency as the food, converted per unit like it.
  */
 const deliveryZoneSchema = new Schema(
    {
@@ -75,6 +74,8 @@ export interface IRestaurant extends Document {
    phone?: string
    rating?: number
    reviewCount?: number
+   /** Worked out from approved customer reviews (reviews.service); what the public sees. */
+   reviewStats?: { rating: number; count: number }
    createdBy?: Types.ObjectId
    createdAt: Date
    updatedAt: Date
@@ -107,8 +108,10 @@ const restaurantSchema = new Schema<IRestaurant>(
       deliveryZones: { type: [deliveryZoneSchema], default: [] },
       prepTimeMinutes: { type: Number, min: 0, default: 30 },
       phone: { type: String, trim: true },
+      // Legacy, never published any more: `reviewStats` is the customers' own.
       rating: { type: Number, min: 0, max: 5 },
       reviewCount: { type: Number, min: 0, default: 0 },
+      reviewStats: { rating: Number, count: Number },
       createdBy: { type: Schema.Types.ObjectId, ref: 'AdminUser' },
    },
    { timestamps: true, optimisticConcurrency: true }

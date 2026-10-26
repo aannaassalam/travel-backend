@@ -50,7 +50,10 @@ const orderListFields: FieldMap<IOrder> = {
    paymentStatus: (o) => o.paymentStatus,
    fulfilmentStatus: (o) => o.fulfilmentStatus,
    total: (o) => o.total,
-   currency: (o) => o.currency,
+   // What `total` is in, which the panel labels it with: francs on an order
+   // made or converted since prices are francs (`baseCurrency`). The stored
+   // `currency` stays 'USD' on a dollar-era order even once it is converted.
+   currency: (o) => o.baseCurrency ?? o.currency,
    chargedTotal: (o) => o.chargedTotal,
    chargedCurrency: (o) => o.chargedCurrency,
    paymentMethod: (o) => o.paymentMethod,
@@ -108,12 +111,16 @@ const orderDetailFields = (suppliers?: Map<string, SupplierContact>): FieldMap<I
          listingLabel: i.listingLabel,
          startDate: i.startDate,
          endDate: i.endDate,
+         // A car hired by the hour; its dates then carry the pick-up and return times.
+         rentalHours: i.rentalHours ?? undefined,
          quantity: i.quantity,
          // A bus or flight: the route, the seats by fare and (flights) the bags.
          origin: i.origin,
          destination: i.destination,
          passengers: i.passengers ?? undefined,
          baggage: i.baggage ?? undefined,
+         // A transfer line names its ride, so the booking page can link to it.
+         rideId: i.vertical === 'TRANSFER' ? i.listingId?.toString() : undefined,
          supplier: suppliers?.get(String(i.listingId)),
          unitSellPrice: i.unitSellPrice,
          // Admin surface only — §2.1's exact example of what must never leak.

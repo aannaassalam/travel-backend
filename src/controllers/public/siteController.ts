@@ -1,5 +1,7 @@
 import { Request, Response } from 'express'
+import { BASE_CURRENCY, CURRENCIES } from '../../constants/domain.constants'
 import { getSettings } from '../../model/settingsModel'
+import { currentRates } from '../../services/fx.service'
 import { getSiteContent, SITE_SECTION_NAMES } from '../../model/siteContentModel'
 import { geoPoint } from '../../model/shared.schema'
 import catchAsync from '../../utils/catchAsync'
@@ -75,3 +77,21 @@ export const getSiteContentPublic = catchAsync(async (req: Request, res: Respons
       content: only ? { [only]: content[only] } : content,
    })
 })
+
+/**
+ * GET /api/v1/site/currencies
+ *
+ * What the website and the app may offer in their currency picker: CDF, and
+ * each currency the office has set a rate for — `rates` is how many francs 1
+ * unit of it is worth. Without a rate the catalogue carries no price in that
+ * currency, so a client offering it could only invent one (they did: the app's
+ * guess was a hundred times out). From memory (fx.service), so it costs no query.
+ */
+export const getSiteCurrencies = (_req: Request, res: Response) => {
+   const rates = currentRates()
+   return sendResponse(res, 200, 'OK', {
+      base: BASE_CURRENCY,
+      offered: CURRENCIES.filter((c) => c === BASE_CURRENCY || rates[c] !== undefined),
+      rates,
+   })
+}

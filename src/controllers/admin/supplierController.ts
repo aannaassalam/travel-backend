@@ -107,7 +107,7 @@ export const updateSupplier = catchAsync(async (req: Request, res: Response) => 
    const supplier = await updateDoc<ISupplier>(req, Supplier, req.params.id, body, {
       entityType: ENTITY,
    })
-   // A route shows its agency's name as the operator: a rename shows there too.
+   // A route or a car shows its supplier's name as the operator: a rename shows there too.
    if (body.name !== undefined) await syncOperatorName(supplier._id, supplier.name)
    return sendResponse(res, 200, 'Supplier saved', { supplier: present(supplier, supplierFields) })
 })
@@ -132,12 +132,15 @@ export const deleteSupplier = catchAsync(
    }
 )
 
-/** The operator name a bus or flight route shows is its agency's name, kept in step. */
+/**
+ * The operator name a bus or flight route shows is its agency's name, and a
+ * car's is its rental company's: kept in step.
+ */
 export const syncOperatorName = (supplierId: Types.ObjectId, name: string) =>
    Listing.updateMany(
       {
          supplier: supplierId,
-         vertical: { $in: [VERTICALS.BUS, VERTICALS.FLIGHT] },
+         vertical: { $in: [VERTICALS.BUS, VERTICALS.FLIGHT, VERTICALS.CAR] },
          'attributes.operator': { $ne: name },
       },
       { $set: { 'attributes.operator': name }, $inc: { __v: 1 } }

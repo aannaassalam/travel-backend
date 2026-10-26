@@ -240,5 +240,13 @@ export const MIN_PASSWORD_LENGTH = 8
 
 export const hashPassword = (plain: string) => bcrypt.hash(plain, 12)
 
-export const verifyPassword = (plain: string, hash?: string) =>
-   hash ? bcrypt.compare(plain, hash) : Promise.resolve(false)
+/**
+ * A record with no hash (unknown number, no password set yet) is compared
+ * against a hash nobody knows the password to, so refusing it costs the same
+ * time as a wrong password: an instant "no" would tell whoever is typing
+ * numbers which ones are ours. Made once, on first use.
+ */
+let noHash: Promise<string> | undefined
+
+export const verifyPassword = async (plain: string, hash?: string) =>
+   bcrypt.compare(plain, hash || (await (noHash ??= bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12))))

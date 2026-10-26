@@ -44,12 +44,17 @@ export interface IEnquiry extends Document {
    message: string
    listingId?: Types.ObjectId
    listingLabel?: string
+   /** A bus or flight request: the day and time asked for ("YYYY-MM-DD", "HH:MM"), and who travels. */
+   trip?: { date: string; time: string; adults: number; children: number; infants: number }
    source: string
    /** §7: SLA timer runs from creation until first contact. */
    firstContactAt?: Date
    lossReason?: string
    contactLog: any
+   /** Whole francs, like every price. */
    quotedAmount?: number
+   /** 'CDF' on every quote made since prices are francs; absent on one still in USD cents. */
+   quotedCurrency?: string
    quoteExpiresAt?: Date
    convertedOrder?: Types.ObjectId
    createdAt: Date
@@ -82,6 +87,19 @@ const enquirySchema = new Schema<IEnquiry>(
       message: { type: String, default: '' },
       listingId: Schema.Types.ObjectId,
       listingLabel: String,
+      trip: {
+         type: new Schema(
+            {
+               date: String,
+               time: String,
+               adults: { type: Number, min: 1 },
+               children: { type: Number, min: 0 },
+               infants: { type: Number, min: 0 },
+            },
+            { _id: false }
+         ),
+         default: undefined,
+      },
       source: { type: String, default: 'WEB' },
       firstContactAt: Date,
       lossReason: { type: String, enum: Object.values(LOSS_REASONS) },
@@ -96,8 +114,13 @@ const enquirySchema = new Schema<IEnquiry>(
          ],
          default: [],
       },
-      /** Minor units, USD base — same money model as everything else. */
+      /** Whole francs — same money model as everything else. */
       quotedAmount: Number,
+      /**
+       * No default on purpose: a quote typed in USD cents before 2026-10-24 has
+       * none, which is how scripts/migrateCdfBase knows to convert it once.
+       */
+      quotedCurrency: String,
       quoteExpiresAt: Date,
       convertedOrder: { type: Schema.Types.ObjectId, ref: 'Order' },
    },
@@ -133,6 +156,17 @@ export const NOTIFICATION_EVENTS = {
    ORDER_CANCELLED: 'ORDER_CANCELLED',
    ENQUIRY_RECEIVED: 'ENQUIRY_RECEIVED',
    QUOTE_SENT: 'QUOTE_SENT',
+   /** Transfers: to the customer as their ride moves, to the driver when given one, to the office on an alert. */
+   /** A cash ride's booking text: the fare is paid to the driver, not at a counter (replaces ORDER_CONFIRMED). */
+   TRANSFER_BOOKED: 'TRANSFER_BOOKED',
+   TRANSFER_ASSIGNED: 'TRANSFER_ASSIGNED',
+   TRANSFER_STARTED: 'TRANSFER_STARTED',
+   TRANSFER_COMPLETED: 'TRANSFER_COMPLETED',
+   DRIVER_RIDE_ASSIGNED: 'DRIVER_RIDE_ASSIGNED',
+   /** To the driver a ride was taken off (cancelled, unassigned, given to another): do not go. */
+   DRIVER_RIDE_REMOVED: 'DRIVER_RIDE_REMOVED',
+   DRIVER_WELCOME: 'DRIVER_WELCOME',
+   TRANSFER_ALERT: 'TRANSFER_ALERT',
 } as const
 
 /** §11: a documented variable list, validated on save. */
@@ -150,6 +184,18 @@ export const TEMPLATE_VARIABLES = [
     * is the authorisation - no account, no password, nothing to remember.
     */
    'order_link',
+   /** Transfers: the ride as the customer, the driver and the office each see it. */
+   'driver_name',
+   'driver_phone',
+   'vehicle',
+   'pickup',
+   'dropoff',
+   'customer_phone',
+   /** The driver portal's ride page for a driver; the admin's ride page for the office. */
+   'ride_link',
+   'alert_by',
+   /** A Google Maps link to where the alert was raised, or "non partagée". */
+   'alert_location',
 ] as const
 
 /**

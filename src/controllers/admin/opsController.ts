@@ -23,7 +23,7 @@ import { byWords, customerNameSort, deleteDoc, paginate, sortBy } from '../../se
 import { recordAudit } from '../../services/auditLog.service'
 import { money, notify, pushBody, render } from '../../services/notifications/notify.service'
 import { sendSms, smsConfigured } from '../../services/notifications/sms.service'
-import { refreshRates } from '../../services/fx.service'
+import { francRateProblem, ratesInFrancs, refreshRates } from '../../services/fx.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { dayRange } from '../../utils/dayRange'
@@ -47,10 +47,23 @@ const enquiryFields: FieldMap<any> = {
    message: (e) => e.message,
    listingId: (e) => e.listingId?.toString(),
    listingLabel: (e) => e.listingLabel,
+   // A bus or flight request: the day, the time and who travels.
+   trip: (e) =>
+      e.trip
+         ? {
+              date: e.trip.date,
+              time: e.trip.time,
+              adults: e.trip.adults,
+              children: e.trip.children,
+              infants: e.trip.infants,
+           }
+         : undefined,
    source: (e) => e.source,
    firstContactAt: (e) => e.firstContactAt,
    lossReason: (e) => e.lossReason,
    quotedAmount: (e) => e.quotedAmount,
+   // 'CDF' on every quote in francs; absent on one still in US cents (not converted yet).
+   quotedCurrency: (e) => e.quotedCurrency,
    quoteExpiresAt: (e) => e.quoteExpiresAt,
    contactLog: (e) =>
       e.contactLog
@@ -208,8 +221,9 @@ const applyStage = (enquiry: any, stage: string, detail: string | null | undefin
             customer_name: enquiry.customerName,
             order_ref: enquiry.reference,
             listing_title: enquiry.listingLabel ?? '',
-            amount: enquiry.quotedAmount ? money(enquiry.quotedAmount) : '',
-            currency: 'USD',
+            // In francs, like every amount the office types.
+            amount: enquiry.quotedAmount ? money(enquiry.quotedAmount, 'CDF') : '',
+            currency: 'CDF',
          },
       })
    }
@@ -302,7 +316,7 @@ export const quoteEnquiry = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const { amount, expiresAt } = req.body
       if (!Number.isInteger(amount) || amount <= 0) {
-         return next(new AppError('amount must be a whole number of cents above zero', 400))
+         return next(new AppError('amount must be a whole number of francs above zero', 400))
       }
       let expiry: Date | undefined
       if (expiresAt !== undefined && expiresAt !== null && expiresAt !== '') {
@@ -317,8 +331,11 @@ export const quoteEnquiry = catchAsync(
 
       const before = enquiry.toObject()
       enquiry.quotedAmount = amount
+      // Says the quote is francs, so the one-off conversion never takes it for cents.
+      enquiry.quotedCurrency = 'CDF'
       enquiry.quoteExpiresAt = expiry
-      const line = `Quoted USD ${(amount / 100).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+      // Francs read as FC, the way the panel writes every franc amount.
+      const line = `Quoted ${amount.toLocaleString('en-US')}\u00a0FC`
       enquiry.contactLog.push({
          at: new Date(),
          kind: 'QUOTE',
@@ -382,7 +399,8 @@ export const listPayments = catchAsync(async (req: Request, res: Response) => {
          method: o.paymentMethod,
          status: o.paymentStatus,
          amount: o.total,
-         currency: o.currency,
+         // `amount`'s currency, as on the order list (dto/admin/order.dto).
+         currency: o.baseCurrency ?? o.currency,
          chargedTotal: o.chargedTotal,
          chargedCurrency: o.chargedCurrency,
          fxRate: o.fxRate,
@@ -541,17 +559,19 @@ const settingsFields: FieldMap<any> = {
    defaultLocale: (s) => s.defaultLocale,
    enabledCurrencies: (s) => s.enabledCurrencies,
    baseCurrency: (s) => s.baseCurrency,
-   /** What 1 USD is worth in each: every CDF and EUR price is worked out from these. */
-   exchangeRates: (s) => ({ CDF: s.exchangeRates?.CDF, EUR: s.exchangeRates?.EUR }),
+   /** Francs per 1 USD and per 1 EUR: every USD and EUR price is worked out from these. */
+   exchangeRates: (s) => ratesInFrancs(s.get('exchangeRates')),
    priceChangeGuardPercent: (s) => s.priceChangeGuardPercent,
    holdTtlOnlineMinutes: (s) => s.holdTtlOnlineMinutes,
    holdTtlCashHours: (s) => s.holdTtlCashHours,
    maxConcurrentCashHolds: (s) => s.maxConcurrentCashHolds,
    customerExportRowCap: (s) => s.customerExportRowCap,
-   atRiskWindowDays: (s) => s.atRiskWindowDays,
    enquirySlaHours: (s) => s.enquirySlaHours,
    passportRetentionDays: (s) => s.passportRetentionDays,
    maintenanceMode: (s) => s.maintenanceMode,
+   /** Transfers: where a ride's security alert is texted (blank = the primary office), and the road estimate factor. */
+   transferAlertPhone: (s) => s.transferAlertPhone ?? '',
+   transferDetourFactor: (s) => s.transferDetourFactor ?? 1.3,
    updatedAt: (s) => s.updatedAt,
    // Payment provider credentials are WRITE-ONLY (§12, §14.5) — enterable,
    // never displayed after saving. Only whether one is set is exposed.
@@ -637,20 +657,24 @@ export const parseOffices = (input: unknown) => {
 }
 
 /**
- * The exchange rates from the form: what 1 USD is worth, a positive number per
- * currency, or blank to stop offering that currency.
+ * The exchange rates from the form: how many francs 1 USD and 1 EUR are worth,
+ * 100 to 100 000 each (see francRateProblem), or blank to stop offering that currency.
  *
  * A rate moves every price on the site at once, so a change bigger than the
  * price guard (the same percentage a single price edit is held to) is refused
  * until it is sent again with `confirmRateChange` — 285 typed for 2 850 would
- * sell everything in francs at a tenth of its price.
+ * sell everything in dollars at ten times its price.
  */
-const parseRates = (raw: unknown, current: any, guardPercent: number, confirmed: boolean) => {
-   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new AppError('exchangeRates must be { CDF, EUR }', 400)
+export const parseRates = (raw: unknown, current: any, guardPercent: number, confirmed: boolean) => {
+   // `CDF` is the shape from before prices were in francs (francs per dollar,
+   // euros per dollar): a panel still open from then is not saved over the new.
+   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || 'CDF' in raw) {
+      throw new AppError('exchangeRates must be { USD, EUR }: francs per 1 USD and per 1 EUR', 400)
    }
    const out: Record<string, number | undefined> = {}
-   for (const c of ['CDF', 'EUR'] as const) {
+   // Every big move, named in one question, so one confirmation saves both.
+   const moves: string[] = []
+   for (const c of ['USD', 'EUR'] as const) {
       const v = (raw as any)[c]
       if (v === undefined) {
          out[c] = current?.[c]
@@ -660,19 +684,19 @@ const parseRates = (raw: unknown, current: any, guardPercent: number, confirmed:
          out[c] = undefined
          continue
       }
+      const problem = francRateProblem(c, v)
+      if (problem) throw new AppError(problem, 400)
       const n = Number(v)
-      if (!Number.isFinite(n) || n <= 0 || n > 10_000_000) {
-         throw new AppError(`The ${c} rate must be a positive number: what 1 USD is worth in ${c}`, 400)
-      }
       const was = Number(current?.[c])
       if (!confirmed && was > 0 && (Math.abs(n - was) / was) * 100 > guardPercent) {
-         throw new AppError(
-            `1 USD = ${n} ${c} changes the rate by more than ${guardPercent}% (it was ${was}). Every ${c} price moves with it. Save again to confirm.`,
-            409,
-            'RATE_CHANGE_CONFIRM'
+         moves.push(
+            `1 ${c} = ${n.toLocaleString('en-GB')} FC changes the rate by more than ${guardPercent}% (it was ${was.toLocaleString('en-GB')} FC). Every ${c} price moves with it`
          )
       }
       out[c] = n
+   }
+   if (moves.length) {
+      throw new AppError(`${moves.join('. ')}. Save again to confirm.`, 409, 'RATE_CHANGE_CONFIRM')
    }
    return out
 }
@@ -684,10 +708,14 @@ export const updateSettings = catchAsync(async (req: Request, res: Response) => 
 
    // Validated here, because the copy below writes whatever the body carries.
    if (req.body.offices !== undefined) req.body.offices = parseOffices(req.body.offices)
+   // An alert goes to this number by SMS: it has to be one Twilio can dial.
+   if (req.body.transferAlertPhone !== undefined) {
+      req.body.transferAlertPhone = officePhone(req.body.transferAlertPhone, 'Security alert phone')
+   }
    if (req.body.exchangeRates !== undefined) {
       req.body.exchangeRates = parseRates(
          req.body.exchangeRates,
-         settings.exchangeRates,
+         ratesInFrancs(settings.get('exchangeRates')),
          settings.priceChangeGuardPercent,
          req.body.confirmRateChange === true
       )
@@ -866,8 +894,8 @@ export const sendTestNotification = catchAsync(
       const vars = {
          customer_name: admin.name || 'Test',
          order_ref: 'FA-TEST0-00000',
-         amount: '100.00',
-         currency: 'USD',
+         amount: money(285_000, 'CDF'),
+         currency: 'CDF',
          departure_date: new Date().toISOString().slice(0, 10),
          listing_title: 'Test listing',
          deadline: new Date(Date.now() + 86400000).toISOString().slice(0, 10),

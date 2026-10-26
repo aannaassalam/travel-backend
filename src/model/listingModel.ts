@@ -5,6 +5,7 @@ import {
    VERTICALS,
    Vertical,
 } from '../constants/domain.constants'
+import { OPTIONAL_CAR_RATES } from '../services/orders/rental.service'
 import { hasTimetable } from '../services/orders/schedule.service'
 import {
    baseAmount,
@@ -84,8 +85,14 @@ const attributesSchema = new Schema(
       make: String,
       model: String,
       year: Number,
+      /**
+       * The car type, a code the panel picks: SUV, BERLINE, BUS, PICKUP,
+       * MINIBUS, TRUCK, LUXE. No enum: one typed as text before the list
+       * existed must not stop the car being saved.
+       */
       category: String,
       transmission: { type: String, enum: ['MANUAL', 'AUTOMATIC'] },
+      /** Unset when the office has not said: not the same as self-drive. */
       withDriver: Boolean,
       deposit: Number,
       mileageLimit: String,
@@ -147,9 +154,10 @@ export interface IListing extends Document {
    /** Who it is bought from; for a bus or flight route, its travel agency. */
    supplier?: Types.ObjectId
    /**
-    * USD minor units (CDF/EUR are worked out — see moneyField). Cost is
+    * Whole francs (USD/EUR are worked out — see moneyField). Cost is
     * required except for Properties, which have no cost of goods. For a bus or
-    * flight these are the adult fare (12 and over).
+    * flight these are the adult fare (12 and over); for a car, the price for
+    * 24 hours.
     */
    costPrice: Money
    sellPrice: Money
@@ -158,6 +166,17 @@ export interface IListing extends Document {
    childSellPrice: Money
    infantCostPrice: Money
    infantSellPrice: Money
+   /**
+    * A car's optional prices for 1, 6 and 12 hours, each offered once its sell
+    * price is set (see rental.service). Top-level, not in `attributes`: the
+    * public listing copies those almost as they are, cost included.
+    */
+   hourlyCostPrice: Money
+   hourlySellPrice: Money
+   sixHourCostPrice: Money
+   sixHourSellPrice: Money
+   twelveHourCostPrice: Money
+   twelveHourSellPrice: Money
    quantityTotal: number
    quantitySold: number
    quantityHeld: number
@@ -168,6 +187,8 @@ export interface IListing extends Document {
    attributes: any
    rating?: number
    reviewCount?: number
+   /** Worked out from approved customer reviews (reviews.service); what the public sees. */
+   reviewStats?: { rating: number; count: number }
    publishAt?: Date
    unpublishAt?: Date
    createdBy?: Types.ObjectId
@@ -205,6 +226,12 @@ const listingSchema = new Schema<IListing>(
       childSellPrice: moneyField(),
       infantCostPrice: moneyField(),
       infantSellPrice: moneyField(),
+      hourlyCostPrice: moneyField(),
+      hourlySellPrice: moneyField(),
+      sixHourCostPrice: moneyField(),
+      sixHourSellPrice: moneyField(),
+      twelveHourCostPrice: moneyField(),
+      twelveHourSellPrice: moneyField(),
       quantityTotal: { type: Number, default: 0, min: 0 },
       quantitySold: { type: Number, default: 0, min: 0 },
       quantityHeld: { type: Number, default: 0, min: 0 },
@@ -215,10 +242,12 @@ const listingSchema = new Schema<IListing>(
       /** Drives §4 at-risk and spoilage for non-hotel stock. */
       validUntil: { type: Date, index: true },
       attributes: { type: attributesSchema, default: {} },
-      // Displayed on the public card. Aggregate only — individual reviews are
-      // out of scope for v1 per §18 Q17.
+      // Legacy figures from seeds and imports, not from customers: kept, never
+      // published or sorted on any more. `reviewStats` replaced them.
       rating: { type: Number, min: 0, max: 5 },
       reviewCount: { type: Number, min: 0, default: 0 },
+      // Approved reviews only, rating to one decimal — see reviews.service.
+      reviewStats: { rating: Number, count: Number },
       // §5.1 scheduled publish / unpublish.
       publishAt: Date,
       unpublishAt: Date,
@@ -264,10 +293,10 @@ listingSchema.methods.publishBlockers = function (): string[] {
       if (!this.images?.length) b.push('At least one image is required')
       if (!baseAmount(this.costPrice)) {
          // §15: optional cost price silently destroys margin reporting.
-         b.push('A USD cost price is required')
+         b.push('A cost price is required')
       }
       if (baseAmount(this.sellPrice) <= baseAmount(this.costPrice)) {
-         b.push('USD sell price must be above cost price')
+         b.push('The sell price must be above the cost price')
       }
       // A route runs every day it is timetabled, with no seat count to keep.
       if (!isRoute && this.quantityTotal <= 0) b.push('Quantity must be above zero')
@@ -315,8 +344,17 @@ listingSchema.methods.publishBlockers = function (): string[] {
       b.push('An arrival time is not after its departure')
    }
 
-   if (this.vertical === VERTICALS.CAR && !this.attributes?.make) {
-      b.push('Make and model are required')
+   if (this.vertical === VERTICALS.CAR) {
+      if (!this.attributes?.make) b.push('Make and model are required')
+      // A shorter rate is on sale once it has a price, so it is held to the
+      // same rule as the 24-hour one: a cost, and a price above it.
+      for (const r of OPTIONAL_CAR_RATES) {
+         const sell = baseAmount(this[r.sellField])
+         const cost = baseAmount(this[r.costField])
+         if (sell <= 0) continue
+         if (cost <= 0) b.push(`The ${r.name} price needs a cost`)
+         else if (sell <= cost) b.push(`The ${r.name} price must be above its cost`)
+      }
    }
    if (this.vertical === VERTICALS.ACTIVITY && !this.attributes?.durationMinutes) {
       b.push('Duration is required')

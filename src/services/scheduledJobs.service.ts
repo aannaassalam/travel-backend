@@ -18,9 +18,12 @@ import { Customer } from '../model/customerModel.admin'
 import { Order } from '../model/orderModel'
 import { getSettings } from '../model/settingsModel'
 import { sendOutOfBandAlert } from './auditLog.service'
-import { NOTIFICATION_EVENTS } from '../model/enquiryModel'
+import { NOTIFICATION_TEMPLATE_DEFAULTS } from '../constants/notificationTemplates.defaults'
+import { NOTIFICATION_EVENTS, NotificationTemplate } from '../model/enquiryModel'
 import { notifyOrder } from './notifications/notify.service'
 import { askMaxicash } from './payments/settlement.service'
+import { cancelRideOfOrder } from './transfers/rideLifecycle'
+import { rideDriven } from './transfers/rideLookup'
 
 /** How long before a cash deadline the customer gets chased. */
 const REMINDER_WINDOW_MS = 12 * 60 * 60 * 1000
@@ -84,6 +87,25 @@ export const releaseExpiredCashHolds = async () => {
        */
       if (await askMaxicash(order as any)) continue
 
+      /**
+       * A ride that was driven is paid to the driver, not at a counter (its
+       * deadline sits a day past the pick-up, see cashDeadlineFor): the
+       * booking is not cancelled because the office has not recorded the cash
+       * yet. The deadline is dropped so the job stops looking at it; the
+       * office settles it from the booking.
+       */
+      if (await rideDriven(order)) {
+         order.cashDeadline = undefined
+         order.timeline.push({
+            at: new Date(),
+            event: 'CASH_DEADLINE_WAIVED',
+            detail: 'Ride driven — the fare is collected by the driver',
+            actorEmail: 'system',
+         })
+         await order.save()
+         continue
+      }
+
       const heldIds = order.heldRatePlanIds ?? []
       for (const item of order.items) {
          if (item.roomTypeId && heldIds.length) {
@@ -112,6 +134,8 @@ export const releaseExpiredCashHolds = async () => {
          actorEmail: 'system',
       })
       await order.save()
+      // A transfer's ride lapses with its unpaid booking.
+      await cancelRideOfOrder(order._id, 'CASH_DEADLINE_EXPIRED', 'SYSTEM', 'Booking not paid in time')
 
       // §8: only a cash no-show is the customer's fault. An abandoned online
       // basket is not, and must not count against them.
@@ -138,6 +162,9 @@ export const sendCashDeadlineReminders = async () => {
       paymentMethod: 'CASH',
       paymentStatus: { $in: [PAYMENT_STATUS.UNPAID, PAYMENT_STATUS.PENDING] },
       status: { $in: [ORDER_STATUS.DRAFT, ORDER_STATUS.SUBMITTED] },
+      // Not a ride: its deadline is a day past the pick-up, so "due by" would
+      // reach the customer after the ride — and they pay the driver, not us.
+      'items.vertical': { $ne: VERTICALS.TRANSFER },
       cashDeadline: {
          $gt: new Date(now),
          $lt: new Date(now + REMINDER_WINDOW_MS),
@@ -239,11 +266,26 @@ export const normaliseLegacyStatuses = async () => {
  * - A bus or flight that was one dated departure, with no timetable, cannot
  *   be booked any more: it is taken off the website (INACTIVE) until the
  *   office gives it its agency, destination and times.
+ * - A car with a supplier but no operator name — saved before a car showed
+ *   its rental company — takes its supplier's name, as a save now gives it.
  */
 const escapeRx = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+/**
+ * A sell price still in dollars, as a query: a USD figure, or a bare number
+ * (older still, before prices had currencies: cents too). This code always
+ * writes a price whole, as francs only.
+ */
+const IN_DOLLARS = [{ 'sellPrice.USD': { $type: 'number' } }, { sellPrice: { $type: 'number' } }]
+
 export const migrateCatalogueModel = async () => {
-   const changed = { suppliersCreated: 0, supplierLinks: 0, roomPrices: 0, routesTakenDown: 0 }
+   const changed = {
+      suppliersCreated: 0,
+      supplierLinks: 0,
+      roomPrices: 0,
+      routesTakenDown: 0,
+      carOperators: 0,
+   }
 
    for (const model of [Hotel, Listing] as any[]) {
       // The raw collection: the schema now says ObjectId, and casting the old
@@ -268,32 +310,50 @@ export const migrateCatalogueModel = async () => {
       }
    }
 
+   // In francs. A room or a night still in dollars (migrate:cdf not yet run) is
+   // left alone: a franc figure next to its dollars dates from before
+   // conversion, and copying it would replace the room's real price (and its
+   // cost with 0).
    const today = new Date(new Date().toISOString().slice(0, 10))
    const unpriced = await RoomType.collection
-      .find({ $or: [{ 'sellPrice.USD': { $exists: false } }, { 'sellPrice.USD': { $lte: 0 } }] })
+      .find({
+         $nor: IN_DOLLARS,
+         $or: [{ 'sellPrice.CDF': { $exists: false } }, { 'sellPrice.CDF': { $lte: 0 } }],
+      })
       .project({ _id: 1 })
       .toArray()
-   for (const room of unpriced) {
-      const priced = { roomType: room._id, 'sellPrice.USD': { $gt: 0 } }
-      const plan =
-         (await RatePlan.collection
-            .find({ ...priced, date: { $gte: today } })
-            .sort({ date: 1 })
-            .limit(1)
-            .next()) ??
-         (await RatePlan.collection.find(priced).sort({ date: -1 }).limit(1).next())
-      if (!plan) continue
-      await RoomType.collection.updateOne(
-         { _id: room._id },
-         {
-            $set: {
-               sellPrice: { USD: plan.sellPrice.USD },
-               costPrice: { USD: plan.costPrice?.USD ?? 0 },
-               mealPlan: plan.mealPlan ?? 'ROOM_ONLY',
+   // One read and one write, whatever the count: two look-ups per room were
+   // 48 s of silence at boot on 2026-10-26 (63 rooms, 300 ms to the database).
+   const nights = unpriced.length
+      ? await RatePlan.collection
+           .find({ roomType: { $in: unpriced.map((r) => r._id) }, 'sellPrice.CDF': { $gt: 0 }, $nor: IN_DOLLARS })
+           .project({ roomType: 1, date: 1, sellPrice: 1, costPrice: 1, mealPlan: 1 })
+           .sort({ date: 1 })
+           .toArray()
+      : []
+   // Per room: its first night from today on, else its last one.
+   const plans = new Map<string, any>()
+   for (const night of nights) {
+      const had = plans.get(String(night.roomType))
+      if (!had || had.date < today) plans.set(String(night.roomType), night)
+   }
+   if (plans.size) {
+      await RoomType.collection.bulkWrite(
+         [...plans.values()].map((plan) => ({
+            updateOne: {
+               filter: { _id: plan.roomType },
+               update: {
+                  $set: {
+                     sellPrice: { CDF: plan.sellPrice.CDF },
+                     costPrice: { CDF: plan.costPrice?.CDF ?? 0 },
+                     mealPlan: plan.mealPlan ?? 'ROOM_ONLY',
+                  },
+               },
             },
-         }
+         })),
+         { ordered: false }
       )
-      changed.roomPrices += 1
+      changed.roomPrices += plans.size
    }
 
    const down = await Listing.updateMany(
@@ -307,11 +367,72 @@ export const migrateCatalogueModel = async () => {
    )
    changed.routesTakenDown = down.modifiedCount
 
+   const unnamed = {
+      vertical: VERTICALS.CAR,
+      supplier: { $ne: null },
+      'attributes.operator': { $in: [null, ''] },
+   }
+   for (const id of await Listing.distinct('supplier', unnamed)) {
+      // A supplier since deleted names nothing: the car is left as it is.
+      const name = (await Supplier.findById(id).select('name'))?.name
+      if (!name) continue
+      const named = await Listing.updateMany(
+         { ...unnamed, supplier: id },
+         { $set: { 'attributes.operator': name }, $inc: { __v: 1 } }
+      )
+      changed.carOperators += named.modifiedCount
+   }
+
    if (Object.values(changed).some(Boolean)) {
       console.log('Catalogue brought up to date:', JSON.stringify(changed))
       await systemAudit('CATALOGUE_MODEL_MIGRATED', changed)
    }
    return changed
+}
+
+/**
+ * An event with no SMS template sends nothing, and the seed that writes them
+ * replaces every SMS template — the office's wording with it — so it is not
+ * run on a live database. Instead each boot adds the default of every event
+ * with no SMS template at all, and touches nothing else: an edited one keeps
+ * its words, one the office switched off stays off.
+ */
+export const ensureDefaultTemplates = async () => {
+   const have = new Set(await NotificationTemplate.distinct('event', { channel: 'SMS' }))
+   // One the office deleted stays deleted: the admin's delete promises no SMS
+   // for that event until a template is saved again. Its delete is audited.
+   const deleted = new Set(
+      await AuditLog.distinct('before.event', {
+         action: AUDIT_ACTIONS.PURGE,
+         entityType: 'NotificationTemplate',
+         'before.channel': 'SMS',
+      })
+   )
+   const missing = NOTIFICATION_TEMPLATE_DEFAULTS.filter((t) => !have.has(t.event) && !deleted.has(t.event))
+   if (!missing.length) return 0
+   await NotificationTemplate.insertMany(missing.map((t) => ({ ...t, channel: 'SMS', isActive: true })))
+   const events = missing.map((t) => t.event)
+   console.log(`${events.length} notification template(s) added: ${events.join(', ')}`)
+   await systemAudit('NOTIFICATION_TEMPLATES_ADDED', { count: events.length, events })
+   return events.length
+}
+
+/**
+ * Prices were dollars until 2026-10-24 and are francs now; scripts/migrateCdfBase
+ * converts them, once, by hand. Until it has run, each price still in dollars
+ * reads as unpriced — so every boot says so, loudly. Never fatal.
+ */
+export const warnDollarPrices = async () => {
+   const counts = await Promise.all(
+      [Listing, RoomType, MenuItem].map((m: any) => m.collection.countDocuments({ $or: IN_DOLLARS }))
+   )
+   const n = counts.reduce((a, b) => a + b, 0)
+   if (n) {
+      console.warn(
+         `⚠️  ${n} prices are still in dollars — run npm run migrate:cdf -- --rate=<francs per USD> --apply`
+      )
+   }
+   return n
 }
 
 /**

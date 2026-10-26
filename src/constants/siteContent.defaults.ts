@@ -132,8 +132,8 @@ export const SITE_CONTENT_DEFAULTS = {
                en: 'Which currency will I be charged in?',
             },
             answer: {
-               fr: 'Les prix sont établis en dollars américains. Si vous affichez le site en francs congolais ou en euros, le montant exact qui sera débité vous est indiqué avant validation, dans la devise de règlement. Le taux est verrouillé au moment de la commande.',
-               en: 'Prices are set in US dollars. If you view the site in Congolese francs or euros, the exact amount to be charged is shown before you confirm, in the settlement currency. The rate is locked when you order.',
+               fr: 'Les prix sont établis en francs congolais. Si vous affichez le site en dollars américains ou en euros, le montant exact qui sera débité vous est indiqué avant validation, dans la devise de règlement. Le taux est verrouillé au moment de la commande.',
+               en: 'Prices are set in Congolese francs. If you view the site in US dollars or euros, the exact amount to be charged is shown before you confirm, in the settlement currency. The rate is locked when you order.',
             },
          },
          {
@@ -196,6 +196,13 @@ export const SITE_CONTENT_DEFAULTS = {
       notice: {
          fr: "Toutes les ventes sont définitives. Aucun remboursement n'est accordé, quelle que soit la raison de l'annulation. Vous pouvez annuler une réservation, mais aucune somme ne sera restituée.",
          en: 'All sales are final. No refund is given, whatever the reason for cancellation. You may cancel a booking, but no money will be returned.',
+      },
+      /** The bold words in front of that sentence, wherever it stands beside a price. */
+      noticeTitle: { fr: 'Réservation définitive', en: 'Final booking' },
+      /** The same reminder where only a few words fit: the badge on offer cards. */
+      noticeShort: {
+         fr: 'Réservation définitive · non remboursable',
+         en: 'Final booking · non-refundable',
       },
       /** Printed after "© 2026 " — the site adds the year itself. */
       copyright: {

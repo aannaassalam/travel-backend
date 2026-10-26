@@ -28,7 +28,7 @@ export interface ILocation extends Document {
    country: string
    province?: string
    kind: LocationKind
-   /** IATA code, for flights. Uppercased on write. */
+   /** IATA code (3) or ICAO code (4), for flights. Uppercased on write. */
    iata?: string
    /**
     * Alternative spellings the customer might type — "Kin", "Elisabethville",
@@ -41,6 +41,8 @@ export interface ILocation extends Document {
    isActive: boolean
    sortOrder: number
    image?: string
+   /** The city centre: where a transfer's place search looks first. */
+   geo?: { lat: number; lng: number }
    createdAt: Date
    updatedAt: Date
 }
@@ -60,7 +62,8 @@ const locationSchema = new Schema<ILocation>(
          type: String,
          uppercase: true,
          trim: true,
-         match: [/^[A-Z]{3}$/, 'IATA code must be three letters'],
+         // Four for an airfield with no IATA code, known by its ICAO one.
+         match: [/^[A-Z0-9]{3,4}$/, 'The code must be 3 or 4 letters or digits'],
       },
       aliases: { type: [String], default: [] },
       servesVerticals: {
@@ -77,6 +80,7 @@ const locationSchema = new Schema<ILocation>(
       /** Manual ordering, so the office can put its busiest cities first. */
       sortOrder: { type: Number, default: 0 },
       image: { type: String, trim: true },
+      geo: { lat: Number, lng: Number },
    },
    // Two renames of one place at the same moment: the second is refused (409)
    // instead of leaving the place under one name and its hotels under the other.

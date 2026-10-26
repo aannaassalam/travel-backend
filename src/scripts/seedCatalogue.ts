@@ -26,6 +26,7 @@ import { LISTING_STATUS, MEAL_PLANS, VERTICALS } from '../constants/domain.const
 import { Hotel, RatePlan, RoomType } from '../model/hotelModel'
 import { Listing } from '../model/listingModel'
 import { Supplier } from '../model/supplierModel'
+import { usdToFrancs } from './migrateCdfBase'
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -78,11 +79,16 @@ const between = (a: number, b: number) => a + rand() * (b - a)
 const intBetween = (a: number, b: number) => Math.floor(between(a, b + 1))
 const chance = (p: number) => rand() < p
 
-/** Dollars → integer minor units (§5). */
+/** Dollars → integer minor units (§5): what the catalogue was drawn in. */
 const usd = (dollars: number) => Math.round(dollars * 100)
 
-/** Prices are entered in USD only; CDF and EUR come from the rates in Settings. */
-const money = (usdMinor: number) => ({ USD: usdMinor })
+/**
+ * Prices are stored in francs only; USD and EUR come from the rates in
+ * Settings. The dollar figures drawn here become francs at 2 850 FC, rounded up
+ * to the next 100 — as the one-off conversion turned the dollar catalogue.
+ */
+const francs = (usdMinor: number) => usdToFrancs(usdMinor, 2850)
+const money = (usdMinor: number) => ({ CDF: francs(usdMinor) })
 
 /** Localised text. French is required before publish; English ships with it. */
 const L = (fr: string, en: string) => ({ fr, en })
@@ -332,6 +338,22 @@ function buildCars() {
          const price = usd(Math.round(between(spec.price[0], spec.price[1]) + (withDriver ? 35 : 0)))
          const total = intBetween(1, 8)
          const sold = chance(0.12) ? total : intBetween(0, Math.max(0, total - 1))
+         // Shorter hires cost more by the hour, in whole dollars. Worked out
+         // from the 24-hour price rather than drawn, so the rest of the seed
+         // stays as it was; every fifth car keeps the 24-hour price only, as
+         // cars made before hourly rates have.
+         const rate = (share: number) => usd(Math.max(1, Math.round((price / 100) * share)))
+         const shorter =
+            v === 4
+               ? {}
+               : {
+                    hourlyCostPrice: money(Math.round(rate(1 / 12) * 0.68)),
+                    hourlySellPrice: money(rate(1 / 12)),
+                    sixHourCostPrice: money(Math.round(rate(0.4) * 0.68)),
+                    sixHourSellPrice: money(rate(0.4)),
+                    twelveHourCostPrice: money(Math.round(rate(0.65) * 0.68)),
+                    twelveHourSellPrice: money(rate(0.65)),
+                 }
 
          out.push({
             vertical: VERTICALS.CAR,
@@ -362,6 +384,7 @@ function buildCars() {
             supplier: `${city} Fleet`,
             costPrice: money(Math.round(price * 0.68)),
             sellPrice: money(price),
+            ...shorter,
             quantityTotal: total,
             quantitySold: sold,
             rating: rating(),
@@ -373,7 +396,7 @@ function buildCars() {
                category: spec.category,
                transmission: chance(0.7) ? 'AUTOMATIC' : 'MANUAL',
                withDriver,
-               deposit: usd(intBetween(200, 400)),
+               deposit: francs(usd(intBetween(200, 400))),
                mileageLimit: `${intBetween(120, 250)} km / jour`,
                pickupLocations: [`Aéroport de ${city}`, `${city} centre`],
                insuranceTerms: chance(0.6)
@@ -504,7 +527,7 @@ function buildActivities() {
                languages: ['Français', 'Anglais', ...(chance(0.5) ? ['Swahili'] : [])],
                inclusions: ['Guide', 'Transport sur place', 'Eau', ...(a.minutes > 500 ? ['Repas'] : [])],
                exclusions: ['Pourboires', 'Assurance voyage', 'Dépenses personnelles'],
-               childPrice: Math.round(price * 0.65),
+               childPrice: francs(Math.round(price * 0.65)),
             },
          })
       }

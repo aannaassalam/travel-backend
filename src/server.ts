@@ -30,9 +30,11 @@ import { RESPONSES } from './constants/constants'
 import connectDb from './config/db.config'
 import app from './app'
 import {
+   ensureDefaultTemplates,
    migrateCatalogueModel,
    normaliseLegacyStatuses,
    startScheduledJobs,
+   warnDollarPrices,
 } from './services/scheduledJobs.service'
 import { keepRatesFresh, refreshRates } from './services/fx.service'
 import { paymentsStatus } from './services/payments/maxicash.service'
@@ -68,7 +70,15 @@ async function bootstrap() {
    await migrateCatalogueModel().catch((e) =>
       console.error('Could not bring the catalogue up to date:', e.message)
    )
-   // Every CDF and EUR price is worked out from these, so they are read first.
+   // A new event's default wording, so it is not silent; the office's stays.
+   await ensureDefaultTemplates().catch((e) =>
+      console.error('Could not add the missing notification templates:', e.message)
+   )
+   // Prices became francs on 2026-10-24: says so while any is still in dollars.
+   await warnDollarPrices().catch((e) =>
+      console.error('Could not check for prices still in dollars:', e.message)
+   )
+   // Every USD and EUR price is worked out from these, so they are read first.
    await refreshRates().catch((e) => console.error('Could not read exchange rates:', e.message))
    keepRatesFresh()
 

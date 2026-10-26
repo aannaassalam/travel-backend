@@ -20,9 +20,13 @@ dotenv.config()
 import { buildMongoUri } from '../config/db.config'
 import { LISTING_STATUS, MENU_SECTIONS } from '../constants/domain.constants'
 import { MenuItem, Restaurant } from '../model/restaurantModel'
+import { usdToFrancs } from './migrateCdfBase'
 
-/** Minor units, USD only: CDF and EUR are worked out from the rates in Settings. */
-const usd = (dollars: number) => Math.round(dollars * 100)
+/**
+ * Francs only: USD and EUR are worked out from the rates in Settings. The
+ * dollar figures below become francs at 2 850 FC, rounded up to the next 100.
+ */
+const fc = (dollars: number) => usdToFrancs(Math.round(dollars * 100), 2850)
 
 type Dish = {
    section: string
@@ -379,8 +383,8 @@ const run = async () => {
          reviewCount: r.reviews,
          deliveryZones: r.zones.map((z) => ({
             name: z.name,
-            fee: { USD: usd(z.fee) },
-            minOrder: z.min ? { USD: usd(z.min) } : undefined,
+            fee: { CDF: fc(z.fee) },
+            minOrder: z.min ? { CDF: fc(z.min) } : undefined,
             etaMinutes: z.eta,
             isActive: true,
          })),
@@ -392,8 +396,8 @@ const run = async () => {
             section: d.section,
             name: { fr: d.fr, en: d.en },
             description: { fr: d.descFr, en: d.descEn },
-            sellPrice: { USD: usd(d.sell) },
-            costPrice: { USD: usd(d.cost) },
+            sellPrice: { CDF: fc(d.sell) },
+            costPrice: { CDF: fc(d.cost) },
             isAvailable: d.available !== false,
             sortOrder: i,
             status: LISTING_STATUS.PUBLISHED,

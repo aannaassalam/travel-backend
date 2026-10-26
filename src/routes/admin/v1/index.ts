@@ -9,8 +9,10 @@ import * as inventoryCsv from '../../../controllers/admin/inventoryCsvController
 import * as listings from '../../../controllers/admin/listingController'
 import * as locations from '../../../controllers/admin/locationController'
 import * as ops from '../../../controllers/admin/opsController'
+import * as partners from '../../../controllers/admin/partnerController'
 import * as siteContent from '../../../controllers/admin/siteContentController'
 import * as restaurants from '../../../controllers/admin/restaurantController'
+import * as reviews from '../../../controllers/admin/reviewController'
 import * as orders from '../../../controllers/admin/orderController'
 import * as suppliers from '../../../controllers/admin/supplierController'
 import {
@@ -30,6 +32,7 @@ import {
    requireStepUp,
 } from '../../../middleware/adminAuth'
 import authRouter from './authRouter'
+import { mountTransferRoutes } from './transferRoutes'
 
 /**
  * §2.1: /admin/v1 is a distinct API surface from /api/v1. It shares services
@@ -280,6 +283,29 @@ router.post(
    uploadFiles
 )
 
+// --- Content: partners' logos on the homepage and the app --------------------
+router.get('/partners', requirePermission('content:read'), partners.listPartners)
+router.post('/partners', requirePermission('content:write'), partners.createPartner)
+router.patch('/partners/:id', requirePermission('content:write'), partners.updatePartner)
+router.delete('/partners/:id', requirePermission('content:delete'), requireStepUp, partners.deletePartner)
+// As the site's pictures above: permission before any byte is buffered, then
+// pinned to the partners' own public folder.
+router.post(
+   '/partners/logo',
+   requirePermission('content:write'),
+   uploadMiddleware,
+   handleUploadErrors,
+   partners.partnerLogosOnly,
+   uploadFiles
+)
+
+// --- Content: customer reviews, moderated before the website shows them -----
+router.get('/reviews', requirePermission('content:read'), boundPagination, reviews.listReviews)
+router.post('/reviews/:id/approve', requirePermission('content:write'), reviews.approveReview)
+router.post('/reviews/:id/reject', requirePermission('content:write'), reviews.rejectReview)
+// For good, like every other delete: its own permission and the password again.
+router.delete('/reviews/:id', requirePermission('content:delete'), requireStepUp, reviews.deleteReview)
+
 // --- Notifications (§11) ----------------------------------------------------
 router.get('/notifications/templates', requirePermission('notifications:read'), ops.listTemplates)
 router.put('/notifications/templates', requirePermission('notifications:write'), ops.upsertTemplate)
@@ -309,6 +335,9 @@ router.patch('/locations/:id', requirePermission('inventory:write'), locations.u
 router.get('/routes', requirePermission('inventory:read'), locations.listRoutes)
 router.post('/routes', requirePermission('inventory:write'), locations.createRoute)
 router.patch('/routes/:id', requirePermission('inventory:write'), locations.updateRoute)
+
+// --- Transfers: the fleet (inventory:*) and the rides (orders:*) -------------
+mountTransferRoutes(router)
 
 // Must stay above any future /audit-logs/:id.
 router.get('/audit-logs/summary', requirePermission('audit:read'), auditLogSummary)

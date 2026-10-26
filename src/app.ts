@@ -73,7 +73,8 @@ app.use(
          return callback(null, false)
       },
       credentials: true,
-      exposedHeaders: ['X-Message', 'X-Session-Token'],
+      // X-Driver-Token: the driver portal's renewed session (middleware/driverAuth).
+      exposedHeaders: ['X-Message', 'X-Session-Token', 'X-Driver-Token'],
    })
 )
 
@@ -242,7 +243,7 @@ const HTML_FILTER_BUDGET = 2_000
 const escapeAngles = (s: string) => s.replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 /**
- * Two fields are plain text that nothing ever renders as HTML, so they are
+ * Three fields are plain text that nothing ever renders as HTML, so they are
  * stored as written.
  *
  * A spreadsheet: filtered, every < and > in it became an entity whose `;`
@@ -250,10 +251,14 @@ const escapeAngles = (s: string) => s.replace(/</g, '&lt;').replace(/>/g, '&gt;'
  *
  * A legal text: "enfants < 12 ans" in the terms was printed on the website as
  * "enfants &lt; 12 ans", and that is also the wording kept with each order.
+ *
+ * A customer's review: "Super séjour <3" was shown as "Super séjour &lt;3",
+ * and 1,000 characters with a "<" in them grew past the limit and were refused.
  */
 const storedAsWritten = (req: Request, key: string) =>
    (key === 'csv' && /^\/admin\/v1\/inventory\/[^/]+\/import\/?$/.test(req.path)) ||
-   (key === 'body' && /^\/admin\/v1\/policies\/?$/.test(req.path))
+   (key === 'body' && /^\/admin\/v1\/policies\/?$/.test(req.path)) ||
+   (key === 'comment' && /^\/api\/v1\/reviews\/?$/.test(req.path))
 
 // Middleware to sanitize XSS
 function sanitizeXSS(req: Request, res: Response, next: NextFunction) {

@@ -5,6 +5,8 @@ import { Customer } from '../../model/customerModel.admin'
 import { DeviceToken } from '../../model/deviceTokenModel'
 import { Order } from '../../model/orderModel'
 import { PhoneVerification } from '../../model/phoneVerificationModel'
+import { Review } from '../../model/reviewModel'
+import { ridesOfOrders } from '../../services/transfers/rideLookup'
 import {
    CUSTOMER_SESSION_MS,
    MIN_PASSWORD_LENGTH,
@@ -496,6 +498,8 @@ export const deleteMe = catchAsync(async (req: Request, res: Response) => {
    )
    // A deleted account is never notified again, on any phone.
    await DeviceToken.deleteMany({ customer: c._id })
+   // Their reviews stay, and keep counting, but no longer carry their name.
+   await Review.updateMany({ customer: c._id }, { $set: { authorName: 'Client' } })
    clearCustomerCookie(res)
    return sendResponse(res, 200, 'Account deleted', {})
 })
@@ -531,7 +535,11 @@ export const myOrders = catchAsync(async (req: Request, res: Response) => {
       .limit(100)
       .select('+travellers.documentNumber')
       .populate('customer', 'phone')
-   return sendResponse(res, 200, 'OK', { items: orders.map(presentOrder) })
+   // A transfer booking shows its ride (the driver, the status) in the list too.
+   const rides = await ridesOfOrders(orders)
+   return sendResponse(res, 200, 'OK', {
+      items: orders.map((o) => presentOrder(o, rides.get(String(o._id)))),
+   })
 })
 
 // ---------------------------------------------------------------------------
@@ -553,6 +561,10 @@ const cleanDevice = (body: any) => {
  */
 export const registerDevice = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
+      // A form posted from another site carries the session cookie too and needs
+      // no preflight; it would attach a stranger's phone to this account's
+      // booking notifications. A form cannot send JSON, so only JSON is taken.
+      if (!req.is('application/json')) return next(new AppError('Send the device as JSON', 415))
       const device = cleanDevice(req.body)
       if (!device) return next(new AppError('A push token and platform are required', 400))
       await DeviceToken.updateOne(

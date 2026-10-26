@@ -65,7 +65,9 @@ export const SITE_SECTIONS: Record<SiteSection, Record<string, Field>> = {
    },
    footer: {
       tagline: text('Line under the logo', 160),
-      notice: text('No-refund reminder', 600),
+      notice: text('Conditions text (beside every price, on offer pages and at checkout)', 600),
+      noticeTitle: text('Conditions title', 80),
+      noticeShort: text('Conditions badge on offer cards', 80),
       copyright: text('Copyright line', 200),
    },
 }

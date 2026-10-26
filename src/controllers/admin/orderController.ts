@@ -24,6 +24,7 @@ import { byWords, customerNameSort, paginate, sortBy } from '../../services/admi
 import { forReader } from '../../middleware/adminAuth'
 import { recordAudit } from '../../services/auditLog.service'
 import { storage } from '../../services/storage'
+import { cancelRideOfOrder } from '../../services/transfers/rideLifecycle'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -334,6 +335,9 @@ export const transitionOrder = catchAsync(
       // the only party that knows.
       if (to === ORDER_STATUS.CANCELLED) {
          void notifyOrder(NOTIFICATION_EVENTS.ORDER_CANCELLED, order._id)
+         // A transfer booking's ride goes with it (a ride holds no stock). Awaited
+         // so the page's next read sees it cancelled; it never throws.
+         await cancelRideOfOrder(order._id, order.cancellationReason!, 'OFFICE', reason)
       }
       if (to === ORDER_STATUS.CONFIRMED) {
          void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)

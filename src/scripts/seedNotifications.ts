@@ -12,47 +12,19 @@
  * between what the office thinks it sends and what it sends is the problem this
  * seed exists to prevent. Push templates are left alone.
  *
- * Every order template carries {{order_link}}. That link is how a GUEST reaches
- * their booking - they have no account, so without it a cash customer has
- * nothing but a reference read out over the phone.
+ * So it is for a fresh database: on a live one it would wipe the office's own
+ * wording. A live database needs nothing run — every boot adds the default of
+ * any event with no SMS template, bar one the office deleted
+ * (ensureDefaultTemplates), and leaves the rest.
+ * The texts live in constants/notificationTemplates.defaults.ts.
  */
 import mongoose from 'mongoose'
 import dotenv from 'dotenv'
 import { buildMongoUri } from '../config/db.config'
-import { NOTIFICATION_EVENTS, NotificationTemplate } from '../model/enquiryModel'
+import { NOTIFICATION_TEMPLATE_DEFAULTS } from '../constants/notificationTemplates.defaults'
+import { NotificationTemplate } from '../model/enquiryModel'
 
 dotenv.config()
-
-const TEMPLATES: { event: string; body: string }[] = [
-   {
-      event: NOTIFICATION_EVENTS.ORDER_CONFIRMED,
-      body: 'Hello {{customer_name}}, your booking {{order_ref}} ({{amount}}) is registered. Track it here: {{order_link}}',
-   },
-   {
-      event: NOTIFICATION_EVENTS.PAYMENT_RECEIVED,
-      body: 'Payment received for {{order_ref}}. Thank you {{customer_name}}. Details: {{order_link}}',
-   },
-   {
-      event: NOTIFICATION_EVENTS.CASH_DEADLINE_REMINDER,
-      body: 'Reminder: cash payment for {{order_ref}} ({{amount}}) is due by {{deadline}}. {{order_link}}',
-   },
-   {
-      event: NOTIFICATION_EVENTS.DOCUMENTS_ISSUED,
-      body: 'Your documents for {{order_ref}} are ready: {{order_link}}',
-   },
-   {
-      event: NOTIFICATION_EVENTS.ORDER_CANCELLED,
-      body: 'Your booking {{order_ref}} has been cancelled. Details: {{order_link}}',
-   },
-   {
-      event: NOTIFICATION_EVENTS.ENQUIRY_RECEIVED,
-      body: 'Thank you {{customer_name}}, enquiry {{order_ref}} received. We will call you shortly.',
-   },
-   {
-      event: NOTIFICATION_EVENTS.QUOTE_SENT,
-      body: 'Your quote for {{order_ref}} is ready: {{amount}}. We will be in touch.',
-   },
-]
 
 async function main() {
    await mongoose.connect(buildMongoUri())
@@ -65,6 +37,8 @@ async function main() {
     * would then pick one of them arbitrarily.
     */
    const collection = NotificationTemplate.collection
+   // A fresh database has no collection yet, and listing its indexes throws.
+   await NotificationTemplate.createCollection()
    for (const index of await collection.indexes()) {
       if (index.key && 'locale' in index.key) {
          await collection.dropIndex(index.name as string)
@@ -75,7 +49,7 @@ async function main() {
    const removed = await NotificationTemplate.deleteMany({ channel: 'SMS' })
    console.log(`removed ${removed.deletedCount} old SMS template(s)`)
 
-   for (const row of TEMPLATES) {
+   for (const row of NOTIFICATION_TEMPLATE_DEFAULTS) {
       await NotificationTemplate.create({ ...row, channel: 'SMS', isActive: true })
    }
    await NotificationTemplate.syncIndexes()

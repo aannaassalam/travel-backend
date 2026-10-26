@@ -167,33 +167,64 @@ const PIN: Column[] = [
       'Map pin, together with latitude.', { min: -180, max: 180 }),
 ]
 
-// USD only: francs and euros are worked out from the exchange rates in Settings.
+// Whole Congolese francs only: dollars and euros are worked out from the
+// exchange rates in Settings.
 const PRICES: Column[] = [
-   col('cost_price_usd', 'Cost price (USD)', 'money', 'costPrice.USD', '45.00',
-      'What you pay the supplier for one. Never shown to customers.',
+   col('cost_price_cdf', 'Cost price (FC)', 'money', 'costPrice.CDF', '128300',
+      'What you pay the supplier for one, in francs. Never shown to customers.',
       { required: true, min: 0.01 }),
-   col('sell_price_usd', 'Sell price (USD)', 'money', 'sellPrice.USD', '70.00',
-      'What the customer pays for one. Must be above the cost price. CDF and EUR prices are worked out from the exchange rates in Settings.',
+   col('sell_price_cdf', 'Sell price (FC)', 'money', 'sellPrice.CDF', '199500',
+      'What the customer pays for one, in francs. Must be above the cost price. USD and EUR prices are worked out from the exchange rates in Settings.',
       { required: true, min: 0.01 }),
 ]
 
 /** A bus or flight route's three fares: adult (12+), child (2–12), baby (under 2). */
 const FARES: Column[] = [
-   col('cost_price_usd', 'Adult cost (USD)', 'money', 'costPrice.USD', '45.00',
-      'What the agency charges you for an adult (12 and over). Never shown to customers.',
+   col('cost_price_cdf', 'Adult cost (FC)', 'money', 'costPrice.CDF', '128300',
+      'What the agency charges you for an adult (12 and over), in francs. Never shown to customers.',
       { required: true, min: 0.01 }),
-   col('sell_price_usd', 'Adult fare (USD)', 'money', 'sellPrice.USD', '70.00',
-      'What an adult pays. Must be above the adult cost. CDF and EUR are worked out from the exchange rates in Settings.',
+   col('sell_price_cdf', 'Adult fare (FC)', 'money', 'sellPrice.CDF', '199500',
+      'What an adult pays, in francs. Must be above the adult cost. USD and EUR are worked out from the exchange rates in Settings.',
       { required: true, min: 0.01 }),
-   col('child_cost_usd', 'Child cost (USD)', 'money', 'childCostPrice.USD', '35.00',
-      'What the agency charges you for a child of 2 to 12.', { required: true, min: 0 }),
-   col('child_fare_usd', 'Child fare (USD)', 'money', 'childSellPrice.USD', '55.00',
-      'What a child of 2 to 12 pays. Must be above the child cost.',
+   col('child_cost_cdf', 'Child cost (FC)', 'money', 'childCostPrice.CDF', '99800',
+      'What the agency charges you for a child of 2 to 12, in francs.', { required: true, min: 0 }),
+   col('child_fare_cdf', 'Child fare (FC)', 'money', 'childSellPrice.CDF', '156800',
+      'What a child of 2 to 12 pays, in francs. Must be above the child cost.',
       { required: true, min: 0.01 }),
-   col('baby_cost_usd', 'Baby cost (USD)', 'money', 'infantCostPrice.USD', '5.00',
-      'What the agency charges you for a baby under 2. 0 if nothing.', { required: true, min: 0 }),
-   col('baby_fare_usd', 'Baby fare (USD)', 'money', 'infantSellPrice.USD', '10.00',
-      'What a baby under 2 pays. 0 if babies travel free.', { required: true, min: 0 }),
+   col('baby_cost_cdf', 'Baby cost (FC)', 'money', 'infantCostPrice.CDF', '14300',
+      'What the agency charges you for a baby under 2, in francs. 0 if nothing.', { required: true, min: 0 }),
+   col('baby_fare_cdf', 'Baby fare (FC)', 'money', 'infantSellPrice.CDF', '28500',
+      'What a baby under 2 pays, in francs. 0 if babies travel free.', { required: true, min: 0 }),
+]
+
+/**
+ * A car's prices: for 24 hours — the one every car has, in the columns that
+ * held its price per day, so older files still import — and, each optional,
+ * for one hour, 6 hours and 12 hours. The customer pays the cheapest mix that
+ * covers their hours.
+ */
+const CAR_PRICES: Column[] = [
+   col('cost_price_cdf', '24-hour cost (FC)', 'money', 'costPrice.CDF', '342000',
+      'What you pay the supplier for one car for 24 hours, in francs. Never shown to customers.',
+      { required: true, min: 0.01 }),
+   col('sell_price_cdf', '24-hour price (FC)', 'money', 'sellPrice.CDF', '513000',
+      'What the customer pays for one car for 24 hours, in francs. Must be above the 24-hour cost. USD and EUR are worked out from the exchange rates in Settings.',
+      { required: true, min: 0.01 }),
+   col('hourly_cost_cdf', 'Hourly cost (FC)', 'money', 'hourlyCostPrice.CDF', '14300',
+      'What you pay the supplier for one hour, in francs. Leave both hourly cells blank if you do not rent by the hour.',
+      { min: 0 }),
+   col('hourly_price_cdf', 'Hourly price (FC)', 'money', 'hourlySellPrice.CDF', '42800',
+      'What the customer pays for one hour, in francs. Must be above the hourly cost.', { min: 0 }),
+   col('six_hour_cost_cdf', '6-hour cost (FC)', 'money', 'sixHourCostPrice.CDF', '114000',
+      'What you pay the supplier for 6 hours, in francs. Leave both 6-hour cells blank if you do not rent for 6 hours.',
+      { min: 0 }),
+   col('six_hour_price_cdf', '6-hour price (FC)', 'money', 'sixHourSellPrice.CDF', '171000',
+      'What the customer pays for 6 hours, in francs. Must be above the 6-hour cost.', { min: 0 }),
+   col('twelve_hour_cost_cdf', '12-hour cost (FC)', 'money', 'twelveHourCostPrice.CDF', '199500',
+      'What you pay the supplier for 12 hours, in francs. Leave both 12-hour cells blank if you do not rent for 12 hours.',
+      { min: 0 }),
+   col('twelve_hour_price_cdf', '12-hour price (FC)', 'money', 'twelveHourSellPrice.CDF', '285000',
+      'What the customer pays for 12 hours, in francs. Must be above the 12-hour cost.', { min: 0 }),
 ]
 
 /** A route's two ends: where it leaves from (the record's city) and where it goes. */
@@ -246,10 +277,10 @@ const SOLD = col('quantity_sold', 'Sold', 'int', 'quantitySold', '',
 
 /** Mirrors the publish rule, so an imported row is a photo away from live. */
 const sellable = (doc: any, fail: Fail) => {
-   const cost = doc.costPrice?.USD ?? 0
-   const sell = doc.sellPrice?.USD ?? 0
+   const cost = doc.costPrice?.CDF ?? 0
+   const sell = doc.sellPrice?.CDF ?? 0
    if (cost && sell && sell <= cost) {
-      fail('sell_price_usd', 'Sell price must be above the cost price')
+      fail('sell_price_cdf', 'Sell price must be above the cost price')
    }
 }
 
@@ -265,15 +296,31 @@ const pinned = (doc: any, fail: Fail) => {
 /** A bus or flight route: its fares in order, its two ends apart, and a time to leave. */
 const route = (doc: any, fail: Fail) => {
    sellable(doc, fail)
-   const childCost = doc.childCostPrice?.USD ?? 0
-   const childFare = doc.childSellPrice?.USD ?? 0
-   if (childFare && childFare <= childCost) fail('child_fare_usd', 'Must be above the child cost')
-   if ((doc.infantSellPrice?.USD ?? 0) < (doc.infantCostPrice?.USD ?? 0)) {
-      fail('baby_fare_usd', 'Cannot be below the baby cost')
+   const childCost = doc.childCostPrice?.CDF ?? 0
+   const childFare = doc.childSellPrice?.CDF ?? 0
+   if (childFare && childFare <= childCost) fail('child_fare_cdf', 'Must be above the child cost')
+   if ((doc.infantSellPrice?.CDF ?? 0) < (doc.infantCostPrice?.CDF ?? 0)) {
+      fail('baby_fare_cdf', 'Cannot be below the baby cost')
    }
    const a = doc.attributes ?? {}
    if (a.destination && doc.city && a.destination.toLowerCase() === doc.city.toLowerCase()) {
       fail('destination', 'Must be different from the departure point')
+   }
+}
+
+/** A car: each shorter rate it offers has a cost and a price above it, as publishing asks. */
+const car = (doc: any, fail: Fail) => {
+   sellable(doc, fail)
+   for (const [column, sellPath, costPath, what] of [
+      ['hourly_price_cdf', 'hourlySellPrice', 'hourlyCostPrice', 'hourly'],
+      ['six_hour_price_cdf', 'sixHourSellPrice', 'sixHourCostPrice', '6-hour'],
+      ['twelve_hour_price_cdf', 'twelveHourSellPrice', 'twelveHourCostPrice', '12-hour'],
+   ]) {
+      const sell = doc[sellPath]?.CDF ?? 0
+      const cost = doc[costPath]?.CDF ?? 0
+      if (!sell) continue
+      if (!cost) fail(column, `Give the ${what} cost as well`)
+      else if (sell <= cost) fail(column, `Must be above the ${what} cost`)
    }
 }
 
@@ -286,6 +333,13 @@ const activity = (doc: any, fail: Fail) => {
 }
 
 // --- The groups ------------------------------------------------------------
+
+/**
+ * The office's car types, as the panel offers them. Only the sheet holds a
+ * car to this list: the record has no enum, so a type typed as text before
+ * the list existed still saves.
+ */
+const CAR_TYPES = ['SUV', 'BERLINE', 'BUS', 'PICKUP', 'MINIBUS', 'TRUCK', 'LUXE'] as const
 
 const DAY = 86400000
 const NEXT_YEAR = new Date().getUTCFullYear() + 1
@@ -447,28 +501,29 @@ const GROUPS: Record<string, GroupSpec> = {
          col('model', 'Model', 'text', 'attributes.model', 'Prado', 'The model.', { max: 80 }),
          col('year', 'Year', 'int', 'attributes.year', '2022', 'Year of manufacture.',
             { min: 1980, max: NEXT_YEAR }),
-         col('category', 'Category', 'text', 'attributes.category', '4x4',
-            'For example 4x4, Berline, Minibus.', { max: 80 }),
+         col('category', 'Car type', 'enum', 'attributes.category', 'SUV',
+            'SUV, BERLINE (saloon), BUS, PICKUP, MINIBUS, TRUCK or LUXE (luxury).',
+            { options: CAR_TYPES }),
          col('transmission', 'Gearbox', 'enum', 'attributes.transmission', 'AUTOMATIC',
             'How it is driven.', { options: ['MANUAL', 'AUTOMATIC'] }),
          col('with_driver', 'With driver', 'bool', 'attributes.withDriver', 'yes',
             'yes if a driver comes with the car, no if the customer drives.'),
-         col('deposit_usd', 'Deposit (USD)', 'money', 'attributes.deposit', '300.00',
-            'Held against damage. Leave blank for none.', { min: 0 }),
+         col('deposit_cdf', 'Deposit (FC)', 'money', 'attributes.deposit', '855000',
+            'Held against damage, in francs. Leave blank for none.', { min: 0 }),
          col('mileage_limit', 'Mileage limit', 'text', 'attributes.mileageLimit',
             '200 km / jour', 'As you would tell the customer.', { max: 120 }),
          col('pickup_locations', 'Pick-up points', 'list', 'attributes.pickupLocations',
             'Aéroport de Ndjili | Centre-ville', 'Where the car can be collected, separated by a | bar.'),
          col('insurance_terms', 'Insurance', 'text', 'attributes.insuranceTerms',
             'Assurance au tiers, franchise 500 $', 'What cover is included.', { max: 500 }),
-         ...PRICES,
+         ...CAR_PRICES,
          quantity('cars', '3'),
          VALID_FROM,
          supplier('Kinshasa Fleet'),
          SOLD,
          ...REFERENCE,
       ],
-      finish: sellable,
+      finish: car,
       after: 'Then, in the panel: add a photo and publish.',
    },
 
@@ -500,8 +555,8 @@ const GROUPS: Record<string, GroupSpec> = {
             'Pourboires | Transport', 'What it does not cover, separated by a | bar.'),
          col('advance_notice_hours', 'Book ahead (hours)', 'int',
             'attributes.advanceNoticeHours', '24', 'How much notice you need.', { min: 0 }),
-         col('child_price_usd', 'Child price (USD)', 'money', 'attributes.childPrice', '35.00',
-            'Leave blank if children pay the full price.', { min: 0 }),
+         col('child_price_cdf', 'Child price (FC)', 'money', 'attributes.childPrice', '99800',
+            'In francs. Leave blank if children pay the full price.', { min: 0 }),
          ...PRICES,
          quantity('places', '12'),
          VALID_FROM,
@@ -520,7 +575,7 @@ const GROUPS: Record<string, GroupSpec> = {
       file: 'properties',
       // No stock and no cost of goods: a property is an enquiry, never a
       // checkout (§5.2), so there is exactly one and it cost nothing to hold.
-      base: { vertical: VERTICALS.PROPERTY, quantityTotal: 1, costPrice: { USD: 0 } },
+      base: { vertical: VERTICALS.PROPERTY, quantityTotal: 1, costPrice: { CDF: 0 } },
       columns: [
          ...titled('Villa 4 chambres — Gombe', '4-bedroom villa — Gombe'),
          SERVICED_CITY,
@@ -533,17 +588,19 @@ const GROUPS: Record<string, GroupSpec> = {
             }),
          col('price_basis', 'Price is', 'enum', 'attributes.priceBasis', 'TOTAL',
             'TOTAL for a sale price, PER_MONTH for rent.', { options: ['TOTAL', 'PER_MONTH'] }),
-         col('price_usd', 'Price (USD)', 'money', 'sellPrice.USD', '250000.00',
-            'The asking price or the monthly rent. CDF and EUR are worked out from the exchange rates in Settings.',
+         col('price_cdf', 'Price (FC)', 'money', 'sellPrice.CDF', '712500000',
+            'The asking price or the monthly rent, in francs. USD and EUR are worked out from the exchange rates in Settings.',
             { required: true, min: 0.01 }),
          col('bedrooms', 'Bedrooms', 'int', 'attributes.bedrooms', '4', 'Number of bedrooms.',
             { min: 0 }),
          col('bathrooms', 'Bathrooms', 'int', 'attributes.bathrooms', '3',
             'Number of bathrooms.', { min: 0 }),
-         col('area_sqm', 'Living area (m²)', 'decimal', 'attributes.areaSqm', '320',
-            'Floor area in square metres.', { min: 0 }),
-         col('plot_size_sqm', 'Plot (m²)', 'decimal', 'attributes.plotSizeSqm', '900',
-            'Size of the land in square metres.', { min: 0 }),
+         col('area_sqm', 'Area (m²)', 'decimal', 'attributes.areaSqm', '320',
+            'In square metres: a house, its built area; an apartment, its floor area; land, the size of the plot.',
+            { min: 0 }),
+         col('plot_size_sqm', 'Plot size (m²)', 'decimal', 'attributes.plotSizeSqm', '900',
+            'Houses only: the land the house stands on, in square metres. Leave blank for an apartment or land — land gives its size in area_sqm.',
+            { min: 0 }),
          col('features', 'Features', 'list', 'attributes.features',
             'Parking | Groupe électrogène | Forage | Gardiennage 24 h',
             'What it comes with, separated by a | bar.'),
@@ -694,7 +751,7 @@ interface Reading {
    slashOrder: SlashOrder
 }
 
-const readCell = (
+export const readCell = (
    c: Column,
    raw: string,
    { decimalComma, slashOrder }: Reading
@@ -725,19 +782,23 @@ const readCell = (
       case 'money': {
          const plain = plainNumber(raw, decimalComma)
          if (plain === null || Number(plain) < 0) {
-            return { error: 'Must be an amount, like 45.50' }
+            return { error: 'Must be an amount in francs, like 513000' }
          }
-         // Money has two decimals at most. A third means a thousands mark was
-         // taken for the decimal point — 250.000 read as 250 — and a price a
-         // thousand times too small is not one to import on a guess.
-         if (decimalsOf(plain) > 2) {
-            return {
-               error: 'Write the amount without a thousands separator, like 250000 or 250000.50',
-            }
+         // Three decimals mean a thousands mark was taken for the decimal
+         // point — 513.000 read as 513 — and a price a thousand times too small
+         // is not one to import on a guess.
+         if (decimalsOf(plain) === 3) {
+            return { error: 'Write the amount without a thousands separator, like 513000' }
+         }
+         // Francs have no cents, and this file never writes any: 45.50 — or
+         // 180.00, how the dollar-era export wrote $180 — is a dollar price
+         // left in a franc column, not 46 or 180 francs.
+         if (decimalsOf(plain) > 0) {
+            return { error: 'Write whole francs, with no decimals, like 513000' }
          }
          const out = between(Number(plain), c)
-         // Minor units on the record, exactly as the panel's price boxes store them.
-         return out ? { error: out } : { value: Math.round(Number(plain) * 100) }
+         // Whole francs on the record, exactly as the panel's price boxes store them.
+         return out ? { error: out } : { value: Number(plain) }
       }
       case 'datetime': {
          const d = toDate(raw, slashOrder)
@@ -841,7 +902,7 @@ const writeCell = (c: Column, doc: any, delimiter: Delimiter): string => {
    if (v === undefined || v === null || v === '') return ''
    switch (c.kind) {
       case 'money':
-         return localNumber((Number(v) / 100).toFixed(2), delimiter)
+         return String(Math.round(Number(v)))
       case 'decimal':
          return localNumber(String(v), delimiter)
       case 'int':
@@ -855,13 +916,11 @@ const writeCell = (c: Column, doc: any, delimiter: Delimiter): string => {
          return (v as WeeklyTime[]).map((w) => `${DAY_SHORT[w.day]} ${w.time}`).join(' | ')
       case 'bool':
          return v ? 'yes' : 'no'
-      case 'enum':
-         // The schema only ever lets one of a fixed set of words in here.
-         return String(v)
       default:
-         // Text — and phone and time, which are free strings on the record
-         // however strictly an import reads them. Guarded, a phone number
-         // also survives a spreadsheet instead of turning into 2.4381E+11.
+         // Text — and phone, time and a fixed choice, which can be free
+         // strings on the record however strictly an import reads them (a car
+         // type typed before the list has no enum to stop it). Guarded, a phone
+         // number also survives a spreadsheet instead of turning into 2.4381E+11.
          return inert(String(v))
    }
 }
@@ -1188,6 +1247,15 @@ export const importCsv = catchAsync(
       }
 
       const { header, records, decimalComma } = parseCsv(csv)
+      // A file from before prices were in francs: its amounts are dollars, and
+      // read into these columns they would be francs. Said once, for the file.
+      const dollars = header.filter((h) => h.endsWith('_usd'))
+      if (dollars.length) {
+         const renames = dollars.map((h) => `${h} to ${h.replace(/_usd$/, '_cdf')}`).join(', ')
+         return next(
+            new AppError(`Prices are now in Congolese francs: rename ${renames} and enter francs`, 400)
+         )
+      }
       if (!records.length) {
          return next(new AppError('That file has no rows under its header', 400))
       }
@@ -1300,8 +1368,9 @@ export const importCsv = catchAsync(
                fail('supplier', `${doc.supplier} is not in your suppliers. Add it under Suppliers first.`)
             } else {
                doc.supplier = found._id
-               // A route's operator is its agency's name, as in the panel.
-               if (doc.attributes && ['BUS', 'FLIGHT'].includes(doc.vertical)) {
+               // A route's operator is its agency's name, a car's its rental
+               // company's, as in the panel.
+               if (doc.attributes && ['BUS', 'FLIGHT', 'CAR'].includes(doc.vertical)) {
                   doc.attributes.operator = found.name
                }
             }

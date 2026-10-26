@@ -5,6 +5,7 @@ import { LISTING_STATUS, LOCALES, VERTICALS } from '../../constants/domain.const
 import { IListing, isScheduledRoute, Listing } from '../../model/listingModel'
 import { Location, ServicedRoute } from '../../model/locationModel'
 import { Supplier } from '../../model/supplierModel'
+import { OPTIONAL_CAR_RATES } from '../../services/orders/rental.service'
 import { cleanTimetable } from '../../services/orders/schedule.service'
 import { supplierRef } from './supplierController'
 import {
@@ -83,6 +84,13 @@ const listingFields: FieldMap<IListing> = {
    childSellPrice: (l) => (isScheduledRoute(l.vertical) ? l.childSellPrice : undefined),
    infantCostPrice: (l) => (isScheduledRoute(l.vertical) ? l.infantCostPrice : undefined),
    infantSellPrice: (l) => (isScheduledRoute(l.vertical) ? l.infantSellPrice : undefined),
+   // A car's shorter rates; its 24-hour one is costPrice/sellPrice.
+   hourlyCostPrice: (l) => (l.vertical === VERTICALS.CAR ? l.hourlyCostPrice : undefined),
+   hourlySellPrice: (l) => (l.vertical === VERTICALS.CAR ? l.hourlySellPrice : undefined),
+   sixHourCostPrice: (l) => (l.vertical === VERTICALS.CAR ? l.sixHourCostPrice : undefined),
+   sixHourSellPrice: (l) => (l.vertical === VERTICALS.CAR ? l.sixHourSellPrice : undefined),
+   twelveHourCostPrice: (l) => (l.vertical === VERTICALS.CAR ? l.twelveHourCostPrice : undefined),
+   twelveHourSellPrice: (l) => (l.vertical === VERTICALS.CAR ? l.twelveHourSellPrice : undefined),
    costPriceBase: (l) => baseAmount(l.costPrice),
    sellPriceBase: (l) => baseAmount(l.sellPrice),
    currencies: (l) => availableCurrencies(l.sellPrice),
@@ -156,11 +164,11 @@ export const listListings = catchAsync(async (req: Request, res: Response) => {
          name: 'title.fr',
          city: 'city',
          status: 'status',
-         cost: 'costPrice.USD',
-         sell: 'sellPrice.USD',
+         cost: 'costPrice.CDF',
+         sell: 'sellPrice.CDF',
          margin: {
             value: {
-               $subtract: [{ $ifNull: ['$sellPrice.USD', 0] }, { $ifNull: ['$costPrice.USD', 0] }],
+               $subtract: [{ $ifNull: ['$sellPrice.CDF', 0] }, { $ifNull: ['$costPrice.CDF', 0] }],
             },
          },
          available: {
@@ -242,11 +250,15 @@ const checkCity = async (city: unknown, vertical?: string) => {
 /** The four bus and flight fares besides the adult one, as sent (undefined = untouched). */
 const FARES = ['childCostPrice', 'childSellPrice', 'infantCostPrice', 'infantSellPrice'] as const
 
+/** A car's prices for 1, 6 and 12 hours, cost and sell, the same way. */
+const CAR_RATE_FIELDS = OPTIONAL_CAR_RATES.flatMap((r) => [r.costField, r.sellField])
+
 /**
  * What a save writes besides the plain fields: the supplier (an id from the
- * list), the extra fares, and for a bus or flight route its timetable — real
- * times only — and its operator name, which is its agency's name. The
- * destination of a route is a serviced place, like its departure point.
+ * list), the extra fares, a car's shorter rates, for a bus or flight route its
+ * timetable — real times only — and for a route or a car its operator name,
+ * which is its supplier's (the agency, the rental company). The destination of
+ * a route is a serviced place, like its departure point.
  */
 const routeAndSupplier = async (
    body: any,
@@ -259,18 +271,27 @@ const routeAndSupplier = async (
    for (const key of FARES) {
       if (body[key] !== undefined) patch[key] = parseMoney(body[key])
    }
-   if (!isScheduledRoute(vertical) || !patch.attributes) return
-   const attributes = { ...patch.attributes, ...cleanTimetable(patch.attributes) }
-   // A route has no single departure: what an old dated offer carried would
-   // only have the nightly job expire it once that day had passed.
-   for (const dated of ['departsAt', 'arrivesAt', 'segments', 'tripType', 'recurrence', 'bookingDeadline']) {
-      delete attributes[dated]
+   const isCar = vertical === VERTICALS.CAR
+   if (isCar) {
+      for (const key of CAR_RATE_FIELDS) {
+         if (body[key] !== undefined) patch[key] = parseMoney(body[key])
+      }
    }
-   // Like the city: only when it changes — a place switched off later must not
-   // stop the office editing a route's fares.
-   if (attributes.destination && attributes.destination !== currentDestination) {
-      const problem = await checkCity(attributes.destination, vertical)
-      if (problem) throw problem
+   if (!(isScheduledRoute(vertical) || isCar) || !patch.attributes) return
+   const attributes = { ...patch.attributes }
+   if (!isCar) {
+      Object.assign(attributes, cleanTimetable(patch.attributes))
+      // A route has no single departure: what an old dated offer carried would
+      // only have the nightly job expire it once that day had passed.
+      for (const dated of ['departsAt', 'arrivesAt', 'segments', 'tripType', 'recurrence', 'bookingDeadline']) {
+         delete attributes[dated]
+      }
+      // Like the city: only when it changes — a place switched off later must not
+      // stop the office editing a route's fares.
+      if (attributes.destination && attributes.destination !== currentDestination) {
+         const problem = await checkCity(attributes.destination, vertical)
+         if (problem) throw problem
+      }
    }
    if (supplier) attributes.operator = (await Supplier.findById(supplier).select('name'))?.name
    else if (supplier === null) delete attributes.operator
@@ -310,6 +331,10 @@ export const createListing = catchAsync(
             new AppError('Use /hotels for hotel inventory', 400)
          )
       }
+      if (vertical === VERTICALS.TRANSFER) {
+         // A transfer has no listing: its fleet and prices live under /transfers.
+         return next(new AppError('Transfers are not listings: use /transfers', 400))
+      }
       const cityProblem = await checkCity(city, vertical)
       if (cityProblem) return next(cityProblem)
       const data: Record<string, any> = {
@@ -342,17 +367,24 @@ export const updateListing = catchAsync(
       /**
        * §5.1 price-change guard, applied to single listings the same way the
        * hotel calendar applies it to a night range. A mis-keyed price that gets
-       * purchased is painful to unwind under a no-refund policy.
+       * purchased is painful to unwind under a no-refund policy. A car's
+       * shorter rates are prices on sale too.
        */
-      if (req.body.sellPrice !== undefined && !req.body.confirmPriceChange) {
+      const prices = [
+         'sellPrice',
+         ...(current.vertical === VERTICALS.CAR ? OPTIONAL_CAR_RATES.map((r) => r.sellField) : []),
+      ].filter((key) => req.body[key] !== undefined)
+      if (prices.length && !req.body.confirmPriceChange) {
          const current = await Listing.findById(req.params.id)
-         const currentBase = baseAmount(current?.sellPrice)
-         const nextBase = baseAmount(parseMoney(req.body.sellPrice))
-         // Guard on the base currency: it is the one price every listing has.
-         if (current && currentBase > 0 && current.status === LISTING_STATUS.PUBLISHED) {
+         if (current?.status === LISTING_STATUS.PUBLISHED) {
             const guard = (await getSettings()).priceChangeGuardPercent
-            const delta = Math.abs(nextBase - currentBase)
-            if ((delta / currentBase) * 100 > guard) {
+            // Guard on the base currency: it is the one price every listing has.
+            const moved = prices.some((key) => {
+               const currentBase = baseAmount((current as any)[key])
+               const nextBase = baseAmount(parseMoney(req.body[key]))
+               return currentBase > 0 && (Math.abs(nextBase - currentBase) / currentBase) * 100 > guard
+            })
+            if (moved) {
                return next(
                   new AppError(
                      `This changes a published price by more than ${guard}%. Resend with confirmPriceChange to proceed.`,
@@ -529,6 +561,8 @@ export const duplicateListing = catchAsync(
       // panel has no way to correct a score that came along by mistake.
       delete copy.rating
       copy.reviewCount = 0
+      // Its reviews stay with the original, and so does the rating they make.
+      delete copy.reviewStats
       // A copy made by hand is a listing of its own, not one of the days a
       // "repeat until" made.
       delete copy.repeatOf

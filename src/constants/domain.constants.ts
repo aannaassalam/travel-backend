@@ -12,6 +12,8 @@ export const VERTICALS = {
    ACTIVITY: 'ACTIVITY',
    PROPERTY: 'PROPERTY',
    RESTAURANT: 'RESTAURANT',
+   /** A ride with a driver (transfers). No listing: the order line names its Ride. */
+   TRANSFER: 'TRANSFER',
 } as const
 export type Vertical = (typeof VERTICALS)[keyof typeof VERTICALS]
 
@@ -57,15 +59,17 @@ export const LEGACY_INACTIVE_STATUSES = ['DRAFT', 'PAUSED'] as const
 export type ListingStatus = (typeof LISTING_STATUS)[keyof typeof LISTING_STATUS]
 
 /**
- * Money model. Prices are entered and stored in USD base (§5.1); CDF/EUR are
- * display conversions applied at read time from the FX table.
+ * Money model. Prices are entered and stored in Congolese francs (the client's
+ * decision, 2026-10-24); USD and EUR are worked out at read time from the
+ * office's rates (fx.service).
  *
- * Stored as integer minor units — 12.34 USD is 1234. Floats lose cents, and
- * §0 is explicit that a wrong decimal on a hotel rate costs real money that a
- * no-refund policy makes painful to unwind.
+ * Stored as integers. CDF has no minor unit, so a franc amount is whole francs;
+ * a USD or EUR amount (a charged total, a converted price) is cents — 12.34 USD
+ * is 1234. Floats lose cents, and §0 is explicit that a wrong decimal on a hotel
+ * rate costs real money that a no-refund policy makes painful to unwind.
  */
-export const BASE_CURRENCY = 'USD'
-export const CURRENCIES = ['USD', 'CDF', 'EUR'] as const
+export const BASE_CURRENCY = 'CDF'
+export const CURRENCIES = ['CDF', 'USD', 'EUR'] as const
 export type Currency = (typeof CURRENCIES)[number]
 
 export const ORDER_STATUS = {

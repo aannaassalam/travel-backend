@@ -1,6 +1,6 @@
 /**
  * Self-check for the catalogue input rules that decide what lands in the
- * database: the map pin and the office list.
+ * database: the map pin, the office list, prices and exchange rates.
  *
  *   npm run check:catalogue
  *
@@ -10,8 +10,10 @@
  */
 import assert from 'assert'
 
-import { parseOffices } from '../controllers/admin/opsController'
-import { geoPoint, parseGeo } from '../model/shared.schema'
+import { readCell } from '../controllers/admin/inventoryCsvController'
+import { parseOffices, parseRates } from '../controllers/admin/opsController'
+import { geoPoint, parseGeo, parseMoney } from '../model/shared.schema'
+import { francRateProblem } from '../services/fx.service'
 
 let failures = 0
 const check = (name: string, fn: () => void) => {
@@ -162,6 +164,66 @@ check('exactly one primary office', () => {
 check('a pin on an office follows the same rule', () => {
    const [o] = parseOffices([office({ geo: { lat: -1.6777, lng: 29.2285 } })])!
    assert.deepStrictEqual(o.geo, { lat: -1.6777, lng: 29.2285 })
+})
+
+console.log('\nPrices and exchange rates')
+check('a price is whole francs; a blank box is "not set", never 0', () => {
+   assert.deepStrictEqual(parseMoney({ CDF: '513000' }), { CDF: 513_000 })
+   assert.deepStrictEqual(parseMoney({ CDF: 12.6 }), { CDF: 13 })
+   assert.deepStrictEqual(parseMoney(513_000), { CDF: 513_000 })
+   assert.deepStrictEqual(parseMoney({ CDF: 513_000, USD: 18_000 }), { CDF: 513_000 }) // worked out, never typed
+   assert.deepStrictEqual(parseMoney({ CDF: '' }), {})
+   assert.deepStrictEqual(parseMoney({}), {})
+   assert.strictEqual(parseMoney(undefined), undefined)
+})
+
+check('a dollar price from a panel opened before francs is refused, not read as blank', () => {
+   assert.strictEqual(refused(() => parseMoney({ USD: 18_000 })), 400)
+   assert.strictEqual(refused(() => parseMoney({ USD: '180', CDF: '' })), 400)
+})
+
+check('a spreadsheet price is whole francs; a dollar figure in the column is refused', () => {
+   const cell = (raw: string, decimalComma = false) =>
+      readCell({ key: 'sell_price_cdf', kind: 'money', min: 0 } as any, raw, { decimalComma, slashOrder: 'DMY' })
+   assert.deepStrictEqual(cell('513000'), { value: 513_000 })
+   assert.deepStrictEqual(cell('513 000'), { value: 513_000 })
+   assert.deepStrictEqual(cell('513,000'), { value: 513_000 })
+   // How the export wrote $180 while prices were dollars, in both kinds of file.
+   assert.ok(cell('180.00').error)
+   assert.ok(cell('180,00', true).error)
+   assert.ok(cell('45.50').error)
+   assert.ok(/thousands/.test(cell('513.000').error ?? ''))
+})
+
+check('rates are francs per 1 USD and per 1 EUR, as typed', () => {
+   assert.deepStrictEqual(parseRates({ USD: '2850', EUR: 3100 }, {}, 40, false), { USD: 2850, EUR: 3100 })
+   // Blank stops offering a currency; absent keeps what is there.
+   assert.deepStrictEqual(parseRates({ EUR: '' }, { USD: 2850, EUR: 3100 }, 40, false), { USD: 2850, EUR: undefined })
+   assert.strictEqual(refused(() => parseRates({ USD: 0 }, {}, 40, false)), 400)
+   assert.strictEqual(refused(() => parseRates({ USD: 'abc' }, {}, 40, false)), 400)
+   // Dollars per franc, the figure typed on 2026-10-26: refused, naming the rate it stands for.
+   assert.strictEqual(refused(() => parseRates({ USD: 0.00043 }, {}, 40, false)), 400)
+   assert.ok(/1 USD = 2,326 FC/.test(francRateProblem('USD', 0.00043) ?? ''))
+   assert.strictEqual(refused(() => parseRates({ EUR: 250_000 }, {}, 40, false)), 400)
+   assert.strictEqual(francRateProblem('USD', 100) ?? francRateProblem('EUR', 100_000), null)
+   // The shape from before francs (francs per dollar under CDF) is not saved over the new one.
+   assert.strictEqual(refused(() => parseRates({ CDF: 2850, EUR: 0.92 }, {}, 40, false)), 400)
+})
+
+check('a big rate move asks first, naming every currency in one question', () => {
+   let err: any
+   try {
+      parseRates({ USD: 285, EUR: 6200 }, { USD: 2850, EUR: 3100 }, 40, false)
+   } catch (e) {
+      err = e
+   }
+   assert.strictEqual(err?.statusCode, 409)
+   assert.strictEqual(err?.code, 'RATE_CHANGE_CONFIRM')
+   assert.ok(/1 USD = 285 FC/.test(err.message) && /1 EUR = 6,200 FC/.test(err.message), err?.message)
+   assert.deepStrictEqual(parseRates({ USD: 285 }, { USD: 2850 }, 40, true), { USD: 285, EUR: undefined })
+   // Within the guard, or with nothing to compare against: saved as typed.
+   assert.deepStrictEqual(parseRates({ USD: 2900 }, { USD: 2850 }, 40, false), { USD: 2900, EUR: undefined })
+   assert.deepStrictEqual(parseRates({ USD: 2850 }, { EUR: 3100 }, 40, false), { USD: 2850, EUR: 3100 })
 })
 
 console.log(

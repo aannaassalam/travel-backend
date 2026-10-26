@@ -49,6 +49,8 @@ export interface IHotel extends Document {
    policies: string
    rating?: number
    reviewCount?: number
+   /** Worked out from approved customer reviews (reviews.service); what the public sees. */
+   reviewStats?: { rating: number; count: number }
    createdBy?: Types.ObjectId
    createdAt: Date
    updatedAt: Date
@@ -80,8 +82,10 @@ const hotelSchema = new Schema<IHotel>(
       checkInTime: { type: String, default: '14:00' },
       checkOutTime: { type: String, default: '11:00' },
       policies: { type: String, default: '' },
+      // Legacy, never published any more: `reviewStats` is the customers' own.
       rating: { type: Number, min: 0, max: 5 },
       reviewCount: { type: Number, min: 0, default: 0 },
+      reviewStats: { rating: Number, count: Number },
       createdBy: { type: Schema.Types.ObjectId, ref: 'AdminUser' },
    },
    { timestamps: true, optimisticConcurrency: true }
@@ -118,7 +122,7 @@ export interface IRoomType extends Document {
    images: string[]
    sizeSqm?: number
    /**
-    * The nightly price, in USD minor units (CDF/EUR are worked out). One
+    * The nightly price, in whole francs (USD/EUR are worked out). One
     * figure for every future night; a change applies from then on, and orders
     * already made keep what they were charged.
     */
@@ -175,9 +179,8 @@ export interface IRatePlan extends Document {
    /** One document per room-type per night — the unit the calendar grid edits. */
    date: Date
    /**
-    * Per-currency, integer minor units. USD is required — it is the reporting
-    * base that margin and spoilage sum in. CDF/EUR are explicit prices the
-    * administrator typed, never conversions.
+    * The legacy per-night calendar, in whole francs like every price. CDF is
+    * required — it is the reporting base that margin and spoilage sum in.
     *
     * costPrice stays mandatory: §15 lists making it optional as the thing that
     * silently destroys margin reporting, because if it is optional it is skipped.

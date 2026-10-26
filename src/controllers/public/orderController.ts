@@ -14,6 +14,8 @@ import { storage } from '../../services/storage'
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import { Restaurant } from '../../model/restaurantModel'
+import { IRide, Ride } from '../../model/rideModel'
+import { rideOfOrder } from '../../services/transfers/rideLookup'
 import { PolicyVersion, getSettings } from '../../model/settingsModel'
 import {
    holdListing,
@@ -23,6 +25,7 @@ import {
 import {
    PricedItem,
    RequestedItem,
+   cashDeadlineFor,
    priceDelivery,
    priceItem,
    settle,
@@ -202,7 +205,9 @@ export const createOrder = catchAsync(
                )
             )
          }
-         return sendResponse(res, 200, 'Order already created', { order: presentOrder(replay) })
+         return sendResponse(res, 200, 'Order already created', {
+            order: presentOrder(replay, await rideOfOrder(replay)),
+         })
       }
 
       const { items, contact, travellers = [], paymentMethod, currency, locale } = req.body ?? {}
@@ -272,7 +277,7 @@ export const createOrder = catchAsync(
        * an online order in another currency could only be created to fail at
        * the payment step with a seat held for nothing.
        */
-      const asked = String(currency ?? 'USD').toUpperCase()
+      const asked = String(currency ?? BASE_CURRENCY).toUpperCase()
       if (method === PAYMENT_METHOD.ONLINE && !onlineCurrencies.includes(asked)) {
          return next(
             new AppError(`${asked} cannot be paid online`, 400, 'CURRENCY_UNSUPPORTED', {
@@ -338,6 +343,9 @@ export const createOrder = catchAsync(
             })
          )
       } catch (err) {
+         // A transfer is checked field by field (quote.service) and says which
+         // box is wrong, with a code the website and the app translate.
+         if (err instanceof AppError) return next(err)
          const code = (err as Error).message
          if (code === 'PROPERTY_IS_ENQUIRY_ONLY') {
             // §1.1 archetype C: property has no checkout at all.
@@ -350,7 +358,8 @@ export const createOrder = catchAsync(
          }
          // §BUG-008: bad/reversed/past/over-long dates are a 400, not a 409.
          if (code === 'INVALID_DATES') {
-            return next(new AppError('Those dates are not valid', 400))
+            // Coded, so the website and the app can say it in the customer's language.
+            return next(new AppError('Those dates are not valid', 400, 'INVALID_DATES'))
          }
          return next(new AppError('One of these items is no longer available', 409))
       }
@@ -401,9 +410,9 @@ export const createOrder = catchAsync(
 
          // Minimum is on the food, not the food plus the fee — otherwise the
          // delivery charge helps you clear the bar it exists to enforce.
-         const foodUsd = foodLines.reduce((sum, l) => sum + l.lineTotal, 0)
+         const food = foodLines.reduce((sum, l) => sum + l.lineTotal, 0)
          const minOrder = (zone.minOrder as any)?.[BASE_CURRENCY] ?? 0
-         if (minOrder && foodUsd < minOrder) {
+         if (minOrder && food < minOrder) {
             return next(new AppError('Order is below the minimum for that zone', 400))
          }
 
@@ -417,6 +426,19 @@ export const createOrder = catchAsync(
          }
       }
 
+      /**
+       * --- 1c. A transfer stands alone ----------------------------------------
+       *
+       * One ride is one order: its Ride is the order's one line, and the driver,
+       * the status and the alert all hang off that reference. Two rides, or a
+       * ride beside a hotel night, would need a second ride the order cannot
+       * name — refused, like food beside travel.
+       */
+      const rideLine = priced.find((p) => p.vertical === VERTICALS.TRANSFER)
+      if (rideLine && priced.length !== 1) {
+         return next(new AppError('A transfer is booked on its own: one ride per order', 400, 'TRANSFER_ALONE'))
+      }
+
       // --- 2. Hold the stock ------------------------------------------------
       /**
        * Only cars and activities are sold from a counted stock. Hotel rooms
@@ -425,6 +447,8 @@ export const createOrder = catchAsync(
        * or it cannot, which `isAvailable` already answered when it was priced.
        */
       const taken: PricedItem[] = []
+      /** The transfer's Ride, once written (step 3); deleted with a failed order. */
+      let ride: IRide | null = null
       for (const item of priced) {
          if (!holdsStock(item.vertical)) continue
          const ok = await holdListing(item.listingId, item.quantity)
@@ -497,22 +521,50 @@ export const createOrder = catchAsync(
             )
          }
 
-         const { chargedCurrency, chargedTotal, fxRate, totalUsd } = settle(
-            // The fee settles with the food, not after it: a fee typed only in
-            // USD means the order cannot honestly settle in CDF, exactly as a
-            // dish priced only in USD cannot. Added afterwards it would either
-            // be converted (§5 forbids it) or charged in the wrong currency.
+         const { chargedCurrency, chargedTotal, fxRate, totalBase } = settle(
+            // The fee settles with the food, not after it: converted per unit
+            // like every line, so the total charged is the prices shown added up.
             deliveryLine ? [...priced, deliveryLine] : priced,
-            currency
+            // As checked above: "usd" is USD, not a request for francs.
+            asked
          )
-         // MaxiCash takes nothing under five dollars: said now, before the
-         // booking exists, not on MaxiCash's page after it. (Thrown, so the
-         // stock held above is released.)
+         // Online is dollars only, charged from the lines' own dollar prices.
+         // Without a dollar rate the order settled in francs instead, which
+         // MaxiCash would refuse at the payment step. (Thrown, so the stock
+         // held above is released.)
+         if (method === PAYMENT_METHOD.ONLINE && !onlineCurrencies.includes(chargedCurrency)) {
+            throw new AppError(
+               `${asked} prices are not available, so this cannot be paid online`,
+               400,
+               'CURRENCY_UNSUPPORTED',
+               { supported: onlineCurrencies }
+            )
+         }
+         // MaxiCash takes nothing under five dollars (500 cents of that USD
+         // total): said now, before the booking exists, not on MaxiCash's page
+         // after it.
          if (method === PAYMENT_METHOD.ONLINE && chargedTotal < onlineMinimumMinor) {
             throw belowOnlineMinimum()
          }
          const settings = await getSettings()
          const isCash = method === PAYMENT_METHOD.CASH
+
+         /**
+          * The ride is written before its order so the order's line can name
+          * it (listingId, allotted when the line was priced) and never point
+          * at nothing. A ride holds no stock, so it is deleted — not released —
+          * when the order is not created after all (the catch below).
+          */
+         if (rideLine?.transfer) {
+            ride = await Ride.create({
+               _id: rideLine.listingId,
+               ...rideLine.transfer,
+               customer: customer._id,
+               customerName: `${contact.firstName} ${contact.lastName}`.trim().slice(0, 160),
+               customerPhone: phone,
+               timeline: [{ event: 'RIDE_REQUESTED', actor: 'CUSTOMER', detail: `channel=WEB method=${method}` }],
+            })
+         }
 
          const order = await createWithReference({
             idempotencyKey: key,
@@ -538,20 +590,25 @@ export const createOrder = catchAsync(
                baggage: p.baggage,
                origin: p.origin,
                destination: p.destination,
+               rentalHours: p.rentalHours,
                unitSellPrice: p.unitSellPrice,
                unitCostPrice: p.unitCostPrice,
                lineTotal: p.lineTotal,
                lineCost: p.lineCost,
             })),
             travellers: travellerList,
-            total: totalUsd,
+            // Marks the amounts as francs, so the one-off conversion of the
+            // dollar-era orders never takes this one for one of them.
+            baseCurrency: BASE_CURRENCY,
+            total: totalBase,
             chargedCurrency,
             chargedTotal,
             fxRate,
             paymentMethod: method,
             channel: 'WEB',
+            // (a ride's cash deadline waits a day past the pick-up: the fare goes to the driver)
             cashDeadline: isCash
-               ? new Date(Date.now() + settings.holdTtlCashHours * 3600_000)
+               ? cashDeadlineFor(priced, settings.holdTtlCashHours)
                : new Date(Date.now() + settings.holdTtlOnlineMinutes * 60_000),
             consent: {
                policyVersionId: policy._id,
@@ -567,7 +624,7 @@ export const createOrder = catchAsync(
                     ...deliveryDoc,
                     fee: deliveryLine!.lineTotal,
                     // Falls back to the base amount when the order settled in
-                    // USD, so this is never blank on a real order.
+                    // CDF, so this is never blank on a real order.
                     feeCharged:
                        deliveryLine!.lineTotalByCurrency[chargedCurrency] ??
                        deliveryLine!.lineTotal,
@@ -576,6 +633,13 @@ export const createOrder = catchAsync(
             travelDate: priced.find((p) => p.startDate)?.startDate,
             timeline: [{ event: 'ORDER_CREATED', detail: `channel=WEB method=${method}` }],
          })
+
+         // The reference is what the driver portal and the office key the ride on.
+         if (ride) {
+            ride.order = order._id
+            ride.reference = order.reference
+            await ride.save()
+         }
 
          /**
           * Only an order collected off-platform is told about at creation.
@@ -599,10 +663,11 @@ export const createOrder = catchAsync(
             void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
          }
 
-         return sendResponse(res, 201, 'Order created', { order: presentOrder(order) })
+         return sendResponse(res, 201, 'Order created', { order: presentOrder(order, ride) })
       } catch (err) {
-         // Never leave stock held for an order that does not exist.
+         // Never leave stock held — or a ride waiting — for an order that does not exist.
          await rollback(taken)
+         if (ride && !ride.order) await Ride.deleteOne({ _id: ride._id }).catch(() => undefined)
          throw err
       }
    }
@@ -635,7 +700,8 @@ export const getOrder = catchAsync(
       if (!order) return next(new AppError('Order not found', 404))
       // (the app's order screen and the website's confirmation page wait here)
       nudge(order as any)
-      return sendResponse(res, 200, 'OK', { order: presentOrder(order) })
+      // A transfer booking carries its ride: the points, the status, the driver once assigned.
+      return sendResponse(res, 200, 'OK', { order: presentOrder(order, await rideOfOrder(order)) })
    }
 )
 

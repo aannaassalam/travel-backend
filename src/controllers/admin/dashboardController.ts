@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 
 import {
+   BASE_CURRENCY,
    FULFILMENT_STATUS,
    LISTING_STATUS,
    ORDER_STATUS,
@@ -9,12 +10,13 @@ import {
    VERTICALS,
 } from '../../constants/domain.constants'
 import { Enquiry } from '../../model/enquiryModel'
-import { Hotel, RatePlan } from '../../model/hotelModel'
+import { Hotel } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import { Restaurant } from '../../model/restaurantModel'
 import { getSettings } from '../../model/settingsModel'
+import { currentRates } from '../../services/fx.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { lineCost, orderCost } from '../../utils/orderMath'
@@ -47,14 +49,6 @@ const PAID_ORDER = {
    status: { $ne: ORDER_STATUS.CANCELLED },
 }
 const isoDay = (d: Date) => d.toISOString().slice(0, 10)
-
-/** Unsold stock at cost, in USD cents: max(total − sold, 0) × costPrice.USD. */
-const unsoldAtCost = (total: string, sold: string) => ({
-   $multiply: [
-      { $max: [{ $subtract: [total, sold] }, 0] },
-      { $ifNull: ['$costPrice.USD', 0] },
-   ],
-})
 
 const statusCounts = async (Model: any) => {
    const rows: { _id: string; n: number }[] = await Model.aggregate([
@@ -101,7 +95,6 @@ export const getDashboard = catchAsync(
       const prevFrom = new Date(fromStart - days * DAY)
       const in24h = new Date(now.getTime() + DAY)
       const settings = await getSettings()
-      const riskCutoff = new Date(now.getTime() + settings.atRiskWindowDays * DAY)
 
       // Both windows in one bounded read; split in memory.
       const paid = await Order.find({ ...PAID_ORDER, createdAt: { $gte: prevFrom, $lte: to } })
@@ -168,14 +161,9 @@ export const getDashboard = catchAsync(
          enquiriesOverdue,
          failedPayments24h,
          reversedPayments,
-         hotelNightsAtRisk,
-         listingsAtRisk,
          hotelStatus,
          listingStatus,
          restaurantStatus,
-         [futureNights],
-         [pastNights],
-         [listingRisk],
       ] = await Promise.all([
          Customer.countDocuments({ createdAt: { $gte: from, $lte: to } }),
          Customer.countDocuments({ createdAt: { $gte: prevFrom, $lt: from } }),
@@ -217,43 +205,9 @@ export const getDashboard = catchAsync(
             updatedAt: { $gte: new Date(now.getTime() - DAY) },
          }),
          Order.countDocuments({ paymentStatus: PAYMENT_STATUS.REVERSED }),
-         RatePlan.countDocuments({
-            date: { $gte: now, $lte: riskCutoff },
-            blocked: false,
-            $expr: { $gt: ['$allotment', '$sold'] },
-         }),
-         Listing.countDocuments({
-            'attributes.departsAt': { $gte: now, $lte: riskCutoff },
-            status: { $ne: LISTING_STATUS.ARCHIVED },
-            $expr: { $gt: ['$quantityTotal', '$quantitySold'] },
-         }),
          statusCounts(Hotel),
          statusCounts(Listing),
          statusCounts(Restaurant),
-         RatePlan.aggregate([
-            { $match: { date: { $gte: now, $lte: riskCutoff }, blocked: false } },
-            { $group: { _id: null, value: { $sum: unsoldAtCost('$allotment', '$sold') } } },
-         ]),
-         RatePlan.aggregate([
-            { $match: { date: { $lt: now } } },
-            {
-               $group: {
-                  _id: null,
-                  value: { $sum: unsoldAtCost('$allotment', '$sold') },
-                  allotment: { $sum: '$allotment' },
-                  sold: { $sum: '$sold' },
-               },
-            },
-         ]),
-         Listing.aggregate([
-            {
-               $match: {
-                  'attributes.departsAt': { $gte: now, $lte: riskCutoff },
-                  status: { $ne: LISTING_STATUS.ARCHIVED },
-               },
-            },
-            { $group: { _id: null, value: { $sum: unsoldAtCost('$quantityTotal', '$quantitySold') } } },
-         ]),
       ])
 
       const countStatus = (s: string) =>
@@ -261,7 +215,11 @@ export const getDashboard = catchAsync(
       const delta = (value: number, prev: number) => ({ value, previous: prev })
 
       const body: Record<string, any> = {
-         currency: settings.baseCurrency,
+         // Every figure below is francs: order totals are stored in the base.
+         currency: BASE_CURRENCY,
+         // Francs per 1 USD and per 1 EUR today, so the panel can show these
+         // figures in dollars or euros for a role that may not open Settings.
+         rates: currentRates(),
          dataAsOf: now.toISOString(),
          period: { days, from: from.toISOString(), to: to.toISOString() },
          headline: {
@@ -293,19 +251,12 @@ export const getDashboard = catchAsync(
             awaitingDocuments,
             departingSoon,
             enquiriesOverdue,
-            stockAtRisk: hotelNightsAtRisk + listingsAtRisk,
             failedPayments24h,
             reversedPayments,
          },
          inventory: {
             published: countStatus(LISTING_STATUS.PUBLISHED),
             inactive: countStatus(LISTING_STATUS.INACTIVE),
-            atRiskValue: (futureNights?.value ?? 0) + (listingRisk?.value ?? 0),
-            spoilageValue: pastNights?.value ?? 0,
-            sellThroughRate: pastNights?.allotment
-               ? (pastNights.sold / pastNights.allotment) * 100
-               : null,
-            atRiskWindowDays: settings.atRiskWindowDays,
          },
       }
 
@@ -315,7 +266,7 @@ export const getDashboard = catchAsync(
          const recent = await Order.find({})
             .sort({ _id: -1 })
             .limit(8)
-            .select('reference customer items total paymentStatus paymentMethod status createdAt')
+            .select('reference customer items total currency baseCurrency chargedTotal chargedCurrency paymentStatus paymentMethod status createdAt')
             .populate('customer', 'firstName lastName')
             .lean()
          body.recentOrders = recent.map((o: any) => ({
@@ -325,7 +276,12 @@ export const getDashboard = catchAsync(
                ? `${o.customer.firstName} ${o.customer.lastName ?? ''}`.trim()
                : '',
             services: [...new Set((o.items ?? []).map((i: any) => i.vertical))],
+            // Shown as charged, with the francs beside it — like the bookings list.
             total: o.total,
+            // `total`'s currency, as on the order list (dto/admin/order.dto).
+            currency: o.baseCurrency ?? o.currency,
+            chargedTotal: o.chargedTotal,
+            chargedCurrency: o.chargedCurrency,
             paymentStatus: o.paymentStatus,
             paymentMethod: o.paymentMethod,
             status: o.status,

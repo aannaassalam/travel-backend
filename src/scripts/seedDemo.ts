@@ -25,8 +25,11 @@ import SettingsModel, { PolicyVersion } from '../model/settingsModel'
 import { Hotel, RatePlan, RoomType } from '../model/hotelModel'
 import { Supplier } from '../model/supplierModel'
 import { Order } from '../model/orderModel'
+import { usdToFrancs } from './migrateCdfBase'
+import { seedTransfers } from './seedTransfers'
 
-const usd = (dollars: number) => Math.round(dollars * 100)
+/** A dollar figure in francs: × 2 850, rounded up to the next 100 FC. */
+const fc = (dollars: number) => usdToFrancs(Math.round(dollars * 100), 2850)
 const day = (offset: number) => {
    const d = new Date()
    d.setUTCHours(0, 0, 0, 0)
@@ -108,13 +111,13 @@ const run = async () => {
       },
    ])
 
-   // One nightly price per room type, for every night (USD; CDF and EUR are
+   // One nightly price per room type, for every night (francs; USD and EUR are
    // worked out from the rates in Settings).
    const roomType = (hotel: number, fr: string, en: string, base: number, extra: object) => ({
       hotel: hotels[hotel]._id,
       name: { fr, en },
-      costPrice: { USD: usd(base * 0.7) },
-      sellPrice: { USD: usd(base) },
+      costPrice: { CDF: fc(base * 0.7) },
+      sellPrice: { CDF: fc(base) },
       status: LISTING_STATUS.PUBLISHED,
       ...extra,
    })
@@ -143,10 +146,10 @@ const run = async () => {
          startDate: day(3),
          endDate: day(3 + nights),
          quantity: qty,
-         unitSellPrice: usd(base),
-         unitCostPrice: usd(base * 0.7),
-         lineTotal: usd(base * nights * qty),
-         lineCost: usd(base * 0.7 * nights * qty),
+         unitSellPrice: fc(base),
+         unitCostPrice: fc(base * 0.7),
+         lineTotal: fc(base * nights * qty),
+         lineCost: fc(base * 0.7 * nights * qty),
       }
    }
 
@@ -160,8 +163,10 @@ const run = async () => {
          customer: customers[0]._id,
          items: [mkItem(0, 3, 1)],
          travellers: [{ firstName: 'Jean', lastName: 'Mukendi', documentType: 'PASSPORT', documentNumber: 'OP1234567' }],
-         total: usd(360),
-         chargedTotal: usd(360),
+         // In francs, so the one-off conversion of dollar-era orders passes it by.
+         baseCurrency: 'CDF',
+         total: fc(360),
+         chargedTotal: fc(360),
          paidAt: new Date(),
          travelDate: day(3),
          consent: {
@@ -180,7 +185,8 @@ const run = async () => {
          paymentMethod: 'CASH',
          customer: customers[1]._id,
          items: [mkItem(3, 2, 2)],
-         total: usd(480),
+         baseCurrency: 'CDF',
+         total: fc(480),
          // Inside 24h — shows on the dashboard chase list (§4.2).
          cashDeadline: new Date(Date.now() + 18 * 3600 * 1000),
          travelDate: day(5),
@@ -192,7 +198,8 @@ const run = async () => {
          paymentStatus: PAYMENT_STATUS.FAILED,
          customer: customers[2]._id,
          items: [mkItem(1, 1, 1)],
-         total: usd(180),
+         baseCurrency: 'CDF',
+         total: fc(180),
          travelDate: day(9),
          timeline: [{ event: 'ORDER_CREATED' }, { event: 'PAYMENT_FAILED' }],
       },
@@ -203,8 +210,9 @@ const run = async () => {
          fulfilmentStatus: FULFILMENT_STATUS.DOCUMENTS_ISSUED,
          customer: customers[0]._id,
          items: [mkItem(2, 4, 1)],
-         total: usd(1040),
-         chargedTotal: usd(1040),
+         baseCurrency: 'CDF',
+         total: fc(1040),
+         chargedTotal: fc(1040),
          paidAt: new Date(),
          travelDate: day(1),
          documents: [{ kind: 'VOUCHER', fileName: 'voucher-0004.pdf', version: 1 }],
@@ -243,7 +251,8 @@ const run = async () => {
          customerName: 'Grace Mbala',
          phone: '+243810000012',
          message: 'Terrain à Goma, 500m².',
-         quotedAmount: usd(45000),
+         quotedAmount: fc(45000),
+         quotedCurrency: 'CDF',
          firstContactAt: new Date(Date.now() - 26 * 3600 * 1000),
       },
    ])
@@ -270,6 +279,8 @@ const run = async () => {
    console.log(
       `Seeded ${hotels.length} hotels · ${rooms.length} room types · ${customers.length} customers · 4 orders · 3 enquiries · 2 policies`
    )
+   // The transfers fleet, so a ride can be quoted, booked and driven on this data.
+   await seedTransfers()
    await mongoose.disconnect()
 }
 

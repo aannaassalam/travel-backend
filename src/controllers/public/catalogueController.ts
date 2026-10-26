@@ -8,7 +8,7 @@ import {
    presentListings,
 } from '../../dto/public/catalogue.dto'
 import { Hotel, IRoomType, RoomType } from '../../model/hotelModel'
-import { Money } from '../../model/shared.schema'
+import { baseAmount, Money } from '../../model/shared.schema'
 import { isScheduledRoute, Listing } from '../../model/listingModel'
 import { timesOn, weekdayOf } from '../../services/orders/schedule.service'
 import AppError from '../../utils/appError'
@@ -30,11 +30,11 @@ import { sendResponse } from '../../utils/response'
 
 const PUBLIC_STATUSES = [LISTING_STATUS.PUBLISHED, LISTING_STATUS.SOLD_OUT]
 
-/** Cheapest room that actually has a price loaded — drives "from £x". */
+/** Cheapest room that actually has a price loaded — drives "from x FC". */
 const cheapestRoom = (rooms: { sellPrice?: Money }[]) =>
    rooms
-      .filter((r) => (r.sellPrice?.USD ?? 0) > 0)
-      .sort((a, b) => (a.sellPrice!.USD ?? 0) - (b.sellPrice!.USD ?? 0))[0]
+      .filter((r) => baseAmount(r.sellPrice) > 0)
+      .sort((a, b) => baseAmount(a.sellPrice) - baseAmount(b.sellPrice))[0]
 
 /** Escapes a user string before it reaches a $regex. */
 const rx = (value: string) =>
@@ -55,16 +55,17 @@ const MAX_LIMIT = 60
 const clampLimit = (v: unknown) => Math.min(int(v) ?? 24, MAX_LIMIT)
 
 /**
- * Sorting always runs on the USD price. It is the reporting base and the only
- * currency guaranteed to be set on every record, so a catalogue priced in USD
- * and CDF still sorts consistently for a visitor viewing euros.
+ * Sorting always runs on the franc price. It is the base and the only currency
+ * stored on every record (USD and EUR are worked out from it), so the order is
+ * the same whichever currency the visitor views.
  */
 const SORTS: Record<string, Record<string, 1 | -1>> = {
-   price_asc: { 'sellPrice.USD': 1 },
-   price_desc: { 'sellPrice.USD': -1 },
-   rating: { rating: -1, 'sellPrice.USD': 1 },
+   price_asc: { 'sellPrice.CDF': 1 },
+   price_desc: { 'sellPrice.CDF': -1 },
+   // Customers' approved reviews only, never the legacy `rating` (see the DTO).
+   rating: { 'reviewStats.rating': -1, 'sellPrice.CDF': 1 },
    departure: { 'attributes.departsAt': 1, validUntil: 1 },
-   recommended: { rating: -1, 'sellPrice.USD': 1 },
+   recommended: { 'reviewStats.rating': -1, 'sellPrice.CDF': 1 },
 }
 
 /**
@@ -85,7 +86,7 @@ const SEARCHED_ATTRIBUTES = [
 /**
  * GET /api/v1/listings
  * Allow-listed params: q, vertical, city, origin, destination, cabin, tripType,
- * propertyType, operator, category, transmission, withDriver, bedrooms,
+ * propertyType, operator, category, make, transmission, withDriver, bedrooms,
  * minPrice, maxPrice, sort, limit, cursor.
  */
 export const searchListings = catchAsync(async (req: Request, res: Response) => {
@@ -170,17 +171,23 @@ export const searchListings = catchAsync(async (req: Request, res: Response) => 
    if (str(q.propertyType)) filter['attributes.propertyType'] = str(q.propertyType)
    if (str(q.transmission)) filter['attributes.transmission'] = str(q.transmission)
    if (str(q.withDriver)) filter['attributes.withDriver'] = str(q.withDriver) === 'true'
+   // A car's make, one of the facet's: the whole name in any case, as it was
+   // typed ("toyota ") — the facet offers each make once, whatever its spelling.
+   if (term(q.make)) filter['attributes.make'] = new RegExp(`^\\s*${rx(term(q.make)!).source}\\s*$`, 'i')
    if (int(q.bedrooms)) filter['attributes.bedrooms'] = { $gte: int(q.bedrooms) }
 
    // Cars call it `category`, buses `vehicleClass`; one param covers both so the
-   // filter sidebar does not need a per-vertical key.
-   if (str(q.category)) {
+   // filter sidebar does not need a per-vertical key. In any case, like `make`:
+   // a car typed "Berline" before the type list is the code BERLINE (the CSV
+   // import reads it so too), and the type chips send the code.
+   if (term(q.category)) {
+      const value = new RegExp(`^\\s*${rx(term(q.category)!).source}\\s*$`, 'i')
       filter.$and = [
          ...(filter.$and ?? []),
          {
             $or: [
-               { 'attributes.category': str(q.category) },
-               { 'attributes.vehicleClass': str(q.category) },
+               { 'attributes.category': value },
+               { 'attributes.vehicleClass': value },
             ],
          },
       ]
@@ -198,10 +205,11 @@ export const searchListings = catchAsync(async (req: Request, res: Response) => 
       ]
    }
 
+   // In francs, like the stored price.
    const min = int(q.minPrice)
    const max = int(q.maxPrice)
    if (min !== undefined || max !== undefined) {
-      filter['sellPrice.USD'] = {
+      filter['sellPrice.CDF'] = {
          ...(min !== undefined ? { $gte: min } : {}),
          ...(max !== undefined ? { $lte: max } : {}),
       }
@@ -247,7 +255,7 @@ export const getListing = catchAsync(async (req: Request, res: Response) => {
       _id: { $ne: (listing as any)._id },
       status: LISTING_STATUS.PUBLISHED,
    })
-      .sort({ rating: -1 })
+      .sort({ 'reviewStats.rating': -1 })
       .limit(4)
       .lean({ virtuals: false })
 
@@ -269,12 +277,8 @@ const roomsOf = (hotelIds: any[]) =>
 /** A hotel with its rooms and its "from" price: the cheapest room per night. */
 const withRooms = (h: any, rooms: IRoomType[]): HotelWithRooms => {
    const mine = rooms.filter((r) => String(r.hotel) === String(h._id))
-   return { ...h, roomTypes: mine, fromPrice: cheapestRoom(mine)?.sellPrice ?? { USD: 0 } }
+   return { ...h, roomTypes: mine, fromPrice: cheapestRoom(mine)?.sellPrice ?? { CDF: 0 } }
 }
-
-/** The base-currency amount, which is what sorting and filtering compare. */
-const base = (m: Money | number | undefined) =>
-   typeof m === 'number' ? m : (m?.USD ?? 0)
 
 /** A YYYY-MM-DD the search sent, or nothing. */
 const parseDay = (v: unknown) => {
@@ -323,15 +327,15 @@ export const searchHotels = catchAsync(async (req: Request, res: Response) => {
    const max = int(q.maxPrice)
    let items = withPrice.filter(
       (h) =>
-         (min === undefined || base(h.fromPrice) >= min) &&
-         (max === undefined || base(h.fromPrice) <= max)
+         (min === undefined || baseAmount(h.fromPrice) >= min) &&
+         (max === undefined || baseAmount(h.fromPrice) <= max)
    )
 
    const sort = str(q.sort) ?? 'recommended'
    items = items.sort((a, b) => {
-      if (sort === 'price_asc') return base(a.fromPrice) - base(b.fromPrice)
-      if (sort === 'price_desc') return base(b.fromPrice) - base(a.fromPrice)
-      return ((b as any).rating ?? 0) - ((a as any).rating ?? 0)
+      if (sort === 'price_asc') return baseAmount(a.fromPrice) - baseAmount(b.fromPrice)
+      if (sort === 'price_desc') return baseAmount(b.fromPrice) - baseAmount(a.fromPrice)
+      return (b.reviewStats?.rating ?? 0) - (a.reviewStats?.rating ?? 0)
    })
 
    sendResponse(res, 200, 'Hotels', {
@@ -355,7 +359,7 @@ export const getHotel = catchAsync(async (req: Request, res: Response) => {
       _id: { $ne: (hotel as any)._id },
       status: LISTING_STATUS.PUBLISHED,
    })
-      .sort({ rating: -1 })
+      .sort({ 'reviewStats.rating': -1 })
       .limit(4)
       .lean({ virtuals: false })
 
@@ -381,7 +385,7 @@ export const getHotel = catchAsync(async (req: Request, res: Response) => {
  * airline we no longer sell is worse than no sidebar.
  */
 export const getFacets = catchAsync(async (_req: Request, res: Response) => {
-   const [cities, carriers, operators, categories, vehicleClasses, hotelAmenities, ranges] =
+   const [cities, carriers, operators, categories, vehicleClasses, hotelAmenities, ranges, makes] =
       await Promise.all([
          Listing.distinct('city', { status: { $in: PUBLIC_STATUSES } }),
          // On sale only: an inactive route's agency is not a choice anyone can book.
@@ -395,11 +399,12 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
             {
                $group: {
                   _id: '$vertical',
-                  min: { $min: '$sellPrice.USD' },
-                  max: { $max: '$sellPrice.USD' },
+                  min: { $min: '$sellPrice.CDF' },
+                  max: { $max: '$sellPrice.CDF' },
                },
             },
          ]),
+         Listing.distinct('attributes.make', { vertical: VERTICALS.CAR, status: { $in: PUBLIC_STATUSES } }),
       ])
 
    const priceBounds: Record<string, [number, number]> = {}
@@ -409,16 +414,17 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
       { $match: { status: { $in: PUBLIC_STATUSES } } },
       { $lookup: { from: 'roomtypes', localField: '_id', foreignField: 'hotel', as: 'rt' } },
       { $unwind: '$rt' },
-      { $match: { 'rt.status': LISTING_STATUS.PUBLISHED, 'rt.sellPrice.USD': { $gt: 0 } } },
+      { $match: { 'rt.status': LISTING_STATUS.PUBLISHED, 'rt.sellPrice.CDF': { $gt: 0 } } },
       {
          $group: {
             _id: null,
-            min: { $min: '$rt.sellPrice.USD' },
-            max: { $max: '$rt.sellPrice.USD' },
+            min: { $min: '$rt.sellPrice.CDF' },
+            max: { $max: '$rt.sellPrice.CDF' },
          },
       },
    ])
-   priceBounds.HOTEL = [hotelBounds[0]?.min ?? 0, hotelBounds[0]?.max ?? 100000]
+   // Francs; with no priced room, a ceiling of about $1 000.
+   priceBounds.HOTEL = [hotelBounds[0]?.min ?? 0, hotelBounds[0]?.max ?? 2_850_000]
 
    sendResponse(res, 200, 'Facets', {
       cities: (cities as string[]).filter(Boolean).sort(),
@@ -427,6 +433,14 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
       categories: (categories as string[]).filter(Boolean).sort(),
       vehicleClasses: (vehicleClasses as string[]).filter(Boolean).sort(),
       hotelAmenities: (hotelAmenities as string[]).filter(Boolean).sort(),
+      // Each make once, however it was typed ("Toyota", "toyota "): `make` finds them all.
+      makes: [
+         ...new Map(
+            (makes as unknown[])
+               .filter((m): m is string => typeof m === 'string' && Boolean(m.trim()))
+               .map((m) => [m.trim().toLowerCase(), m.trim()])
+         ).values(),
+      ].sort(),
       priceBounds,
    })
 })
@@ -461,7 +475,7 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
                   ? {}
                   : { $expr: { $gt: [{ $subtract: ['$quantityTotal', '$quantitySold'] }, 0] } }),
             })
-               .sort({ rating: -1, 'sellPrice.USD': 1 })
+               .sort({ 'reviewStats.rating': -1, 'sellPrice.CDF': 1 })
                .limit(2)
                .lean({ virtuals: false })
          )
@@ -471,7 +485,7 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
          .limit(4)
          .lean({ virtuals: false }),
       Hotel.find({ status: LISTING_STATUS.PUBLISHED })
-         .sort({ rating: -1 })
+         .sort({ 'reviewStats.rating': -1 })
          .limit(4)
          .lean({ virtuals: false }),
    ])

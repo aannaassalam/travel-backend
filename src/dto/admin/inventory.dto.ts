@@ -67,7 +67,7 @@ const roomTypeFields: FieldMap<IRoomType> = {
    beds: (r) => r.beds,
    amenities: (r) => r.amenities,
    images: (r) => r.images,
-   /** Per night, for every future night; USD minor units (cost never leaves the admin). */
+   /** Per night, for every future night; whole francs (cost never leaves the admin). */
    costPrice: (r) => r.costPrice,
    sellPrice: (r) => r.sellPrice,
    margin: (r) => baseAmount(r.sellPrice) - baseAmount(r.costPrice),

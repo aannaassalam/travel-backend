@@ -13,7 +13,12 @@ import {
    getRestaurant,
    searchRestaurants,
 } from '../../controllers/public/restaurantController'
-import { getSiteContact, getSiteContentPublic } from '../../controllers/public/siteController'
+import {
+   getSiteContact,
+   getSiteContentPublic,
+   getSiteCurrencies,
+} from '../../controllers/public/siteController'
+import { listPartners } from '../../controllers/public/partnerController'
 import { createEnquiry } from '../../controllers/public/enquiryController'
 import { getPolicy } from '../../controllers/public/policyController'
 import { listLocations, listRoutes } from '../../controllers/public/locationController'
@@ -113,6 +118,11 @@ router.get('/site/contact', cacheable(900), getSiteContact)
 // The site's editable wording. A shorter cache than contact details: someone
 // who has just changed a headline is waiting to see it.
 router.get('/site/content', cacheable(300), getSiteContentPublic)
+// A short cache: a rate the office has just set should reach the pickers in
+// about the minute every server takes to re-read it.
+router.get('/site/currencies', cacheable(60), getSiteCurrencies)
+// The homepage's partner logos: edited from the panel like the wording above.
+router.get('/partners', cacheable(300), listPartners)
 
 router.get('/policies/:kind', cacheable(900), getPolicy)
 

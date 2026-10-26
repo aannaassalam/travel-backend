@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import {
+   BASE_CURRENCY,
    onlinePaymentsEnabled,
    ORDER_STATUS,
    OFFLINE_RAILS,
@@ -28,6 +29,7 @@ import {
 } from '../../services/payments/maxicash.service'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import { notifyOrder } from '../../services/notifications/notify.service'
+import { cashDeadlineFor } from '../../services/orders/pricing.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -120,7 +122,8 @@ export const startPayment = catchAsync(
             const settings = await getSettings()
             order.paymentMethod = PAYMENT_METHOD.CASH
             order.paymentStatus = PAYMENT_STATUS.UNPAID
-            order.cashDeadline = new Date(Date.now() + settings.holdTtlCashHours * 3600_000)
+            // (a ride's: a day past the pick-up — the fare goes to the driver)
+            order.cashDeadline = cashDeadlineFor(order.items, settings.holdTtlCashHours)
             order.timeline.push({
                event: 'PAYMENT_METHOD_CHANGED',
                detail: 'ONLINE -> CASH at the customer\'s request',
@@ -188,7 +191,8 @@ export const startPayment = catchAsync(
        * between a checkout and a donation form.
        */
       const amountMinor = Number(order.chargedTotal ?? order.total)
-      const currency = String(order.chargedCurrency ?? order.currency) as Currency
+      // `total` is in the base. Not `order.currency`: a dollar-era order keeps 'USD' there.
+      const currency = String(order.chargedCurrency ?? BASE_CURRENCY) as Currency
 
       const c: any = order.customer
       const tokens = { notify: newToken(), success: newToken(), failure: newToken() }
