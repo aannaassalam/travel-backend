@@ -1,7 +1,9 @@
 import { Request, Response } from 'express'
 import { LISTING_STATUS, LOCALES, MENU_SECTIONS } from '../../constants/domain.constants'
 import { presentRestaurant, presentRestaurants } from '../../dto/public/catalogue.dto'
+import { bestPromoted, discountOf } from '../../model/listingModel'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
+import { fromPrices, promotedDish, withCardPrices } from '../../services/restaurantCards.service'
 import { pageInfo, pageOf } from './catalogueController'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -30,21 +32,6 @@ const SECTION_RANK = Object.values(MENU_SECTIONS).reduce<Record<string, number>>
 const byMenuOrder = (a: any, b: any) =>
    (SECTION_RANK[a.section] ?? 99) - (SECTION_RANK[b.section] ?? 99) ||
    (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
-
-/**
- * The cheapest published dish, which is what the card shows as "from".
- *
- * Read across the whole page of restaurants in one aggregate rather than one
- * query per card — the alternative is N+1 on a list that is meant to be the
- * fastest page on the site (§11.7 budgets it for 3G).
- */
-const fromPrices = async (ids: any[]) => {
-   const rows = await MenuItem.aggregate([
-      { $match: { restaurant: { $in: ids }, status: PUBLIC_STATUS, isAvailable: true } },
-      { $group: { _id: '$restaurant', cdf: { $min: '$sellPrice.CDF' } } },
-   ])
-   return new Map(rows.map((r: any) => [String(r._id), { CDF: r.cdf ?? 0 }]))
-}
 
 /**
  * Escaped before it reaches a RegExp: an unescaped query string lets a caller
@@ -80,6 +67,11 @@ export const searchRestaurants = catchAsync(async (req: Request, res: Response) 
       ]
    }
 
+   // The promotions page: restaurants with a dish on promotion, the biggest
+   // discount first. Few, so they are ordered and paged here, not in the database.
+   const promo = req.query.promo === 'true'
+   if (promo) filter._id = { $in: await MenuItem.distinct('restaurant', promotedDish()) }
+
    const paging = pageOf(req.query)
 
    const sort: Record<string, 1 | -1> =
@@ -91,18 +83,20 @@ export const searchRestaurants = catchAsync(async (req: Request, res: Response) 
 
    const published = { status: PUBLIC_STATUS }
    const [items, total, cities, cuisines] = await Promise.all([
-      Restaurant.find(filter).sort(sort).skip(paging.skip).limit(paging.limit),
+      promo
+         ? Restaurant.find(filter).sort(sort)
+         : Restaurant.find(filter).sort(sort).skip(paging.skip).limit(paging.limit),
       Restaurant.countDocuments(filter),
       Restaurant.distinct('city', published),
       Restaurant.distinct('cuisines', published),
    ])
 
-   const prices = await fromPrices(items.map((r) => r._id))
-   const withPrice = items.map((r) => {
-      const doc = r.toObject() as any
-      doc.fromPrice = prices.get(String(r._id)) ?? { CDF: 0 }
-      return doc
-   })
+   let withPrice = await withCardPrices(items.map((r) => r.toObject()))
+   if (promo) {
+      withPrice = withPrice
+         .sort((a, b) => discountOf(b.promoItem) - discountOf(a.promoItem))
+         .slice(paging.skip, paging.skip + paging.limit)
+   }
 
    const choices = (values: unknown[]) =>
       values.filter((v): v is string => typeof v === 'string' && Boolean(v.trim())).sort()
@@ -138,6 +132,7 @@ export const getRestaurant = catchAsync(async (req: Request, res: Response, next
    doc.fromPrice = (await fromPrices([restaurant._id])).get(String(restaurant._id)) ?? {
       CDF: 0,
    }
+   doc.promoItem = bestPromoted(menu.filter((m) => m.isAvailable !== false))
 
    return sendResponse(res, 200, 'Restaurant', { restaurant: presentRestaurant(doc) })
 })

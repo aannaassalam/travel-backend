@@ -22,6 +22,7 @@ import {
    updateDoc,
 } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
+import { applyPromotion, touchesPromotion } from '../../services/promotion.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { pick } from '../../utils/pick'
@@ -317,17 +318,14 @@ export const createMenuItem = catchAsync(
       const restaurant = await Restaurant.findById(req.params.id)
       if (!restaurant) return next(new AppError('Restaurant not found', 404))
 
-      const item = await createDoc<any>(
-         req,
-         MenuItem,
-         {
-            ...pick(req.body, MENUITEM_EDITABLE),
-            restaurant: restaurant._id,
-            costPrice: parseMoney(req.body.costPrice),
-            sellPrice: parseMoney(req.body.sellPrice),
-         },
-         { entityType: MENU_ENTITY }
-      )
+      const data: Record<string, any> = {
+         ...pick(req.body, MENUITEM_EDITABLE),
+         restaurant: restaurant._id,
+         costPrice: parseMoney(req.body.costPrice),
+         sellPrice: parseMoney(req.body.sellPrice),
+      }
+      applyPromotion(req.body, data)
+      const item = await createDoc<any>(req, MenuItem, data, { entityType: MENU_ENTITY })
       return sendResponse(res, 201, 'Menu item created', { item: presentMenuItem(item) })
    }
 )
@@ -335,7 +333,8 @@ export const createMenuItem = catchAsync(
 export const updateMenuItem = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       // Only a dish of the restaurant in the URL: any other id is not found here.
-      if (!(await ownDish(req))) return next(new AppError('Menu item not found', 404))
+      const current = await ownDish(req)
+      if (!current) return next(new AppError('Menu item not found', 404))
       // §BUG-010: allow-listed — restaurant is excluded, so a dish can never be
       // re-pointed at a different kitchen, and status moves only via archive.
       const patch: Record<string, unknown> = pick(req.body, MENUITEM_EDITABLE)
@@ -347,6 +346,7 @@ export const updateMenuItem = catchAsync(
          if (!(sell.CDF > 0)) return next(new AppError('The sell price must be more than 0 FC', 400))
          patch.sellPrice = sell
       }
+      if (touchesPromotion(req.body)) applyPromotion(req.body, patch, current)
 
       const item = await updateDoc<any>(req, MenuItem, req.params.menuItemId, patch, {
          entityType: MENU_ENTITY,

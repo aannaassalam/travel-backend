@@ -128,6 +128,13 @@ export interface IRoomType extends Document {
     */
    costPrice: Money
    sellPrice: Money
+   /**
+    * A promotion, display only (as on a listing): the old price the office
+    * typed, shown struck through beside `sellPrice` with the discount, until
+    * `promoEndsAt` (a day; none = until removed). Customers pay `sellPrice`.
+    */
+   promoCompareAtPrice?: Money
+   promoEndsAt?: Date | null
    mealPlan: string
    status: ListingStatus
    createdAt: Date
@@ -152,6 +159,8 @@ const roomTypeSchema = new Schema<IRoomType>(
       sizeSqm: { type: Number, min: 0 },
       costPrice: moneyField(),
       sellPrice: moneyField(),
+      promoCompareAtPrice: moneyField(),
+      promoEndsAt: Date,
       mealPlan: {
          type: String,
          enum: Object.values(MEAL_PLANS),

@@ -6,11 +6,23 @@ import {
    presentHotels,
    presentListing,
    presentListings,
+   presentRestaurants,
 } from '../../dto/public/catalogue.dto'
 import { Hotel, IRoomType, RoomType } from '../../model/hotelModel'
 import { baseAmount, Money } from '../../model/shared.schema'
-import { isScheduledRoute, Listing, livePromotionClauses } from '../../model/listingModel'
+import {
+   bestDiscountOf,
+   bestPromoted,
+   discountOf,
+   isScheduledRoute,
+   Listing,
+   listingPromotionClauses,
+   livePromotionClauses,
+   PROMO_FIELDS,
+} from '../../model/listingModel'
+import { MenuItem, Restaurant } from '../../model/restaurantModel'
 import { timesOn, weekdayOf } from '../../services/orders/schedule.service'
+import { cardPricesFor, promotedDish } from '../../services/restaurantCards.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -129,7 +141,9 @@ const rankedPage = async (
    const keys = await Listing.find(filter)
       .sort(sort)
       .limit(IN_MEMORY_MAX)
-      .select('vertical quantityTotal quantitySold quantityHeld attributes.dailyTimes attributes.weeklyTimes')
+      .select(
+         `vertical quantityTotal quantitySold quantityHeld attributes.dailyTimes attributes.weeklyTimes ${PROMO_FIELDS}`
+      )
       .lean({ virtuals: false })
    const ids = keys
       .map((l: any) => ({ id: String(l._id), by: rank(l) }))
@@ -287,24 +301,29 @@ export const searchListings = catchAsync(async (req: Request, res: Response) => 
       }
    }
 
-   // The promotions page: only offers whose promotion is running (display only).
-   if (str(q.promo) === 'true') filter.$and = [...(filter.$and ?? []), ...livePromotionClauses()]
+   // The promotions page: only offers with a price on a running promotion (display only).
+   const promo = str(q.promo) === 'true'
+   if (promo) filter.$and = [...(filter.$and ?? []), ...listingPromotionClauses()]
 
    const paging = pageOf(q)
    // Own keys only: `?sort=constructor` is not a sort.
-   const sortKey = Object.hasOwn(SORTS, str(q.sort) ?? '') ? str(q.sort)! : 'recommended'
+   const sorted = Object.hasOwn(SORTS, str(q.sort) ?? '')
+   const sortKey = sorted ? str(q.sort)! : 'recommended'
    const sort = SORTS[sortKey]
-   // Two orders are not stored fields, so every match is ranked before the
-   // page is cut, and the order holds across pages: "recommended" puts
+   // Three orders are not stored fields, so every match is ranked before the
+   // page is cut, and the order holds across pages: promotions with no sort
+   // asked put the biggest discount on any price first, sold-out ones last; "recommended" puts
    // anything still in stock above anything sold out (routes and properties
    // have no stock, so their searches keep Mongo's order), and a route's
    // "departure" is its first time.
    const rank =
-      route && sortKey === 'departure'
-         ? (l: any) => firstDeparture(l.attributes, day)
-         : !route && sortKey === 'recommended'
-           ? (l: any) => (inStock(l) ? 0 : 1)
-           : undefined
+      promo && !sorted
+         ? (l: any) => (inStock(l) ? 0 : 1000) - bestDiscountOf(l)
+         : route && sortKey === 'departure'
+           ? (l: any) => firstDeparture(l.attributes, day)
+           : !route && sortKey === 'recommended'
+             ? (l: any) => (inStock(l) ? 0 : 1)
+             : undefined
 
    const [docs, total] = await Promise.all([
       rank
@@ -352,7 +371,12 @@ const roomsOf = (hotelIds: any[]) =>
 /** A hotel with its rooms and its "from" price: the cheapest room per night. */
 const withRooms = (h: any, rooms: IRoomType[]): HotelWithRooms => {
    const mine = rooms.filter((r) => String(r.hotel) === String(h._id))
-   return { ...h, roomTypes: mine, fromPrice: cheapestRoom(mine)?.sellPrice ?? { CDF: 0 } }
+   return {
+      ...h,
+      roomTypes: mine,
+      fromPrice: cheapestRoom(mine)?.sellPrice ?? { CDF: 0 },
+      promoItem: bestPromoted(mine),
+   }
 }
 
 /** A YYYY-MM-DD the search sent, or nothing. */
@@ -404,14 +428,18 @@ export const searchHotels = catchAsync(async (req: Request, res: Response) => {
 
    const min = int(q.minPrice)
    const max = int(q.maxPrice)
+   // The promotions page: hotels with a room on promotion, the biggest discount first.
+   const promo = str(q.promo) === 'true'
    let items = withPrice.filter(
       (h) =>
          (min === undefined || baseAmount(h.fromPrice) >= min) &&
-         (max === undefined || baseAmount(h.fromPrice) <= max)
+         (max === undefined || baseAmount(h.fromPrice) <= max) &&
+         (!promo || h.promoItem)
    )
 
-   const sort = str(q.sort) ?? 'recommended'
+   const sort = str(q.sort) ?? (promo ? 'discount' : 'recommended')
    items = items.sort((a, b) => {
+      if (sort === 'discount') return discountOf(b.promoItem) - discountOf(a.promoItem)
       if (sort === 'price_asc') return baseAmount(a.fromPrice) - baseAmount(b.fromPrice)
       if (sort === 'price_desc') return baseAmount(b.fromPrice) - baseAmount(a.fromPrice)
       return (b.reviewStats?.rating ?? 0) - (a.reviewStats?.rating ?? 0)
@@ -542,7 +570,7 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
       VERTICALS.ACTIVITY,
    ].filter((v) => v !== VERTICALS.HOTEL)
 
-   const [dealsByVertical, properties, hotels, promotions] = await Promise.all([
+   const [dealsByVertical, properties, hotels, promotions, promoHotelIds, promoRestaurantIds] = await Promise.all([
       Promise.all(
          SELLABLE.map((vertical) =>
             Listing.find({
@@ -566,32 +594,56 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
          .sort({ 'reviewStats.rating': -1 })
          .limit(4)
          .lean({ virtuals: false }),
-      // Running promotions, the biggest discount first (the smallest share of
-      // the old price left to pay). Like the deals: some stock left, unless
-      // it is a route or a property, which have no count.
-      Listing.aggregate([
+      // Offers with any price on a running promotion, the biggest discount
+      // first, then the oldest. Like the deals: some stock left, unless it is
+      // a route or a property, which have no count.
+      rankedPage(
          {
-            $match: {
-               status: LISTING_STATUS.PUBLISHED,
-               $and: [
-                  ...livePromotionClauses(),
-                  {
-                     $or: [
-                        { vertical: { $in: [VERTICALS.BUS, VERTICALS.FLIGHT, VERTICALS.PROPERTY] } },
-                        STOCK_LEFT,
-                     ],
-                  },
-               ],
-            },
+            status: LISTING_STATUS.PUBLISHED,
+            $and: [
+               ...listingPromotionClauses(),
+               {
+                  $or: [
+                     { vertical: { $in: [VERTICALS.BUS, VERTICALS.FLIGHT, VERTICALS.PROPERTY] } },
+                     STOCK_LEFT,
+                  ],
+               },
+            ],
          },
-         { $addFields: { share: { $divide: ['$sellPrice.CDF', '$promoCompareAtPrice.CDF'] } } },
-         { $sort: { share: 1, _id: 1 } },
-         { $limit: 12 },
-      ]),
+         { _id: 1 },
+         (l) => -bestDiscountOf(l),
+         { skip: 0, limit: 12 }
+      ),
+      // Hotels with a room on promotion and restaurants with a dish on
+      // promotion: the website's Promotions rail, in this one call.
+      RoomType.distinct('hotel', { status: LISTING_STATUS.PUBLISHED, $and: livePromotionClauses() }),
+      MenuItem.distinct('restaurant', promotedDish()),
    ])
 
-   const rooms = await roomsOf(hotels.map((h: any) => h._id))
+   // One more round, all at once: the rooms of both hotel rails, the promoted
+   // hotels and restaurants, and those restaurants' card prices.
+   const [rooms, promoHotelDocs, promoRestaurantDocs, withCardPrice] = await Promise.all([
+      roomsOf([...hotels.map((h: any) => h._id), ...promoHotelIds]),
+      Hotel.find({ _id: { $in: promoHotelIds }, status: LISTING_STATUS.PUBLISHED }).lean({ virtuals: false }),
+      Restaurant.find({ _id: { $in: promoRestaurantIds }, status: LISTING_STATUS.PUBLISHED }).lean({
+         virtuals: false,
+      }),
+      cardPricesFor(promoRestaurantIds),
+   ])
    const hotelsWithPrice = hotels.map((h: any) => withRooms(h, rooms))
+   const byDiscount = (a: { promoItem?: any }, b: { promoItem?: any }) =>
+      discountOf(b.promoItem) - discountOf(a.promoItem)
+   // The biggest discount first.
+   const promoHotels = promoHotelDocs
+      .map((h: any) => withRooms(h, rooms))
+      .filter((h) => h.promoItem)
+      .sort(byDiscount)
+      .slice(0, 12)
+   const promoRestaurants = promoRestaurantDocs
+      .map(withCardPrice)
+      .filter((r) => r.promoItem)
+      .sort(byDiscount)
+      .slice(0, 12)
 
    // Interleave so the rail alternates verticals instead of grouping them.
    const deals: any[] = []
@@ -604,6 +656,8 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
       properties: presentListings(properties as any),
       hotels: presentHotels(hotelsWithPrice),
       promotions: presentListings(promotions as any),
+      promoHotels: presentHotels(promoHotels),
+      promoRestaurants: presentRestaurants(promoRestaurants as any),
    })
 })
 

@@ -19,14 +19,41 @@
 import { baseAmount } from '../../model/shared.schema'
 import { KINSHASA_OFFSET } from './schedule.service'
 
-/** Shortest first. Each rate is offered once its sell price is above zero. */
+/**
+ * Shortest first. Each rate is offered once its sell price is above zero.
+ * `promoField` is its old price while on promotion: display only, never charged.
+ */
 export const CAR_RATES = [
-   { hours: 1, name: 'hourly', costField: 'hourlyCostPrice', sellField: 'hourlySellPrice' },
-   { hours: 6, name: '6-hour', costField: 'sixHourCostPrice', sellField: 'sixHourSellPrice' },
-   { hours: 12, name: '12-hour', costField: 'twelveHourCostPrice', sellField: 'twelveHourSellPrice' },
+   {
+      hours: 1,
+      name: 'hourly',
+      costField: 'hourlyCostPrice',
+      sellField: 'hourlySellPrice',
+      promoField: 'hourlyPromoCompareAtPrice',
+   },
+   {
+      hours: 6,
+      name: '6-hour',
+      costField: 'sixHourCostPrice',
+      sellField: 'sixHourSellPrice',
+      promoField: 'sixHourPromoCompareAtPrice',
+   },
+   {
+      hours: 12,
+      name: '12-hour',
+      costField: 'twelveHourCostPrice',
+      sellField: 'twelveHourSellPrice',
+      promoField: 'twelveHourPromoCompareAtPrice',
+   },
    // The price every car already had, so a car made before hourly rates rents
    // by the 24 hours exactly as it rented by the day.
-   { hours: 24, name: '24-hour', costField: 'costPrice', sellField: 'sellPrice' },
+   {
+      hours: 24,
+      name: '24-hour',
+      costField: 'costPrice',
+      sellField: 'sellPrice',
+      promoField: 'promoCompareAtPrice',
+   },
 ] as const
 
 /** The three a car may add to its 24-hour price. */

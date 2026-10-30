@@ -25,6 +25,7 @@ import {
    updateDoc,
 } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
+import { applyPromotion, touchesPromotion } from '../../services/promotion.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { pick } from '../../utils/pick'
@@ -79,6 +80,12 @@ const roomPrices = (body: any, patch: Record<string, any>) => {
    if (sell <= 0) throw new AppError('Enter the nightly sell price in francs (FC)', 400)
    if (cost <= 0) throw new AppError('Enter the nightly cost price in francs (FC)', 400)
    if (sell <= cost) throw new AppError('The sell price must be above the cost price', 400)
+   return patch
+}
+
+/** A new room type's promotion, checked against its own sell price. */
+const withPromotion = (body: any, patch: Record<string, any>) => {
+   applyPromotion(body, patch)
    return patch
 }
 
@@ -302,7 +309,7 @@ export const createRoomType = catchAsync(async (req: Request, res: Response) => 
       req,
       RoomType,
       {
-         ...roomPrices(req.body, pick(req.body, ROOMTYPE_EDITABLE)),
+         ...withPromotion(req.body, roomPrices(req.body, pick(req.body, ROOMTYPE_EDITABLE))),
          hotel: req.params.id,
          // Decided here, never taken from the body (§BUG-010). A room type has
          // no publish step of its own, so it is live once saved; whether a
@@ -317,13 +324,18 @@ export const createRoomType = catchAsync(async (req: Request, res: Response) => 
 })
 
 export const updateRoomType = catchAsync(async (req: Request, res: Response) => {
-   const roomType = await updateDoc<any>(
-      req,
-      RoomType,
-      req.params.roomTypeId,
-      roomPrices(req.body, pick(req.body, ROOMTYPE_EDITABLE)),
-      { entityType: 'RoomType' }
-   )
+   const patch = roomPrices(req.body, pick(req.body, ROOMTYPE_EDITABLE))
+   if (touchesPromotion(req.body)) {
+      const current = isValidObjectId(req.params.roomTypeId)
+         ? await RoomType.findById(req.params.roomTypeId)
+              .select('sellPrice promoCompareAtPrice promoEndsAt')
+              .lean()
+         : null
+      applyPromotion(req.body, patch, current)
+   }
+   const roomType = await updateDoc<any>(req, RoomType, req.params.roomTypeId, patch, {
+      entityType: 'RoomType',
+   })
    return sendResponse(res, 200, 'Room type updated', {
       roomType: presentRoomType(roomType),
    })

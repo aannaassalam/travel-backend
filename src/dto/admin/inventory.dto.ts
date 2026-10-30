@@ -71,6 +71,9 @@ const roomTypeFields: FieldMap<IRoomType> = {
    costPrice: (r) => r.costPrice,
    sellPrice: (r) => r.sellPrice,
    margin: (r) => baseAmount(r.sellPrice) - baseAmount(r.costPrice),
+   // A promotion (display only): the old price in francs, and its last day.
+   promoCompareAtPrice: (r) => ({ CDF: baseAmount(r.promoCompareAtPrice) }),
+   promoEndsAt: (r) => (r.promoEndsAt ? new Date(r.promoEndsAt).toISOString().slice(0, 10) : null),
    mealPlan: (r) => r.mealPlan,
    status: (r) => r.status,
    version: (r) => (r as any).__v,
@@ -150,6 +153,9 @@ const menuItemFields: FieldMap<IMenuItem> = {
    costPrice: (m) => m.costPrice,
    sellPrice: (m) => m.sellPrice,
    marginBase: (m) => (m as any).marginBase,
+   // A promotion (display only): the old price in francs, and its last day.
+   promoCompareAtPrice: (m) => ({ CDF: baseAmount(m.promoCompareAtPrice) }),
+   promoEndsAt: (m) => (m.promoEndsAt ? new Date(m.promoEndsAt).toISOString().slice(0, 10) : null),
    images: (m) => m.images ?? [],
    isAvailable: (m) => m.isAvailable,
    sortOrder: (m) => m.sortOrder,

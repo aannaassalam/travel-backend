@@ -70,6 +70,17 @@ const NEVER_PUBLIC = [
    'sessions',
 ]
 
+/** A promotion as stored: published only as `promotion`, `childPromotion`… worked out. */
+const RAW_PROMOTION = [
+   'promoCompareAtPrice',
+   'childPromoCompareAtPrice',
+   'infantPromoCompareAtPrice',
+   'hourlyPromoCompareAtPrice',
+   'sixHourPromoCompareAtPrice',
+   'twelveHourPromoCompareAtPrice',
+   'promoEndsAt',
+]
+
 /** A document carrying every sensitive field, to prove the allow-list holds. */
 const poisoned = (extra: Record<string, any> = {}) => ({
    _id: { toString: () => '507f1f77bcf86cd799439011' },
@@ -138,6 +149,10 @@ check('presentListing (bus route) hides every cost and the agency behind it', ()
          infantSellPrice: { CDF: 0 },
          childCostPrice: { CDF: 19_979 },
          infantCostPrice: { CDF: 1 },
+         // Promotions: shown worked out, never as the stored fields; none on a free fare.
+         childPromoCompareAtPrice: { CDF: 35_625 },
+         infantPromoCompareAtPrice: { CDF: 4_999 },
+         promoEndsAt: new Date('2099-01-01T00:00:00Z'),
          // A populated supplier: its contact details are the office's, not the customer's.
          supplier: { _id: 'x', name: 'Secret Supplier Ltd', phone: 'LEAKED', email: 'LEAKED' },
          attributes: { destination: 'Matadi', dailyTimes: ['06:30'], operator: 'Transco' },
@@ -148,9 +163,14 @@ check('presentListing (bus route) hides every cost and the agency behind it', ()
       ...NEVER_PUBLIC,
       'childCostPrice',
       'infantCostPrice',
+      ...RAW_PROMOTION,
    ])
-   assert.ok(!JSON.stringify(out).includes('19979'), 'the child cost reached the public listing')
+   const json = JSON.stringify(out)
+   assert.ok(!json.includes('19979'), 'the child cost reached the public listing')
+   assert.ok(!RAW_PROMOTION.some((f) => json.includes(`"${f}"`)), `a stored promotion field was published — ${json}`)
+   assert.ok(!json.includes('4999'), 'an old price on a free baby fare reached the public listing')
    assert.strictEqual((out as any).childPrice.CDF, 28_500, 'lost the child fare')
+   assert.strictEqual((out as any).childPromotion.discountPercent, 20, "lost the child fare's promotion")
    assert.strictEqual((out as any).attributes.operator, 'Transco', 'lost the operator name')
 })
 
@@ -170,6 +190,12 @@ check('presentListing (car) shows its rates and none of their costs', () => {
          sixHourCostPrice: { CDF: 123_149 },
          twelveHourSellPrice: { CDF: 285_000 },
          twelveHourCostPrice: { CDF: 214_633 },
+         // An old price on a rate not offered goes nowhere; one on a rate offered shows worked out.
+         hourlyPromoCompareAtPrice: { CDF: 49_999 },
+         sixHourPromoCompareAtPrice: { CDF: 213_750 },
+         twelveHourPromoCompareAtPrice: { CDF: 0 },
+         promoCompareAtPrice: { CDF: 0 },
+         promoEndsAt: null,
          attributes: { make: 'Toyota', model: 'Prado', transmission: 'AUTOMATIC' },
       }) as any
    )
@@ -179,14 +205,17 @@ check('presentListing (car) shows its rates and none of their costs', () => {
       'hourlyCostPrice',
       'sixHourCostPrice',
       'twelveHourCostPrice',
+      ...RAW_PROMOTION,
    ])
    const json = JSON.stringify(out)
-   ;['38671', '123149', '214633'].forEach((cost) =>
-      assert.ok(!json.includes(cost), `a car rate's cost (${cost}) reached the public listing`)
+   ;['38671', '123149', '214633', '49999'].forEach((cost) =>
+      assert.ok(!json.includes(cost), `a car rate's cost or unused old price (${cost}) reached the public listing`)
    )
+   assert.ok(!RAW_PROMOTION.some((f) => json.includes(`"${f}"`)), `a stored promotion field was published — ${json}`)
    const rates = (out as any).rentalRates
    assert.deepStrictEqual(rates.map((r: any) => r.hours), [6, 12, 24], 'wrong rates offered')
    assert.strictEqual(rates[0].price.CDF, 171_000, 'lost the 6-hour rate')
+   assert.strictEqual(rates[0].promotion.discountPercent, 20, "lost the 6-hour rate's promotion")
 })
 
 check('presentHotel hides room costs', () => {

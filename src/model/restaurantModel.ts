@@ -152,6 +152,9 @@ export interface IMenuItem extends Document {
    description: Localized
    costPrice: Money
    sellPrice: Money
+   /** A promotion, display only (as on a listing): old price + last day. */
+   promoCompareAtPrice?: Money
+   promoEndsAt?: Date | null
    /** Plural: a dish is worth more than one angle, and the menu row shows the
     *  first while the detail view can show the rest. */
    images: string[]
@@ -188,6 +191,8 @@ const menuItemSchema = new Schema<IMenuItem>(
       // because once it is optional it is skipped.
       costPrice: moneyField({ required: true }),
       sellPrice: moneyField({ required: true }),
+      promoCompareAtPrice: moneyField(),
+      promoEndsAt: Date,
       images: { type: [String], default: [] },
       isAvailable: { type: Boolean, default: true },
       sortOrder: { type: Number, default: 0 },

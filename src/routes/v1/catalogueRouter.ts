@@ -85,7 +85,16 @@ const cacheable = (seconds: number) =>
       next()
    }) as express.RequestHandler
 
-router.get('/catalogue/home', cacheable(300), getHomeFeed)
+/**
+ * What shows a price or a promotion: an office change reaches customers within
+ * the minute. Browsers and the app always ask again; the edge keeps it 30 s.
+ */
+const priced: express.RequestHandler = (_req, res, next) => {
+   res.set('Cache-Control', 'public, max-age=0, s-maxage=30, stale-while-revalidate=30')
+   next()
+}
+
+router.get('/catalogue/home', priced, getHomeFeed)
 router.get('/catalogue/facets', cacheable(900), getFacets)
 
 /**
@@ -96,17 +105,16 @@ router.get('/locations', cacheable(900), listLocations)
 router.get('/routes', cacheable(900), listRoutes)
 router.get('/catalogue/slugs', cacheable(900), getSlugs)
 
-router.get('/listings', searchLimiter, cacheable(120), searchListings)
-router.get('/listings/:slug', cacheable(300), getListing)
+router.get('/listings', searchLimiter, priced, searchListings)
+router.get('/listings/:slug', priced, getListing)
 
-router.get('/hotels', searchLimiter, cacheable(120), searchHotels)
-router.get('/hotels/:slug', cacheable(300), getHotel)
+router.get('/hotels', searchLimiter, priced, searchHotels)
+router.get('/hotels/:slug', priced, getHotel)
 
-// Restaurants. Same cache windows as hotels: a list that moves rarely, and a
-// menu that the kitchen can 86 an item on at any moment — 300s is the most
-// staleness a "sold out" toggle should ever survive.
-router.get('/restaurants', searchLimiter, cacheable(120), searchRestaurants)
-router.get('/restaurants/:slug', cacheable(300), getRestaurant)
+// Restaurants. Same cache as hotels: prices and promotions, and a menu the
+// kitchen can 86 an item on at any moment.
+router.get('/restaurants', searchLimiter, priced, searchRestaurants)
+router.get('/restaurants/:slug', priced, getRestaurant)
 
 /**
  * Legal text, authored in the admin's content section. Cached hard: it changes

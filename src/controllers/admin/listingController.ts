@@ -2,7 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LISTING_STATUS, LOCALES, VERTICALS } from '../../constants/domain.constants'
-import { IListing, isScheduledRoute, Listing, promotionEnded, promotionPercent } from '../../model/listingModel'
+import { IListing, isScheduledRoute, Listing, PROMO_FIELDS, promoSlotsOf } from '../../model/listingModel'
 import { Location, ServicedRoute } from '../../model/locationModel'
 import { Supplier } from '../../model/supplierModel'
 import { OPTIONAL_CAR_RATES } from '../../services/orders/rental.service'
@@ -30,6 +30,7 @@ import {
    updateDoc,
 } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
+import { applyPromotion } from '../../services/promotion.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { pick } from '../../utils/pick'
@@ -93,6 +94,17 @@ const listingFields: FieldMap<IListing> = {
    twelveHourSellPrice: (l) => (l.vertical === VERTICALS.CAR ? l.twelveHourSellPrice : undefined),
    // A promotion (display only): the old price in francs, and its last day.
    promoCompareAtPrice: (l) => ({ CDF: baseAmount(l.promoCompareAtPrice) }),
+   // The old price of a route's other fares and a car's shorter rates; one end date for all.
+   childPromoCompareAtPrice: (l) =>
+      isScheduledRoute(l.vertical) ? { CDF: baseAmount(l.childPromoCompareAtPrice) } : undefined,
+   infantPromoCompareAtPrice: (l) =>
+      isScheduledRoute(l.vertical) ? { CDF: baseAmount(l.infantPromoCompareAtPrice) } : undefined,
+   hourlyPromoCompareAtPrice: (l) =>
+      l.vertical === VERTICALS.CAR ? { CDF: baseAmount(l.hourlyPromoCompareAtPrice) } : undefined,
+   sixHourPromoCompareAtPrice: (l) =>
+      l.vertical === VERTICALS.CAR ? { CDF: baseAmount(l.sixHourPromoCompareAtPrice) } : undefined,
+   twelveHourPromoCompareAtPrice: (l) =>
+      l.vertical === VERTICALS.CAR ? { CDF: baseAmount(l.twelveHourPromoCompareAtPrice) } : undefined,
    promoEndsAt: (l) => (l.promoEndsAt ? new Date(l.promoEndsAt).toISOString().slice(0, 10) : null),
    costPriceBase: (l) => baseAmount(l.costPrice),
    sellPriceBase: (l) => baseAmount(l.sellPrice),
@@ -306,50 +318,6 @@ const routeAndSupplier = async (
 }
 
 /**
- * A promotion, as sent: the old price in francs (blank clears the promotion,
- * its end date with it) and its last day, 'YYYY-MM-DD' or null. Display only:
- * customers pay the sell price. Checked when a save changes the promotion or
- * the sell price, so an edit elsewhere never trips over one that has ended.
- */
-const promotion = (body: any, patch: Record<string, any>, current?: IListing) => {
-   if (body.promoCompareAtPrice !== undefined) {
-      // 0, not `{}`: an empty object is dropped on save and the old price kept.
-      const typed = parseMoney(body.promoCompareAtPrice)
-      patch.promoCompareAtPrice = typed?.CDF !== undefined ? typed : { CDF: 0 }
-   }
-   if (body.promoEndsAt !== undefined) {
-      const day = writtenDay(body.promoEndsAt)
-      if (!day && body.promoEndsAt !== null && body.promoEndsAt !== '') {
-         throw new AppError('The promotion end date must be a date (YYYY-MM-DD)', 400)
-      }
-      patch.promoEndsAt = day
-   }
-   const old = baseAmount(patch.promoCompareAtPrice ?? current?.promoCompareAtPrice)
-   if (!old) {
-      if (body.promoCompareAtPrice !== undefined || body.promoEndsAt !== undefined) patch.promoEndsAt = null
-      return
-   }
-   const sell = baseAmount(patch.sellPrice ?? current?.sellPrice)
-   const ends = patch.promoEndsAt !== undefined ? patch.promoEndsAt : current?.promoEndsAt
-   const dayOf = (d?: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : null)
-   const changed =
-      !current ||
-      old !== baseAmount(current.promoCompareAtPrice) ||
-      dayOf(ends) !== dayOf(current.promoEndsAt)
-   const ended = promotionEnded(ends)
-   if (changed && ended) {
-      throw new AppError('The promotion end date is in the past: choose today or a later day', 400)
-   }
-   // As customers see it, rounded: a promotion that would read "−0 %" is refused.
-   if ((changed || sell !== baseAmount(current?.sellPrice)) && !ended && promotionPercent(old, sell) < 1) {
-      throw new AppError(
-         'The old price (before the promotion) must be higher than the sell price, in FC, for a discount of at least 1%',
-         400
-      )
-   }
-}
-
-/**
  * Once a route is on sale, the search box offers it: the pair of places goes
  * on the serviced routes, the list it builds its "To" choices from. A pair the
  * office switched off by hand stays off.
@@ -397,8 +365,9 @@ export const createListing = catchAsync(
          slug: await uniqueSlug(Listing, [title, city]),
          createdBy: (req as any).admin._id,
       }
-      promotion(req.body, data)
       await routeAndSupplier(req.body, vertical, data)
+      // After the fares and rates: each old price is checked against its price.
+      applyPromotion(req.body, data, null, promoSlotsOf(vertical))
       const listing = await createDoc<IListing>(req, Listing, data, { entityType: ENTITY })
       return sendResponse(res, 201, 'Listing created', {
          listing: presentListing(listing),
@@ -409,7 +378,7 @@ export const createListing = catchAsync(
 export const updateListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const current = await Listing.findById(req.params.id).select(
-         'vertical city attributes.destination sellPrice promoCompareAtPrice promoEndsAt'
+         `vertical city attributes.destination ${PROMO_FIELDS}`
       )
       if (!current) return next(new AppError('Listing not found', 404))
       // Only when the city is actually being changed — an edit to the price of
@@ -453,7 +422,6 @@ export const updateListing = catchAsync(
       const patch: Record<string, any> = pick(req.body, LISTING_EDITABLE)
       if (req.body.costPrice !== undefined) patch.costPrice = parseMoney(req.body.costPrice)
       if (req.body.sellPrice !== undefined) patch.sellPrice = parseMoney(req.body.sellPrice)
-      promotion(req.body, patch, current)
       patch.geo = parseGeo(req.body.geo)
       await routeAndSupplier(
          req.body,
@@ -461,6 +429,7 @@ export const updateListing = catchAsync(
          patch,
          (current.attributes as any)?.destination
       )
+      applyPromotion(req.body, patch, current, promoSlotsOf(current.vertical))
 
       const listing = await updateDoc<IListing>(req, Listing, req.params.id, patch, {
          entityType: ENTITY,

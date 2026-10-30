@@ -5,7 +5,7 @@ import {
    VERTICALS,
    Vertical,
 } from '../constants/domain.constants'
-import { OPTIONAL_CAR_RATES } from '../services/orders/rental.service'
+import { CAR_RATES, OPTIONAL_CAR_RATES } from '../services/orders/rental.service'
 import { hasTimetable } from '../services/orders/schedule.service'
 import {
    baseAmount,
@@ -53,7 +53,7 @@ export const promotionPercent = (old: number, sell: number) => Math.round(((old 
  * through the end of its last day. Display only — the sell price is charged.
  */
 export const livePromotion = (
-   l: Pick<IListing, 'sellPrice' | 'promoCompareAtPrice' | 'promoEndsAt'>,
+   l: { sellPrice?: Money; promoCompareAtPrice?: Money; promoEndsAt?: Date | null },
    now = Date.now()
 ) => {
    const old = baseAmount(l.promoCompareAtPrice)
@@ -63,23 +63,102 @@ export const livePromotion = (
       : undefined
 }
 
-/** `livePromotion` as query clauses, for an `$and`. */
-export const livePromotionClauses = (now = Date.now()) => [
-   { 'promoCompareAtPrice.CDF': { $gt: 0 } },
-   {
-      $expr: {
-         $and: [
-            { $gt: ['$sellPrice.CDF', 0] },
-            { $gt: ['$promoCompareAtPrice.CDF', '$sellPrice.CDF'] },
-         ],
-      },
-   },
-   {
-      $or: [
-         { promoEndsAt: null },
-         { promoEndsAt: { $gte: new Date(`${kinshasaDay(now)}T00:00:00.000Z`) } },
-      ],
-   },
+/**
+ * Of these rooms or dishes, the one whose running promotion is the biggest
+ * discount (the cheaper one on a tie): what a hotel or restaurant card shows.
+ */
+export const bestPromoted = <T extends Parameters<typeof livePromotion>[0]>(items: T[], now = Date.now()) => {
+   let best: { item: T; pct: number; sell: number } | undefined
+   for (const item of items) {
+      const p = livePromotion(item, now)
+      if (!p) continue
+      const pct = promotionPercent(p.old, p.sell)
+      if (!best || pct > best.pct || (pct === best.pct && p.sell < best.sell)) best = { item, pct, sell: p.sell }
+   }
+   return best?.item
+}
+
+/** The running discount in percent, 0 when none runs: orders promotion pages. */
+export const discountOf = (x?: Parameters<typeof livePromotion>[0], now = Date.now()) => {
+   const p = x && livePromotion(x, now)
+   return p ? promotionPercent(p.old, p.sell) : 0
+}
+
+/**
+ * A price that can be on promotion on its own: its old price (`promo`) beside
+ * its sell price. All of an offer's prices share its one end date,
+ * `promoEndsAt`. `label` names it in the office's error messages.
+ */
+export interface PromoSlot {
+   promo: string
+   sell: string
+   label: string
+   /** A route's child or baby fare. */
+   fare?: 'CHILD' | 'INFANT'
+   /** A car's rate, by its length. */
+   hours?: number
+}
+
+/** An offer's own price, and a room's or a dish's: the one `promotion` shows. */
+export const MAIN_PROMO: PromoSlot = { promo: 'promoCompareAtPrice', sell: 'sellPrice', label: 'offer' }
+
+/** A route's fares; the adult one is its own price. */
+const ROUTE_PROMOS: PromoSlot[] = [
+   { ...MAIN_PROMO, label: 'adult fare' },
+   { promo: 'childPromoCompareAtPrice', sell: 'childSellPrice', label: 'child fare', fare: 'CHILD' },
+   { promo: 'infantPromoCompareAtPrice', sell: 'infantSellPrice', label: 'baby fare', fare: 'INFANT' },
+]
+
+/** A car's rates (rental.service), shortest first; the 24-hour one is its own price. */
+const CAR_PROMOS: PromoSlot[] = CAR_RATES.map((r) => ({
+   promo: r.promoField,
+   sell: r.sellField,
+   label: `${r.hours}-hour rate`,
+   hours: r.hours,
+}))
+
+/** The prices of this kind of offer that can each be on promotion. */
+export const promoSlotsOf = (vertical: string) =>
+   vertical === VERTICALS.CAR ? CAR_PROMOS : isScheduledRoute(vertical) ? ROUTE_PROMOS : [MAIN_PROMO]
+
+/** Every slot once: the main price is in both lists. */
+const ALL_PROMOS = [...ROUTE_PROMOS, ...CAR_PROMOS.filter((s) => s.promo !== MAIN_PROMO.promo)]
+
+/** What every slot's promotion is read from, for a `select`. */
+export const PROMO_FIELDS = [...ALL_PROMOS.flatMap((s) => [s.promo, s.sell]), 'promoEndsAt'].join(' ')
+
+/** One of a listing's prices, as `livePromotion` reads one. */
+const slotView = (l: any, s: PromoSlot) => ({
+   sellPrice: l?.[s.sell],
+   promoCompareAtPrice: l?.[s.promo],
+   promoEndsAt: l?.promoEndsAt,
+})
+
+/** The promotion customers see on one of a listing's prices, or nothing. */
+export const livePromotionOf = (l: any, slot: PromoSlot, now = Date.now()) => livePromotion(slotView(l, slot), now)
+
+/** The biggest running discount on any of a listing's prices, in percent; 0 when none runs. */
+export const bestDiscountOf = (l: any, now = Date.now()) =>
+   Math.max(0, ...promoSlotsOf(l?.vertical).map((s) => discountOf(slotView(l, s), now)))
+
+/** A slot's old price above its sell price, as a query clause. */
+const runningClause = ({ promo, sell }: PromoSlot) => ({
+   [`${promo}.CDF`]: { $gt: 0 },
+   $expr: { $and: [{ $gt: [`$${sell}.CDF`, 0] }, { $gt: [`$${promo}.CDF`, `$${sell}.CDF`] }] },
+})
+
+/** Through its last day in Kinshasa, or with no end date. */
+const notEndedClause = (now: number) => ({
+   $or: [{ promoEndsAt: null }, { promoEndsAt: { $gte: new Date(`${kinshasaDay(now)}T00:00:00.000Z`) } }],
+})
+
+/** `livePromotion` as query clauses, for an `$and`: a room's or a dish's. */
+export const livePromotionClauses = (now = Date.now()) => [runningClause(MAIN_PROMO), notEndedClause(now)]
+
+/** A listing with any of its prices on promotion (`livePromotionOf`), as clauses for an `$and`. */
+export const listingPromotionClauses = (now = Date.now()) => [
+   { $or: ALL_PROMOS.map(runningClause) },
+   notEndedClause(now),
 ]
 
 /** §5.2 per-vertical fields. Validated per vertical in `publishBlockers`. */
@@ -234,6 +313,12 @@ export interface IListing extends Document {
     * these. Never `validUntil`, which expires the whole listing.
     */
    promoCompareAtPrice?: Money
+   /** The same for a route's child and baby fares and a car's shorter rates: one end date for all (`PromoSlot`). */
+   childPromoCompareAtPrice?: Money
+   infantPromoCompareAtPrice?: Money
+   hourlyPromoCompareAtPrice?: Money
+   sixHourPromoCompareAtPrice?: Money
+   twelveHourPromoCompareAtPrice?: Money
    promoEndsAt?: Date | null
    quantityTotal: number
    quantitySold: number
@@ -291,6 +376,11 @@ const listingSchema = new Schema<IListing>(
       twelveHourCostPrice: moneyField(),
       twelveHourSellPrice: moneyField(),
       promoCompareAtPrice: moneyField(),
+      childPromoCompareAtPrice: moneyField(),
+      infantPromoCompareAtPrice: moneyField(),
+      hourlyPromoCompareAtPrice: moneyField(),
+      sixHourPromoCompareAtPrice: moneyField(),
+      twelveHourPromoCompareAtPrice: moneyField(),
       promoEndsAt: Date,
       quantityTotal: { type: Number, default: 0, min: 0 },
       quantitySold: { type: Number, default: 0, min: 0 },

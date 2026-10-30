@@ -1,6 +1,15 @@
 import { VERTICALS } from '../../constants/domain.constants'
 import { IHotel, IRoomType } from '../../model/hotelModel'
-import { IListing, isScheduledRoute, livePromotion, promotionPercent } from '../../model/listingModel'
+import {
+   IListing,
+   isScheduledRoute,
+   livePromotion,
+   livePromotionOf,
+   MAIN_PROMO,
+   PromoSlot,
+   promoSlotsOf,
+   promotionPercent,
+} from '../../model/listingModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
 import { baseAmount, geoPoint, Localized, Money } from '../../model/shared.schema'
 import { inAllCurrencies } from '../../services/fx.service'
@@ -21,6 +30,34 @@ const localized = (value: Localized | string | undefined) => {
  * out at the office's rates (fx.service). A currency with no rate is left out.
  */
 const pickMoney = (value: Money | number | undefined) => inAllCurrencies(value)
+
+/**
+ * While a promotion runs (a listing, room or dish): the old price (shown struck
+ * through) and the discount, rounded, from the francs. Display only:
+ * `sellPrice` is charged. `endsAt` is its last day, at 00:00 UTC.
+ */
+const shown = (p: ReturnType<typeof livePromotion>) =>
+   p
+      ? {
+           compareAtPrice: pickMoney(p.old),
+           discountPercent: promotionPercent(p.old, p.sell),
+           endsAt: p.endsAt?.toISOString(),
+        }
+      : undefined
+const promotionOf = (x: Parameters<typeof livePromotion>[0]) => shown(livePromotion(x))
+
+/** The promotion on one of a listing's prices: a car rate, a child or baby fare. */
+const slotPromotion = (l: IListing, match: (s: PromoSlot) => boolean) => {
+   const slot = promoSlotsOf(l.vertical).find(match)
+   return slot && shown(livePromotionOf(l, slot))
+}
+
+/**
+ * A hotel's or restaurant's card: its best running promotion, on which room or
+ * dish, at what price. Absent when none runs.
+ */
+const promotedItem = (x?: IRoomType | IMenuItem) =>
+   x ? { ...promotionOf(x), name: localized(x.name), price: pickMoney(x.sellPrice) } : undefined
 
 /**
  * The rating and review count the public sees: approved customer reviews only
@@ -68,26 +105,34 @@ const listingFields: FieldMap<IListing> = {
    infantPrice: (l) => (isScheduledRoute(l.vertical) ? pickMoney(l.infantSellPrice) : undefined),
    /**
     * A car's prices for 1, 6, 12 and 24 hours, the ones it is offered at,
-    * shortest first. The 24-hour one is `sellPrice`. Sell only, like the rest.
+    * shortest first, each with its own promotion. The 24-hour one is
+    * `sellPrice`, its promotion `promotion`. Sell only, like the rest.
     */
    rentalRates: (l) =>
       l.vertical === VERTICALS.CAR
-         ? carRates(l).map((r) => ({ hours: r.hours, price: pickMoney(r.sell) }))
+         ? carRates(l).map((r) => ({
+              hours: r.hours,
+              price: pickMoney(r.sell),
+              promotion: slotPromotion(l, (s) => s.hours === r.hours),
+           }))
          : undefined,
+   /** The main price's: a car's 24 hours, a route's adult fare. */
+   promotion: (l) => promotionOf(l),
+   childPromotion: (l) => slotPromotion(l, (s) => s.fare === 'CHILD'),
+   infantPromotion: (l) => slotPromotion(l, (s) => s.fare === 'INFANT'),
    /**
-    * While a promotion runs: the old price (shown struck through) and the
-    * discount, rounded, from the francs. Display only: `sellPrice` is charged.
-    * `endsAt` is its last day, at 00:00 UTC.
+    * The biggest running discount on any other price (a car rate, a child or
+    * baby fare), and which: a hint for a card that shows the main price only.
     */
-   promotion: (l) => {
-      const p = livePromotion(l)
-      return p
-         ? {
-              compareAtPrice: pickMoney(p.old),
-              discountPercent: promotionPercent(p.old, p.sell),
-              endsAt: p.endsAt?.toISOString(),
-           }
-         : undefined
+   otherPromotion: (l) => {
+      let best: { discountPercent: number; endsAt?: string; fare?: PromoSlot['fare']; hours?: number } | undefined
+      for (const s of promoSlotsOf(l.vertical)) {
+         const p = s.promo === MAIN_PROMO.promo ? undefined : shown(livePromotionOf(l, s))
+         if (p && p.discountPercent > (best?.discountPercent ?? 0)) {
+            best = { discountPercent: p.discountPercent, endsAt: p.endsAt, fare: s.fare, hours: s.hours }
+         }
+      }
+      return best
    },
    /**
     * §4.5 availability, computed. The raw sold/held columns stay internal.
@@ -146,12 +191,15 @@ const roomTypeFields: FieldMap<IRoomType> = {
    mealPlan: (r) => r.mealPlan ?? 'ROOM_ONLY',
    /** Per night, for every night: one price holds until the office changes it. Rooms are not counted. */
    sellPrice: (r) => pickMoney(r.sellPrice),
+   promotion: (r) => promotionOf(r),
    sizeSqm: (r) => (r as any).sizeSqm,
 }
 
 export interface HotelWithRooms extends IHotel {
    fromPrice?: Money
    roomTypes?: IRoomType[]
+   /** The room with the best running promotion, if any. */
+   promoItem?: IRoomType
 }
 
 const hotelFields: FieldMap<HotelWithRooms> = {
@@ -173,6 +221,7 @@ const hotelFields: FieldMap<HotelWithRooms> = {
    rating: ratingOf,
    reviewCount: reviewCountOf,
    fromPrice: (h) => pickMoney(h.fromPrice),
+   promotion: (h) => promotedItem(h.promoItem),
    roomTypes: (h) => presentList(h.roomTypes ?? [], roomTypeFields),
 }
 
@@ -199,6 +248,7 @@ const menuItemFields: FieldMap<IMenuItem> = {
    name: (m) => localized(m.name),
    description: (m) => localized(m.description),
    sellPrice: (m) => pickMoney(m.sellPrice),
+   promotion: (m) => promotionOf(m),
    images: (m) => m.images ?? [],
    /** Drives the greyed-out "sold out today" row rather than hiding the dish. */
    isAvailable: (m) => m.isAvailable !== false,
@@ -221,6 +271,8 @@ const deliveryZoneFields: FieldMap<any> = {
 export interface RestaurantWithMenu extends IRestaurant {
    fromPrice?: Money
    menu?: IMenuItem[]
+   /** The available dish with the best running promotion, if any. */
+   promoItem?: IMenuItem
 }
 
 const restaurantFields: FieldMap<RestaurantWithMenu> = {
@@ -244,6 +296,7 @@ const restaurantFields: FieldMap<RestaurantWithMenu> = {
    deliveryZones: (r) =>
       presentList((r.deliveryZones ?? []).filter((z: any) => z.isActive), deliveryZoneFields),
    fromPrice: (r) => pickMoney(r.fromPrice),
+   promotion: (r) => promotedItem(r.promoItem),
    menu: (r) => presentList(r.menu ?? [], menuItemFields),
 }
 
