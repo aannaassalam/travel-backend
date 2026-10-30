@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 
 import {
-   safeDownloadName,
+   cutName,
    StorageAdapter,
    StoredFile,
    UploadInput,
@@ -77,9 +77,9 @@ export class LocalDiskStorage implements StorageAdapter {
    async signedUrl(key: string, ttlSeconds: number, downloadName?: string): Promise<string> {
       const expires = Math.floor(Date.now() / 1000) + ttlSeconds
       const sig = LocalDiskStorage.sign(key, expires)
-      const name = safeDownloadName(downloadName)
-      // The name is cosmetic and outside the signature; it is sanitised again
-      // where it is used.
+      // The name as written (accents kept): it is cosmetic and outside the
+      // signature, and made header-safe where it is used.
+      const name = cutName(downloadName)
       return (
          `/admin/v1/files/${encodeURIComponent(key)}?expires=${expires}&signature=${sig}` +
          (name ? `&name=${encodeURIComponent(name)}` : '')

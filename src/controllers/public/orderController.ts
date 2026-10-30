@@ -308,7 +308,10 @@ export const createOrder = catchAsync(
       const policy = (await live(wanted)) ?? (await live('fr'))
       if (!policy) {
          return next(
-            new AppError('No published no-refund policy — cannot take an order', 503)
+            new AppError(
+               'Bookings are paused while the cancellation terms are being updated. Please try again shortly.',
+               503
+            )
          )
       }
       /**
@@ -324,7 +327,7 @@ export const createOrder = catchAsync(
       if (shown !== undefined && String(shown) !== policy._id.toString()) {
          return res.status(409).json({
             status: 'fail',
-            message: 'The no-refund policy has been updated. Please read it again.',
+            message: 'The cancellation terms have been updated. Please read them again.',
             code: 'POLICY_CHANGED',
             policy: { versionId: policy._id.toString(), locale: policy.locale, body: policy.body },
          })
@@ -660,7 +663,7 @@ export const createOrder = catchAsync(
           * `notifyOrder` swallows its own errors into the delivery log.
           */
          if (method === PAYMENT_METHOD.CASH) {
-            void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
+            void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id, { sms: true, office: 'NEW' })
          }
 
          return sendResponse(res, 201, 'Order created', { order: presentOrder(order, ride) })

@@ -33,6 +33,10 @@ export const NOTIFICATION_TEMPLATE_DEFAULTS: { event: string; body: string }[] =
       body: 'Your booking {{order_ref}} has been cancelled. Details: {{order_link}}',
    },
    {
+      event: NOTIFICATION_EVENTS.ORDER_COMPLETED,
+      body: 'Your booking {{order_ref}} is complete. Thank you for choosing Flexi Agency! {{order_link}}',
+   },
+   {
       event: NOTIFICATION_EVENTS.ENQUIRY_RECEIVED,
       body: 'Thank you {{customer_name}}, enquiry {{order_ref}} received. We will call you shortly.',
    },

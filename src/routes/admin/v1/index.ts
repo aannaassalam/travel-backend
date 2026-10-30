@@ -327,6 +327,27 @@ router.get('/suppliers', requirePermission('inventory:read'), suppliers.listSupp
 router.post('/suppliers', requirePermission('inventory:write'), suppliers.createSupplier)
 router.patch('/suppliers/:id', requirePermission('inventory:write'), suppliers.updateSupplier)
 router.delete('/suppliers/:id', requirePermission('inventory:delete'), requireStepUp, suppliers.deleteSupplier)
+// Its papers (contract, licence, ID): private files. Permission first, so
+// nobody without inventory:write can make the server buffer an upload.
+router.post(
+   '/suppliers/:id/documents',
+   requirePermission('inventory:write'),
+   uploadMiddleware,
+   handleUploadErrors,
+   suppliers.attachDocuments
+)
+router.delete(
+   '/suppliers/:id/documents/:documentId',
+   requirePermission('inventory:write'),
+   suppliers.removeDocument
+)
+// A link to one file of this supplier — not the shared signed-link route,
+// which needs orders:read and signs any key it is sent.
+router.get(
+   '/suppliers/:id/documents/:documentId/link',
+   requirePermission('inventory:read'),
+   suppliers.documentLink
+)
 
 // --- Locations & serviced routes (§12) --------------------------------------
 router.get('/locations', requirePermission('inventory:read'), locations.listLocations)

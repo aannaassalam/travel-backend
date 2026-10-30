@@ -9,7 +9,7 @@ import {
 } from '../../dto/public/catalogue.dto'
 import { Hotel, IRoomType, RoomType } from '../../model/hotelModel'
 import { baseAmount, Money } from '../../model/shared.schema'
-import { isScheduledRoute, Listing } from '../../model/listingModel'
+import { isScheduledRoute, Listing, livePromotionClauses } from '../../model/listingModel'
 import { timesOn, weekdayOf } from '../../services/orders/schedule.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -45,27 +45,99 @@ const rx = (value: string) =>
 const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
 /** Free-text search box: capped so a pasted paragraph never becomes a regex. */
 const term = (v: unknown) => str(v)?.slice(0, 80)
+/** A whole number from a query param. Blank is absent: `?limit=` is not 0. */
 const int = (v: unknown) => {
-   const n = Number(v)
+   const n = Number(str(v))
    return Number.isFinite(n) ? Math.trunc(n) : undefined
 }
 
 /** §8: hard maximum page size. No endpoint returns an unbounded result set. */
 const MAX_LIMIT = 60
-const clampLimit = (v: unknown) => Math.min(int(v) ?? 24, MAX_LIMIT)
+/** §8 paging: `limit` 1–60 (24 when absent; 0 is not "no limit") and `page` 1–1000. */
+export const pageOf = (q: Request['query']) => {
+   const limit = Math.min(Math.max(int(q.limit) ?? 24, 1), MAX_LIMIT)
+   const page = Math.min(Math.max(int(q.page) ?? 1, 1), 1000)
+   return { limit, page, skip: (page - 1) * limit }
+}
+/** What a search answers besides its items. `pages` is 0 when nothing matches. */
+export const pageInfo = (total: number, { limit, page }: { limit: number; page: number }) => ({
+   total,
+   limit,
+   page,
+   pages: Math.ceil(total / limit),
+})
+/**
+ * Searches ordered in memory read at most this many matches.
+ * ponytail: past it the tail is unreachable; order in an aggregate then.
+ */
+const IN_MEMORY_MAX = 1000
 
 /**
  * Sorting always runs on the franc price. It is the base and the only currency
  * stored on every record (USD and EUR are worked out from it), so the order is
- * the same whichever currency the visitor views.
+ * the same whichever currency the visitor views. `_id` breaks ties, so a
+ * listing never shows on two pages, or on none.
  */
 const SORTS: Record<string, Record<string, 1 | -1>> = {
-   price_asc: { 'sellPrice.CDF': 1 },
-   price_desc: { 'sellPrice.CDF': -1 },
+   price_asc: { 'sellPrice.CDF': 1, _id: 1 },
+   price_desc: { 'sellPrice.CDF': -1, _id: 1 },
    // Customers' approved reviews only, never the legacy `rating` (see the DTO).
-   rating: { 'reviewStats.rating': -1, 'sellPrice.CDF': 1 },
-   departure: { 'attributes.departsAt': 1, validUntil: 1 },
-   recommended: { 'reviewStats.rating': -1, 'sellPrice.CDF': 1 },
+   rating: { 'reviewStats.rating': -1, 'sellPrice.CDF': 1, _id: 1 },
+   departure: { 'attributes.departsAt': 1, validUntil: 1, _id: 1 },
+   recommended: { 'reviewStats.rating': -1, 'sellPrice.CDF': 1, _id: 1 },
+}
+
+/** Still bookable: routes and properties have no stock count; anything else must have some left. */
+const inStock = (l: any) =>
+   isScheduledRoute(l.vertical) ||
+   l.vertical === VERTICALS.PROPERTY ||
+   (l.quantityTotal ?? 0) - (l.quantitySold ?? 0) - (l.quantityHeld ?? 0) > 0
+
+/** `inStock` as a query: units left once sold and held (unpaid cash orders) ones are taken off. */
+const STOCK_LEFT = {
+   $expr: {
+      $gt: [
+         {
+            $subtract: [
+               '$quantityTotal',
+               { $add: [{ $ifNull: ['$quantitySold', 0] }, { $ifNull: ['$quantityHeld', 0] }] },
+            ],
+         },
+         0,
+      ],
+   },
+}
+
+/** A route's first departure that day — or, with no day asked, any day. */
+const firstDeparture = (a: any, day?: string) =>
+   (day
+      ? timesOn(a, day)
+      : [...(a?.dailyTimes ?? []), ...(a?.weeklyTimes ?? []).map((w: any) => w.time)].sort())[0] ??
+   '99:99'
+
+/**
+ * One page of the matches in an order worked out here: `rank` first, then
+ * Mongo's order (Array.sort is stable). Every match is ranked on the few
+ * fields the order needs, and only the page is read whole.
+ */
+const rankedPage = async (
+   filter: Record<string, any>,
+   sort: Record<string, 1 | -1>,
+   rank: (l: any) => number | string,
+   { skip, limit }: { skip: number; limit: number }
+) => {
+   const keys = await Listing.find(filter)
+      .sort(sort)
+      .limit(IN_MEMORY_MAX)
+      .select('vertical quantityTotal quantitySold quantityHeld attributes.dailyTimes attributes.weeklyTimes')
+      .lean({ virtuals: false })
+   const ids = keys
+      .map((l: any) => ({ id: String(l._id), by: rank(l) }))
+      .sort((a, b) => (a.by < b.by ? -1 : a.by > b.by ? 1 : 0))
+      .slice(skip, skip + limit)
+      .map((k) => k.id)
+   const docs = await Listing.find({ _id: { $in: ids } }).lean({ virtuals: false })
+   return docs.sort((a: any, b: any) => ids.indexOf(String(a._id)) - ids.indexOf(String(b._id)))
 }
 
 /**
@@ -87,7 +159,7 @@ const SEARCHED_ATTRIBUTES = [
  * GET /api/v1/listings
  * Allow-listed params: q, vertical, city, origin, destination, cabin, tripType,
  * propertyType, operator, category, make, transmission, withDriver, bedrooms,
- * minPrice, maxPrice, sort, limit, cursor.
+ * minPrice, maxPrice, promo, sort, page, limit.
  */
 export const searchListings = catchAsync(async (req: Request, res: Response) => {
    const q = req.query
@@ -215,30 +287,33 @@ export const searchListings = catchAsync(async (req: Request, res: Response) => 
       }
    }
 
-   const limit = clampLimit(q.limit)
-   const sort = SORTS[str(q.sort) ?? 'recommended'] ?? SORTS.recommended
+   // The promotions page: only offers whose promotion is running (display only).
+   if (str(q.promo) === 'true') filter.$and = [...(filter.$and ?? []), ...livePromotionClauses()]
+
+   const paging = pageOf(q)
+   // Own keys only: `?sort=constructor` is not a sort.
+   const sortKey = Object.hasOwn(SORTS, str(q.sort) ?? '') ? str(q.sort)! : 'recommended'
+   const sort = SORTS[sortKey]
+   // Two orders are not stored fields, so every match is ranked before the
+   // page is cut, and the order holds across pages: "recommended" puts
+   // anything still in stock above anything sold out (routes and properties
+   // have no stock, so their searches keep Mongo's order), and a route's
+   // "departure" is its first time.
+   const rank =
+      route && sortKey === 'departure'
+         ? (l: any) => firstDeparture(l.attributes, day)
+         : !route && sortKey === 'recommended'
+           ? (l: any) => (inStock(l) ? 0 : 1)
+           : undefined
 
    const [docs, total] = await Promise.all([
-      Listing.find(filter).sort(sort).limit(limit).lean({ virtuals: false }),
+      rank
+         ? rankedPage(filter, sort, rank, paging)
+         : Listing.find(filter).sort(sort).skip(paging.skip).limit(paging.limit).lean({ virtuals: false }),
       Listing.countDocuments(filter),
    ])
 
-   // "Recommended" puts anything still in stock above anything sold out. Doing
-   // it here rather than in Mongo keeps the sort explainable; the page size is
-   // capped at 60 so the cost is irrelevant. A route has no stock count.
-   const items = presentListings(docs as any)
-   if ((str(q.sort) ?? 'recommended') === 'recommended') {
-      const inStock = (l: any) => l.available === undefined || l.available > 0
-      items.sort((a: any, b: any) => Number(inStock(b)) - Number(inStock(a)))
-   }
-   // Routes by their first departure that day — or, with no day asked, any day.
-   if (route && str(q.sort) === 'departure') {
-      const first = (l: any) =>
-         (day ? timesOn(l.attributes, day) : [...(l.attributes.dailyTimes ?? []), ...(l.attributes.weeklyTimes ?? []).map((w: any) => w.time)].sort())[0] ?? '99:99'
-      items.sort((a: any, b: any) => first(a).localeCompare(first(b)))
-   }
-
-   sendResponse(res, 200, 'Listings', { items, total, limit })
+   sendResponse(res, 200, 'Listings', { items: presentListings(docs as any), ...pageInfo(total, paging) })
 })
 
 /** GET /api/v1/listings/:slug */
@@ -317,9 +392,13 @@ export const searchHotels = catchAsync(async (req: Request, res: Response) => {
    const amenities = str(q.amenities)?.split(',').filter(Boolean)
    if (amenities?.length) filter.amenities = { $all: amenities }
 
-   const limit = clampLimit(q.limit)
+   const { limit, page, skip } = pageOf(q)
 
-   const hotels = await Hotel.find(filter).limit(limit).lean({ virtuals: false })
+   // Every match, then the page: the price filter and the sorts read the
+   // "from" price, worked out from the rooms, so the page is cut once all of
+   // them are priced, and the total counts what the filter kept. In _id order
+   // first, so equals stay in one order (the sort below is stable).
+   const hotels = await Hotel.find(filter).sort({ _id: 1 }).limit(IN_MEMORY_MAX).lean({ virtuals: false })
    const rooms = await roomsOf(hotels.map((h: any) => h._id))
    const withPrice = hotels.map((h: any) => withRooms(h, rooms))
 
@@ -339,9 +418,8 @@ export const searchHotels = catchAsync(async (req: Request, res: Response) => {
    })
 
    sendResponse(res, 200, 'Hotels', {
-      items: presentHotels(items),
-      total: items.length,
-      limit,
+      items: presentHotels(items.slice(skip, skip + limit)),
+      ...pageInfo(items.length, { limit, page }),
    })
 })
 
@@ -464,7 +542,7 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
       VERTICALS.ACTIVITY,
    ].filter((v) => v !== VERTICALS.HOTEL)
 
-   const [dealsByVertical, properties, hotels] = await Promise.all([
+   const [dealsByVertical, properties, hotels, promotions] = await Promise.all([
       Promise.all(
          SELLABLE.map((vertical) =>
             Listing.find({
@@ -473,7 +551,7 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
                // A route has no seat count; anything else must have stock left.
                ...(isScheduledRoute(vertical)
                   ? {}
-                  : { $expr: { $gt: [{ $subtract: ['$quantityTotal', '$quantitySold'] }, 0] } }),
+                  : STOCK_LEFT),
             })
                .sort({ 'reviewStats.rating': -1, 'sellPrice.CDF': 1 })
                .limit(2)
@@ -488,6 +566,28 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
          .sort({ 'reviewStats.rating': -1 })
          .limit(4)
          .lean({ virtuals: false }),
+      // Running promotions, the biggest discount first (the smallest share of
+      // the old price left to pay). Like the deals: some stock left, unless
+      // it is a route or a property, which have no count.
+      Listing.aggregate([
+         {
+            $match: {
+               status: LISTING_STATUS.PUBLISHED,
+               $and: [
+                  ...livePromotionClauses(),
+                  {
+                     $or: [
+                        { vertical: { $in: [VERTICALS.BUS, VERTICALS.FLIGHT, VERTICALS.PROPERTY] } },
+                        STOCK_LEFT,
+                     ],
+                  },
+               ],
+            },
+         },
+         { $addFields: { share: { $divide: ['$sellPrice.CDF', '$promoCompareAtPrice.CDF'] } } },
+         { $sort: { share: 1, _id: 1 } },
+         { $limit: 12 },
+      ]),
    ])
 
    const rooms = await roomsOf(hotels.map((h: any) => h._id))
@@ -503,6 +603,7 @@ export const getHomeFeed = catchAsync(async (_req: Request, res: Response) => {
       deals: presentListings(deals as any),
       properties: presentListings(properties as any),
       hotels: presentHotels(hotelsWithPrice),
+      promotions: presentListings(promotions as any),
    })
 })
 

@@ -2,7 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LISTING_STATUS, LOCALES, VERTICALS } from '../../constants/domain.constants'
-import { IListing, isScheduledRoute, Listing } from '../../model/listingModel'
+import { IListing, isScheduledRoute, Listing, promotionEnded, promotionPercent } from '../../model/listingModel'
 import { Location, ServicedRoute } from '../../model/locationModel'
 import { Supplier } from '../../model/supplierModel'
 import { OPTIONAL_CAR_RATES } from '../../services/orders/rental.service'
@@ -91,6 +91,9 @@ const listingFields: FieldMap<IListing> = {
    sixHourSellPrice: (l) => (l.vertical === VERTICALS.CAR ? l.sixHourSellPrice : undefined),
    twelveHourCostPrice: (l) => (l.vertical === VERTICALS.CAR ? l.twelveHourCostPrice : undefined),
    twelveHourSellPrice: (l) => (l.vertical === VERTICALS.CAR ? l.twelveHourSellPrice : undefined),
+   // A promotion (display only): the old price in francs, and its last day.
+   promoCompareAtPrice: (l) => ({ CDF: baseAmount(l.promoCompareAtPrice) }),
+   promoEndsAt: (l) => (l.promoEndsAt ? new Date(l.promoEndsAt).toISOString().slice(0, 10) : null),
    costPriceBase: (l) => baseAmount(l.costPrice),
    sellPriceBase: (l) => baseAmount(l.sellPrice),
    currencies: (l) => availableCurrencies(l.sellPrice),
@@ -274,7 +277,11 @@ const routeAndSupplier = async (
    const isCar = vertical === VERTICALS.CAR
    if (isCar) {
       for (const key of CAR_RATE_FIELDS) {
-         if (body[key] !== undefined) patch[key] = parseMoney(body[key])
+         if (body[key] === undefined) continue
+         // A blank box is "not rented for that length": 0, not `{}`, which the
+         // save drops, keeping the old rate (as for a promotion's old price).
+         const rate = parseMoney(body[key])
+         patch[key] = rate?.CDF !== undefined ? rate : { CDF: 0 }
       }
    }
    if (!(isScheduledRoute(vertical) || isCar) || !patch.attributes) return
@@ -296,6 +303,50 @@ const routeAndSupplier = async (
    if (supplier) attributes.operator = (await Supplier.findById(supplier).select('name'))?.name
    else if (supplier === null) delete attributes.operator
    patch.attributes = attributes
+}
+
+/**
+ * A promotion, as sent: the old price in francs (blank clears the promotion,
+ * its end date with it) and its last day, 'YYYY-MM-DD' or null. Display only:
+ * customers pay the sell price. Checked when a save changes the promotion or
+ * the sell price, so an edit elsewhere never trips over one that has ended.
+ */
+const promotion = (body: any, patch: Record<string, any>, current?: IListing) => {
+   if (body.promoCompareAtPrice !== undefined) {
+      // 0, not `{}`: an empty object is dropped on save and the old price kept.
+      const typed = parseMoney(body.promoCompareAtPrice)
+      patch.promoCompareAtPrice = typed?.CDF !== undefined ? typed : { CDF: 0 }
+   }
+   if (body.promoEndsAt !== undefined) {
+      const day = writtenDay(body.promoEndsAt)
+      if (!day && body.promoEndsAt !== null && body.promoEndsAt !== '') {
+         throw new AppError('The promotion end date must be a date (YYYY-MM-DD)', 400)
+      }
+      patch.promoEndsAt = day
+   }
+   const old = baseAmount(patch.promoCompareAtPrice ?? current?.promoCompareAtPrice)
+   if (!old) {
+      if (body.promoCompareAtPrice !== undefined || body.promoEndsAt !== undefined) patch.promoEndsAt = null
+      return
+   }
+   const sell = baseAmount(patch.sellPrice ?? current?.sellPrice)
+   const ends = patch.promoEndsAt !== undefined ? patch.promoEndsAt : current?.promoEndsAt
+   const dayOf = (d?: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : null)
+   const changed =
+      !current ||
+      old !== baseAmount(current.promoCompareAtPrice) ||
+      dayOf(ends) !== dayOf(current.promoEndsAt)
+   const ended = promotionEnded(ends)
+   if (changed && ended) {
+      throw new AppError('The promotion end date is in the past: choose today or a later day', 400)
+   }
+   // As customers see it, rounded: a promotion that would read "−0 %" is refused.
+   if ((changed || sell !== baseAmount(current?.sellPrice)) && !ended && promotionPercent(old, sell) < 1) {
+      throw new AppError(
+         'The old price (before the promotion) must be higher than the sell price, in FC, for a discount of at least 1%',
+         400
+      )
+   }
 }
 
 /**
@@ -346,6 +397,7 @@ export const createListing = catchAsync(
          slug: await uniqueSlug(Listing, [title, city]),
          createdBy: (req as any).admin._id,
       }
+      promotion(req.body, data)
       await routeAndSupplier(req.body, vertical, data)
       const listing = await createDoc<IListing>(req, Listing, data, { entityType: ENTITY })
       return sendResponse(res, 201, 'Listing created', {
@@ -356,7 +408,9 @@ export const createListing = catchAsync(
 
 export const updateListing = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const current = await Listing.findById(req.params.id).select('vertical city attributes.destination')
+      const current = await Listing.findById(req.params.id).select(
+         'vertical city attributes.destination sellPrice promoCompareAtPrice promoEndsAt'
+      )
       if (!current) return next(new AppError('Listing not found', 404))
       // Only when the city is actually being changed — an edit to the price of
       // a listing in a city that was later deactivated must still be possible.
@@ -399,6 +453,7 @@ export const updateListing = catchAsync(
       const patch: Record<string, any> = pick(req.body, LISTING_EDITABLE)
       if (req.body.costPrice !== undefined) patch.costPrice = parseMoney(req.body.costPrice)
       if (req.body.sellPrice !== undefined) patch.sellPrice = parseMoney(req.body.sellPrice)
+      promotion(req.body, patch, current)
       patch.geo = parseGeo(req.body.geo)
       await routeAndSupplier(
          req.body,

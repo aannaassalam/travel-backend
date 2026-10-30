@@ -44,7 +44,7 @@ const REMINDER_WINDOW_MS = 12 * 60 * 60 * 1000
  * single worker or add a database lock at that point.
  */
 
-const systemAudit = async (action: string, detail: Record<string, any>) => {
+export const systemAudit = async (action: string, detail: Record<string, any>) => {
    await AuditLog.create({
       actorEmail: 'system',
       action,
@@ -152,7 +152,7 @@ export const releaseExpiredCashHolds = async () => {
  * §6.1: chase the cash before the deadline, not after it.
  *
  * Fires once per order, in the window before its deadline — `cashReminderSentAt`
- * is what stops a customer being texted every ten minutes for the last twelve
+ * is what stops a customer being messaged every ten minutes for the last twelve
  * hours of their hold. An order that expires unchased is a sale lost to
  * silence, which is the whole reason the deadline is visible to the office.
  */

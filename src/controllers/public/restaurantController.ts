@@ -2,6 +2,7 @@ import { Request, Response } from 'express'
 import { LISTING_STATUS, LOCALES, MENU_SECTIONS } from '../../constants/domain.constants'
 import { presentRestaurant, presentRestaurants } from '../../dto/public/catalogue.dto'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
+import { pageInfo, pageOf } from './catalogueController'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -54,7 +55,7 @@ const escapeRx = (value: string) =>
    value.replace(/\0/g, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /**
- * GET /api/v1/restaurants?q=poisson&city=Kinshasa&cuisine=Congolais&sort=price_asc
+ * GET /api/v1/restaurants?q=poisson&city=Kinshasa&cuisine=Congolais&sort=rating&page=2&limit=30
  */
 export const searchRestaurants = catchAsync(async (req: Request, res: Response) => {
    const filter: Record<string, unknown> = { status: PUBLIC_STATUS }
@@ -79,17 +80,21 @@ export const searchRestaurants = catchAsync(async (req: Request, res: Response) 
       ]
    }
 
-   const limit = Math.min(Math.max(Number(req.query.limit) || 24, 1), 60)
+   const paging = pageOf(req.query)
 
    const sort: Record<string, 1 | -1> =
-      // Customers' approved reviews only, never the legacy `rating`.
+      // Customers' approved reviews only, never the legacy `rating`. `_id`
+      // breaks ties, so a restaurant never shows on two pages, or on none.
       req.query.sort === 'rating'
-         ? { 'reviewStats.rating': -1 }
-         : { 'reviewStats.rating': -1, createdAt: -1 }
+         ? { 'reviewStats.rating': -1, _id: -1 }
+         : { 'reviewStats.rating': -1, createdAt: -1, _id: -1 }
 
-   const [items, total] = await Promise.all([
-      Restaurant.find(filter).sort(sort).limit(limit),
+   const published = { status: PUBLIC_STATUS }
+   const [items, total, cities, cuisines] = await Promise.all([
+      Restaurant.find(filter).sort(sort).skip(paging.skip).limit(paging.limit),
       Restaurant.countDocuments(filter),
+      Restaurant.distinct('city', published),
+      Restaurant.distinct('cuisines', published),
    ])
 
    const prices = await fromPrices(items.map((r) => r._id))
@@ -99,9 +104,13 @@ export const searchRestaurants = catchAsync(async (req: Request, res: Response) 
       return doc
    })
 
+   const choices = (values: unknown[]) =>
+      values.filter((v): v is string => typeof v === 'string' && Boolean(v.trim())).sort()
    return sendResponse(res, 200, 'Restaurants', {
       items: presentRestaurants(withPrice),
-      total,
+      ...pageInfo(total, paging),
+      // The city and cuisine choices: every published restaurant's, not this page's.
+      facets: { cities: choices(cities), cuisines: choices(cuisines) },
    })
 })
 

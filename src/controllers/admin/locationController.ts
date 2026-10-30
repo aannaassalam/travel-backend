@@ -2,14 +2,19 @@ import { NextFunction, Request, Response } from 'express'
 import { Types } from 'mongoose'
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { VERTICALS } from '../../constants/domain.constants'
+import { Driver } from '../../model/driverModel'
 import { Hotel } from '../../model/hotelModel'
 import { Listing } from '../../model/listingModel'
 import { Location, ServicedRoute } from '../../model/locationModel'
 import { Restaurant } from '../../model/restaurantModel'
+import { Ride, RIDE_STATUS } from '../../model/rideModel'
 import { geoPoint, parseGeo } from '../../model/shared.schema'
+import { TransferPlace } from '../../model/transferPlaceModel'
+import { Vehicle } from '../../model/vehicleModel'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
+import { BUILT_IN_PICTURE, isOwnPublicFile } from '../../utils/ownFile'
 import { sendResponse } from '../../utils/response'
 import { escapeRx, sameName } from '../../utils/sameName'
 
@@ -36,6 +41,18 @@ const searchTerm = (v: unknown) =>
 const searchRx = (value: string) => new RegExp(escapeRx(value), 'i')
 const nameKey = (name: unknown) => String(name ?? '').trim().toLowerCase()
 const NAME_TAKEN = 'Another location already has that name, or one written almost the same'
+
+/**
+ * The city's photo on the home page tiles: '' (or null) for none, this
+ * screen's upload (folder `locations`), or one of the website's own pictures,
+ * which the seeded cities carry. Any other address could break the home page.
+ */
+const locationImage = (raw: unknown) => {
+   if (raw === null || raw === '') return ''
+   if (typeof raw === 'string' && BUILT_IN_PICTURE.test(raw)) return raw
+   if (isOwnPublicFile(raw, 'locations', '(\\.[a-z0-9]{1,5})?')) return raw
+   throw new AppError('Photo: upload the picture from this screen', 400)
+}
 
 const present = (l: any) => ({
    id: l._id.toString(),
@@ -128,7 +145,7 @@ export const createLocation = catchAsync(
          ).filter((v: string) => Object.values(VERTICALS).includes(v as never)),
          isActive: req.body?.isActive !== false,
          sortOrder: Number(req.body?.sortOrder) || 0,
-         image: req.body?.image,
+         image: req.body?.image === undefined ? undefined : locationImage(req.body.image),
          geo: parseGeo(req.body?.geo) ?? undefined,
       })
 
@@ -147,6 +164,7 @@ export const updateLocation = catchAsync(
       const location = await Location.findById(req.params.id)
       if (!location) return next(new AppError('Location not found', 404))
       const before = location.toObject()
+      if (req.body?.image !== undefined) req.body.image = locationImage(req.body.image)
 
       // A rename is checked before anything is written: hotels, restaurants and
       // listings name their city by this text, so two places may not share it
@@ -167,6 +185,25 @@ export const updateLocation = catchAsync(
                $or: [{ name: sameName(name) }, { slug }],
             })
             if (taken) return next(new AppError(NAME_TAKEN, 409))
+            // The cars move with the name, and a city holds each plate once: a car
+            // left under the new name by an older rename, or one car typed under
+            // two spellings of this name, would stop the move half done. Refused
+            // before anything is written (checked, not locked).
+            const clash = await Vehicle.aggregate([
+               { $match: { city: { $in: [sameName(location.name), name] } } },
+               { $group: { _id: '$plate', n: { $sum: 1 } } },
+               { $match: { n: { $gt: 1 } } },
+               { $limit: 5 },
+            ])
+            if (clash.length) {
+               const plates = clash.map((c) => c._id).join(', ')
+               return next(
+                  new AppError(
+                     `Vehicles with the same plate (${plates}) would end up together in ${name}: delete one or change its plate under Vehicles, then rename.`,
+                     409
+                  )
+               )
+            }
             renamedFrom = location.name
             location.slug = slug
          }
@@ -202,10 +239,17 @@ export const updateLocation = catchAsync(
          const old = sameName(renamedFrom)
          // The version goes up with it: a hotel form opened before the rename
          // would otherwise save the old city straight back.
-         const [hotels, restaurants, listings] = await Promise.all(
-            [Hotel, Restaurant, Listing].map((model: any) =>
+         // The fleet names its city the same way: cars, drivers, pick-up places.
+         const [hotels, restaurants, listings, vehicles, drivers, places] = await Promise.all(
+            [Hotel, Restaurant, Listing, Vehicle, Driver, TransferPlace].map((model: any) =>
                model.updateMany({ city: old }, { $set: { city: location.name }, $inc: { __v: 1 } })
             )
+         )
+         // And rides still to be driven, or none could be assigned: assigning
+         // compares the ride's city with the driver's. Finished ones keep theirs.
+         const rides = await Ride.updateMany(
+            { city: old, status: { $in: [RIDE_STATUS.PENDING, RIDE_STATUS.ASSIGNED, RIDE_STATUS.STARTED] } },
+            { $set: { city: location.name } }
          )
          // A bus names every stop on its way by the same text, and the website
          // finds "buses to X" through them.
@@ -225,6 +269,10 @@ export const updateLocation = catchAsync(
             listings: listings.modifiedCount,
             busStops: stops.modifiedCount,
             routeDestinations: destinations.modifiedCount,
+            vehicles: vehicles.modifiedCount,
+            drivers: drivers.modifiedCount,
+            places: places.modifiedCount,
+            openRides: rides.modifiedCount,
          }
       }
 

@@ -135,7 +135,7 @@ export const endRide = async (ride: IRide, actor: RideActor) => {
    ride.endedAt = new Date()
    push(ride, 'RIDE_COMPLETED', actor)
    await ride.save()
-   if (ride.order) void notifyOrder(NOTIFICATION_EVENTS.TRANSFER_COMPLETED, ride.order)
+   if (ride.order) void notifyOrder(NOTIFICATION_EVENTS.TRANSFER_COMPLETED, ride.order, { sms: true })
    return ride
 }
 
@@ -172,7 +172,7 @@ export const cancelRideOfOrder = async (orderId: Types.ObjectId, reason: string,
 
 /**
  * The office cancelling from the ride: the ride, then its order the way the
- * Bookings page cancels one — status, timeline, the ORDER_CANCELLED text to
+ * Bookings page cancels one — status, timeline, the ORDER_CANCELLED message to
  * the customer, an audit entry. Nothing to release: a ride holds no stock.
  */
 export const cancelRideAndOrder = async (ride: IRide, reason: string, note: string | undefined, req: Request) => {

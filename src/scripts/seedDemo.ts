@@ -170,8 +170,8 @@ const run = async () => {
          paidAt: new Date(),
          travelDate: day(3),
          consent: {
-            policyVersionLabel: 'No-refund v1 (fr)',
-            textShown: 'Toutes les ventes sont définitives. Aucun remboursement.',
+            policyVersionLabel: 'v1 (fr)',
+            textShown: "Je comprends qu'en cas d'annulation de cette réservation, 80 % du montant payé est remboursable après déduction des frais de dossier.",
             locale: 'fr',
             acceptedAt: new Date(),
             ip: '41.243.0.10',
@@ -257,20 +257,20 @@ const run = async () => {
       },
    ])
 
-   // §10: policy versions are immutable; this is the live no-refund text.
+   // §10: policy versions are immutable; this is the live consent sentence (the cancellation terms).
    await PolicyVersion.create([
       {
          kind: 'NO_REFUND',
          locale: 'fr',
-         label: 'No-refund v1 (fr)',
-         body: 'Toutes les ventes sont définitives. Aucun remboursement ne sera accordé après confirmation de la commande.',
+         label: 'v1 (fr)',
+         body: "Je comprends qu'en cas d'annulation de cette réservation, 80 % du montant payé est remboursable après déduction des frais de dossier.",
          isLive: true,
       },
       {
          kind: 'NO_REFUND',
          locale: 'en',
-         label: 'No-refund v1 (en)',
-         body: 'All sales are final. No refunds are issued once an order is confirmed.',
+         label: 'v1 (en)',
+         body: 'I understand that if this booking is cancelled, 80% of the amount paid is refundable after deducting processing fees.',
          isLive: true,
       },
    ])

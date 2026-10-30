@@ -331,8 +331,8 @@ export const transitionOrder = catchAsync(
       addTimeline(order, req, `STATUS_${to}`, undefined, reason)
       await order.save()
 
-      // The customer is told their booking is off; the office should never be
-      // the only party that knows.
+      // App users are told by push. Cancellations are not texted (2026-10-26):
+      // for anyone else the delivery log records SKIPPED.
       if (to === ORDER_STATUS.CANCELLED) {
          void notifyOrder(NOTIFICATION_EVENTS.ORDER_CANCELLED, order._id)
          // A transfer booking's ride goes with it (a ride holds no stock). Awaited
@@ -340,7 +340,11 @@ export const transitionOrder = catchAsync(
          await cancelRideOfOrder(order._id, order.cancellationReason!, 'OFFICE', reason)
       }
       if (to === ORDER_STATUS.CONFIRMED) {
-         void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
+         void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id, { office: 'CONFIRMED' })
+      }
+      // One of the few customer texts left (2026-10-26), and the office's last e-mail.
+      if (to === ORDER_STATUS.COMPLETED) {
+         void notifyOrder(NOTIFICATION_EVENTS.ORDER_COMPLETED, order._id, { sms: true, office: 'COMPLETED' })
       }
 
       await recordAudit(req, {
@@ -471,7 +475,7 @@ export const attachDocument = catchAsync(
          after: order.toObject(),
       })
 
-      void notifyOrder(NOTIFICATION_EVENTS.DOCUMENTS_ISSUED, order._id)
+      void notifyOrder(NOTIFICATION_EVENTS.DOCUMENTS_ISSUED, order._id, { office: 'DOCUMENTS' })
 
       return sendResponse(
          res,
@@ -600,7 +604,7 @@ export const markCashReceived = catchAsync(
       }
       await order.save()
 
-      void notifyOrder(NOTIFICATION_EVENTS.PAYMENT_RECEIVED, order._id)
+      void notifyOrder(NOTIFICATION_EVENTS.PAYMENT_RECEIVED, order._id, { office: 'PAID' })
 
       await recordAudit(req, {
          action: AUDIT_ACTIONS.UPDATE,

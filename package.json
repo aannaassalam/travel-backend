@@ -12,6 +12,7 @@
     "clean": "rimraf coverage build tmp node_modules",
     "seed:admin": "ts-node src/scripts/seedAdmin.ts",
     "test:leak": "ts-node src/security/leakTest.ts",
+    "test:geocoding": "ts-node src/services/transfers/geocoding.check.ts",
     "seed:demo": "ts-node src/scripts/seedDemo.ts",
     "migrate:i18n-money": "ts-node src/scripts/migrateI18nMoney.ts",
     "migrate:cdf": "ts-node src/scripts/migrateCdfBase.ts --migrate",

@@ -183,6 +183,10 @@ app.use(
       standardHeaders: true,
       legacyHeaders: false,
       message: { message: 'Too many requests, please try again later' },
+      // The transfer map picker names the pin each time the map rests: it has
+      // its own limit (transferRouter), and exploring the map must not spend
+      // the allowance a sign-in code or a checkout from the same address needs.
+      skip: (req) => req.path === '/transfers/places/reverse',
    }),
    v1Routes
 )

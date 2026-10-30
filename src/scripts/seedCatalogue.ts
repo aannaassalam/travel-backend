@@ -249,7 +249,7 @@ function buildFlights() {
                durationMinutes: durationMin,
                cabin: 'ECONOMY',
                baggage: `1 bagage en soute ${pick([20, 23])} kg + 1 bagage cabine 7 kg`,
-               fareRules: 'Non modifiable. Non remboursable.',
+               fareRules: 'Non modifiable. Remboursable à 80 % après déduction des frais de dossier.',
             },
          })
       }
@@ -716,7 +716,7 @@ async function buildHotels(supplierId: (name: string) => Promise<unknown>) {
          checkInTime: '14:00',
          checkOutTime: '11:00',
          policies:
-            "Arrivée à partir de 14 h 00, départ avant 11 h 00. Une pièce d'identité est demandée à l'enregistrement. Réservation définitive et non remboursable.",
+            "Arrivée à partir de 14 h 00, départ avant 11 h 00. Une pièce d'identité est demandée à l'enregistrement. Remboursable à 80 % après déduction des frais de dossier.",
          rating: rating(),
          reviewCount: reviews(),
       })

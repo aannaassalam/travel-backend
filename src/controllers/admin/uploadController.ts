@@ -3,9 +3,10 @@ import multer from 'multer'
 import { PassThrough, Readable, Transform } from 'stream'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
+import { Order } from '../../model/orderModel'
 import { VIDEO_FOLDER } from '../../model/shared.schema'
 import { LocalDiskStorage, storage, StoredFile, Visibility } from '../../services/storage'
-import { safeDownloadName } from '../../services/storage/storage.types'
+import { attachmentHeader, isOrderDocumentKey } from '../../services/storage/storage.types'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -379,6 +380,11 @@ export const getSignedLink = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
       const key = String(req.body.key || '')
       if (!key) return next(new AppError('key is required', 400))
+      // Order documents only (this route is behind orders:read): a key read
+      // from the audit log must not open a supplier's files here.
+      if (!isOrderDocumentKey(key)) {
+         return next(new AppError('This link is for order documents only', 403))
+      }
       // 15 minutes, matching the export-link window in §14.4.
       const ttl = Math.min(Number(req.body.ttlSeconds) || 900, 900)
 
@@ -389,8 +395,14 @@ export const getSignedLink = catchAsync(
          reason: 'signed download link issued',
       })
 
+      // The name it was uploaded with: it saves as that, not as its storage id.
+      // ponytail: no index on documents.storageKey, so this scans the orders;
+      // add one if opening a document in the admin ever gets slow.
+      const order = await Order.findOne({ 'documents.storageKey': key }, { 'documents.$': 1 }).lean()
+      const fileName = (order?.documents as { fileName?: string }[] | undefined)?.[0]?.fileName
+
       return sendResponse(res, 200, 'Link generated', {
-         url: await storage().signedUrl(key, ttl),
+         url: await storage().signedUrl(key, ttl, fileName),
          expiresInSeconds: ttl,
       })
    }
@@ -426,11 +438,7 @@ export const serveSignedFile = catchAsync(
 
       // Never render inline: an HTML or SVG payload served from our origin
       // would run in our security context.
-      const name = safeDownloadName(String(req.query.name ?? ''))
-      res.setHeader(
-         'Content-Disposition',
-         name ? `attachment; filename="${name}"` : 'attachment'
-      )
+      res.setHeader('Content-Disposition', attachmentHeader(String(req.query.name ?? '')))
       res.setHeader('X-Content-Type-Options', 'nosniff')
       if (file.mimeType) res.setHeader('Content-Type', file.mimeType)
       // An unhandled stream error is an uncaught exception. Headers may already

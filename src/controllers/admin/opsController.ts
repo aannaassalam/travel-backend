@@ -2,7 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { isValidObjectId } from 'mongoose'
 
 import { AUDIT_ACTIONS, PANEL_WORDS } from '../../constants/admin.constants'
-import { PAYMENT_STATUS } from '../../constants/domain.constants'
+import { LOCALES, PAYMENT_STATUS } from '../../constants/domain.constants'
 import { POLICY_DEFAULTS } from '../../constants/policy.defaults'
 import {
    Enquiry,
@@ -23,6 +23,7 @@ import { byWords, customerNameSort, deleteDoc, paginate, sortBy } from '../../se
 import { recordAudit } from '../../services/auditLog.service'
 import { money, notify, pushBody, render } from '../../services/notifications/notify.service'
 import { sendSms, smsConfigured } from '../../services/notifications/sms.service'
+import { NO_REFUND_WORDING } from '../../services/standardWording.service'
 import { francRateProblem, ratesInFrancs, refreshRates } from '../../services/fx.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -212,20 +213,27 @@ const applyStage = (enquiry: any, stage: string, detail: string | null | undefin
          actorEmail: (req as any).admin?.email,
       })
    }
-   // A quote the customer is never told about is not a quote.
+   // A quote the customer is never told about is not a quote. App only (no
+   // SMS, 2026-10-26): pushed to the account that has this number, if any.
    if (stage === ENQUIRY_STAGES.QUOTED) {
-      void notify({
-         event: NOTIFICATION_EVENTS.QUOTE_SENT,
-         recipient: enquiry.phone,
-         vars: {
-            customer_name: enquiry.customerName,
-            order_ref: enquiry.reference,
-            listing_title: enquiry.listingLabel ?? '',
-            // In francs, like every amount the office types.
-            amount: enquiry.quotedAmount ? money(enquiry.quotedAmount, 'CDF') : '',
-            currency: 'CDF',
-         },
-      })
+      void Customer.exists({ phone: enquiry.phone })
+         .then((account) =>
+            notify({
+               event: NOTIFICATION_EVENTS.QUOTE_SENT,
+               recipient: enquiry.phone,
+               customer: account?._id,
+               sms: false,
+               vars: {
+                  customer_name: enquiry.customerName,
+                  order_ref: enquiry.reference,
+                  listing_title: enquiry.listingLabel ?? '',
+                  // In francs, like every amount the office types.
+                  amount: enquiry.quotedAmount ? money(enquiry.quotedAmount, 'CDF') : '',
+                  currency: 'CDF',
+               },
+            })
+         )
+         .catch((err) => console.error('[notify] QUOTE_SENT failed:', err.message))
    }
 }
 
@@ -458,6 +466,22 @@ export const listPolicies = catchAsync(async (_req: Request, res: Response) => {
       // What the website shows for a text nobody has published yet, so the
       // editor can open on it instead of on an empty box.
       builtIn: POLICY_DEFAULTS,
+      // Kind, then language: the live text still says bookings are not
+      // refundable (they are 80% refundable after processing fees since
+      // 2026-10-26). The office publishes the new wording; nothing is
+      // changed for it.
+      outdated: Object.fromEntries(
+         ['NO_REFUND', 'TERMS'].map((kind) => [
+            kind,
+            Object.fromEntries(
+               LOCALES.map((locale) => {
+                  // Newest first, as the website picks.
+                  const live = policies.find((p) => p.kind === kind && p.locale === locale && p.isLive)
+                  return [locale, NO_REFUND_WORDING.test(live?.body ?? '')]
+               })
+            ),
+         ])
+      ),
    })
 })
 
@@ -778,7 +802,8 @@ export const listTemplates = catchAsync(async (req: Request, res: Response) => {
          id: l._id.toString(),
          event: l.event,
          channel: l.channel,
-         recipient: maskPhone(l.recipient),
+         // The office's own address in full; a person's number masked.
+         recipient: l.channel === 'EMAIL' ? l.recipient : maskPhone(l.recipient),
          status: l.status,
          body: mayReadOrders ? l.body : undefined,
          // A provider's failure text can quote the number it was sending to.

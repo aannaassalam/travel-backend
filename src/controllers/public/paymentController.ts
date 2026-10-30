@@ -130,7 +130,7 @@ export const startPayment = catchAsync(
             })
          }
          await order.save()
-         if (converted) void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id)
+         if (converted) void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id, { sms: true, office: 'NEW' })
          return sendResponse(res, 200, 'Settle offline', {
             status: 'OFFLINE',
             rail: order.paymentRail,

@@ -5,6 +5,7 @@ import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LOCALES } from '../../constants/domain.constants'
 import { Driver, IDriver } from '../../model/driverModel'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
+import { Location, LOCATION_KINDS } from '../../model/locationModel'
 import { Ride, RIDE_STATUS } from '../../model/rideModel'
 import { baseAmount, Localized, parseMoney } from '../../model/shared.schema'
 import { ITransferPlace, PLACE_KINDS, TransferPlace } from '../../model/transferPlaceModel'
@@ -477,6 +478,60 @@ export const deletePlace = catchAsync(async (req: Request, res: Response, next: 
    if (!isValidObjectId(req.params.id)) return next(notFound('Place'))
    await deleteDoc(req, TransferPlace, { _id: req.params.id }, { entityType: PLACE })
    return sendResponse(res, 200, 'Place deleted', {})
+})
+
+// ===================================================================== setup
+
+/**
+ * GET /transfers/setup — what each city still lacks before rides can be sold
+ * and driven there: the checklist at the top of the Transfers screens. Every
+ * CITY location that sells transfers or has fleet records; a record's city is
+ * matched as everywhere else (case and surrounding spaces aside).
+ *
+ * ponytail: the whole fleet is read into memory — fine for hundreds of
+ * records; count with aggregates if it ever reaches thousands.
+ */
+export const transferSetup = catchAsync(async (_req: Request, res: Response) => {
+   const [locations, categories, vehicles, drivers, places] = await Promise.all([
+      Location.find({ kind: LOCATION_KINDS.CITY }).select('name isActive servesVerticals').sort({ sortOrder: 1, name: 1 }).lean(),
+      VehicleCategory.find({ isActive: true }).select('pricePerKm pricePerHour').lean(),
+      Vehicle.find().select('city isActive').lean(),
+      Driver.find().select('city isActive vehicle').lean(),
+      TransferPlace.find().select('city isActive').lean(),
+   ])
+   const key = (city: unknown) => String(city ?? '').trim().toLowerCase()
+   const vehicleById = new Map(vehicles.map((v) => [String(v._id), v]))
+
+   const cities = locations.flatMap((l) => {
+      const here = <T extends { city: string }>(rows: T[]) => rows.filter((r) => key(r.city) === key(l.name))
+      const [v, d, p] = [here(vehicles), here(drivers), here(places)]
+      // What the public quote asks of a city.
+      const servesTransfer = l.isActive && (l.servesVerticals ?? []).includes('TRANSFER')
+      if (!servesTransfer && !v.length && !d.length && !p.length) return []
+      return [{
+         name: l.name,
+         servesTransfer,
+         vehicles: v.length,
+         activeVehicles: v.filter((x) => x.isActive).length,
+         drivers: d.length,
+         // Whom the assign dialog can offer: active, driving an active car of this city.
+         driversWithVehicle: d.filter((x) => {
+            const car = x.vehicle ? vehicleById.get(String(x.vehicle)) : undefined
+            return x.isActive && car?.isActive && key(car.city) === key(l.name)
+         }).length,
+         // The ones customers are offered.
+         places: p.filter((x) => x.isActive).length,
+      }]
+   })
+
+   return sendResponse(res, 200, 'OK', {
+      categories: {
+         active: categories.length,
+         perKm: categories.filter((c) => baseAmount(c.pricePerKm) > 0).length,
+         perHour: categories.filter((c) => baseAmount(c.pricePerHour) > 0).length,
+      },
+      cities,
+   })
 })
 
 // =================================================================== uploads

@@ -163,7 +163,21 @@ export const settle = (
       })
       await order.save()
 
-      void notifyOrder(NOTIFICATION_EVENTS.PAYMENT_RECEIVED, order._id)
+      /**
+       * A booking first filed for cash (or switched to it) was texted and
+       * e-mailed as new then; this is its payment. One paid online straight
+       * away is new now: its first text, and the office's first word of it.
+       */
+      const filedForCash = order.timeline.some(
+         (t: any) =>
+            t.event === 'PAYMENT_METHOD_CHANGED' ||
+            (t.event === 'ORDER_CREATED' && String(t.detail ?? '').includes('method=CASH'))
+      )
+      void notifyOrder(
+         NOTIFICATION_EVENTS.PAYMENT_RECEIVED,
+         order._id,
+         filedForCash ? { office: 'PAID' } : { sms: true, office: 'NEW_PAID' }
+      )
    })
 
 /* ------------------------------------------------------ asking MaxiCash */

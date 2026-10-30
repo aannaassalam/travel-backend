@@ -12,6 +12,9 @@ import { boundPagination, requirePermission, requireStepUp } from '../../../midd
  * every route here with its guard, like the rest of the table.
  */
 export const mountTransferRoutes = (router: express.Router) => {
+   // What each city still lacks before rides can be sold and driven there.
+   router.get('/transfers/setup', requirePermission('inventory:read'), fleet.transferSetup)
+
    // --- Fleet: vehicle categories and their prices ------------------------
    router.get('/transfers/categories', requirePermission('inventory:read'), fleet.listCategories)
    router.post('/transfers/categories', requirePermission('inventory:write'), fleet.createCategory)

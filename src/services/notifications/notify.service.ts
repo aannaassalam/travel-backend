@@ -7,8 +7,9 @@ import {
 } from '../../model/enquiryModel'
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
-import { Ride } from '../../model/rideModel'
+import { Ride, RIDE_STATUS } from '../../model/rideModel'
 import { rideVars } from '../transfers/rideVars'
+import { BookingStage, emailOffice } from './officeMail.service'
 import { sendSms, smsConfigured } from './sms.service'
 import { activeDevices, pushConfigured, sendPush } from './push.service'
 
@@ -50,6 +51,12 @@ export interface NotifyInput {
    appendIfMissing?: { token: string; text: string }
    /** The customer to reach by push first, when they have the app. */
    customer?: Types.ObjectId
+   /**
+    * Whether a text may go when no push got through. Yes unless said: drivers
+    * and the office's safety alert have no app. Order messages say per call
+    * (see notifyOrder).
+    */
+   sms?: boolean
 }
 
 /**
@@ -67,25 +74,16 @@ export const render = (body: string, vars: TemplateVars = {}) =>
    })
 
 /**
- * Messages that go by SMS even to someone who has the app.
- *
- * Only order cancellations: a cancellation must reach the customer and push can
- * be silenced per app. Cash-deadline reminders used to be here too, but the
- * office chose push-first for them (2026-10-03): they now SMS only when push
- * cannot reach the device, like every other event, which is where the Twilio
- * saving comes from.
+ * Whether the SMS goes after the push stage: only for a message that may be
+ * texted, and only when the push did not reach the person. The owner's rule
+ * (2026-10-26): customers are texted for a new booking and a completed one
+ * (and their sign-in code, sent elsewhere); drivers and the safety alert
+ * always. Exported so the rule can be checked without dispatching anything.
  */
-const SMS_EVEN_WITH_APP = new Set<string>([
-   NOTIFICATION_EVENTS.ORDER_CANCELLED,
-])
+export const smsAfterPush = (pushed: boolean, allowed: boolean): boolean => allowed && !pushed
 
-/**
- * Whether to also send SMS after the push stage. SMS fires when push did not
- * deliver, or for the few events that must reach the customer regardless of the
- * app. Exported so the routing rule can be checked without dispatching anything.
- */
-export const smsAfterPush = (event: string, pushed: boolean): boolean =>
-   !pushed || SMS_EVEN_WITH_APP.has(event)
+/** The delivery log's word for a message that reached nobody, by that rule. */
+const NOT_TEXTED = 'Not texted: SMS only for new and completed bookings, and no app to push to'
 
 /**
  * The SMS wording, made fit for a notification.
@@ -108,11 +106,11 @@ const PUSH_TITLE = 'Flexi Agency'
 /**
  * Fires one event to one recipient. Resolves to the number of messages sent.
  *
- * Push first, SMS otherwise: when `customer` is given and that customer has a
- * signed-in app install, the message goes as a push notification and the SMS
- * is skipped (bar SMS_EVEN_WITH_APP). No app, push not configured, or every
- * push refused — then SMS, exactly as before push existed. A guest never has
- * an app install, so a guest always gets the SMS with their booking link.
+ * Push first: when `customer` is given and that customer has a signed-in app
+ * install, the message goes as a push notification and no SMS follows. No app,
+ * push not configured, or every push refused — then the SMS, if this message
+ * may be texted (`sms`); if not, the log records that nothing reached them. A
+ * guest never has an app install.
  */
 export const notify = async ({
    event,
@@ -121,6 +119,7 @@ export const notify = async ({
    order,
    appendIfMissing,
    customer,
+   sms = true,
 }: NotifyInput): Promise<number> => {
    let sent = 0
    try {
@@ -145,7 +144,8 @@ export const notify = async ({
                   {
                      title: PUSH_TITLE,
                      body,
-                     data: { event, reference: String(vars.order_ref ?? '') },
+                     // A tap opens the order; an enquiry's reference is not one.
+                     data: { event, reference: order ? String(vars.order_ref ?? '') : '' },
                   }
                )
                pushed = result.delivered > 0
@@ -169,7 +169,7 @@ export const notify = async ({
 
       // -------------------------------------------------------------- SMS
       const template = byChannel.get('SMS')
-      if (template && smsAfterPush(event, pushed)) {
+      if (template && !pushed) {
          const source =
             appendIfMissing && !template.body.includes(appendIfMissing.token)
                ? template.body + appendIfMissing.text
@@ -178,7 +178,10 @@ export const notify = async ({
          const log = { event, channel: 'SMS', recipient, order, body }
 
          try {
-            if (!smsConfigured()) {
+            if (!smsAfterPush(pushed, sms)) {
+               // Nothing reached them: logged, so support can say why.
+               await NotificationLog.create({ ...log, status: 'SKIPPED', providerMessage: NOT_TEXTED })
+            } else if (!smsConfigured()) {
                await NotificationLog.create({
                   ...log,
                   status: 'FAILED',
@@ -239,13 +242,37 @@ export const day = (d?: Date | string | null) =>
    d ? new Date(d).toISOString().slice(0, 10) : ''
 
 /**
+ * When an order is for. A bus or flight leaves at a time the customer chose,
+ * and a car hired by the hour is collected at one: say it. The day otherwise.
+ */
+export const travelWhen = (order: { travelDate?: Date; items?: any }) => {
+   const item = order.items?.[0]
+   return order.travelDate &&
+      ((['BUS', 'FLIGHT'].includes(item?.vertical) && item?.passengers) ||
+         (item?.vertical === 'CAR' && item?.rentalHours))
+      ? new Date(order.travelDate).toISOString().slice(0, 16).replace('T', ' ')
+      : day(order.travelDate)
+}
+
+/**
  * Fires an order event, filling the template variables from the order itself.
  *
  * Call sites pass an id and nothing else. Centralising the lookup is what keeps
  * `{{amount}}` meaning the same thing in every message — a confirmation that
  * quotes a different total from the receipt is worse than no message at all.
+ *
+ * `sms`: whether the customer may be texted when no push gets through — only
+ * for a new booking and a completed one (2026-10-26), so no by default.
+ * `office`: the stage of the booking to e-mail the office about.
  */
-export const notifyOrder = async (event: NotificationEvent, orderId: Types.ObjectId) => {
+export const notifyOrder = async (
+   event: NotificationEvent,
+   orderId: Types.ObjectId,
+   { sms = false, office }: { sms?: boolean; office?: BookingStage } = {}
+) => {
+   // First, so an order with no customer phone still reaches the office. It
+   // never throws and is not awaited: it cannot fail or slow the caller.
+   if (office) void emailOffice(office, orderId)
    try {
       const order = await Order.findById(orderId)
       if (!order) return 0
@@ -261,6 +288,8 @@ export const notifyOrder = async (event: NotificationEvent, orderId: Types.Objec
                  .populate('vehicle', 'make model color plate')
             : null
       const rv = ride ? rideVars(ride, ride.driver as any, ride.vehicle as any) : null
+      // A ride that has ended was texted "ride finished": its completed booking is not texted again.
+      const text = sms && !(event === NOTIFICATION_EVENTS.ORDER_COMPLETED && ride?.status === RIDE_STATUS.COMPLETED)
 
       // A cash ride is paid to the driver at the end of it, so its booking
       // text is not "pay at the office by…". The usual text when the office
@@ -285,19 +314,13 @@ export const notifyOrder = async (event: NotificationEvent, orderId: Types.Objec
             : undefined,
          order: order._id,
          customer: customer._id,
+         sms: text,
          vars: {
             customer_name: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
             order_ref: order.reference,
             amount: money(order.chargedTotal, order.chargedCurrency),
             currency: order.chargedCurrency,
-            // A bus or flight leaves at a time the customer chose, and a car
-            // hired by the hour is collected at one: say it.
-            departure_date:
-               order.travelDate &&
-               ((['BUS', 'FLIGHT'].includes(order.items?.[0]?.vertical) && order.items?.[0]?.passengers) ||
-                  (order.items?.[0]?.vertical === 'CAR' && order.items?.[0]?.rentalHours))
-                  ? new Date(order.travelDate).toISOString().slice(0, 16).replace('T', ' ')
-                  : day(order.travelDate),
+            departure_date: travelWhen(order),
             listing_title: order.items?.[0]?.listingLabel ?? '',
             deadline: day(order.cashDeadline),
             order_link: link,

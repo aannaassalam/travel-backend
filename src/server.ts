@@ -37,6 +37,7 @@ import {
    warnDollarPrices,
 } from './services/scheduledJobs.service'
 import { keepRatesFresh, refreshRates } from './services/fx.service'
+import { refreshStandardWording } from './services/standardWording.service'
 import { paymentsStatus } from './services/payments/maxicash.service'
 
 const PORT = process.env.PORT || 3001
@@ -73,6 +74,10 @@ async function bootstrap() {
    // A new event's default wording, so it is not silent; the office's stays.
    await ensureDefaultTemplates().catch((e) =>
       console.error('Could not add the missing notification templates:', e.message)
+   )
+   // Old default wording the office never changed takes the new standard text.
+   await refreshStandardWording().catch((e) =>
+      console.error('Could not bring the website wording up to date:', e.message)
    )
    // Prices became francs on 2026-10-24: says so while any is still in dollars.
    await warnDollarPrices().catch((e) =>

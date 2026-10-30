@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
+import { SITE_CONTENT_DEFAULTS } from '../../constants/siteContent.defaults'
 import SiteContentModel, {
    getSiteContent,
    readSection,
@@ -9,6 +10,7 @@ import SiteContentModel, {
    SiteSection,
 } from '../../model/siteContentModel'
 import { recordAudit } from '../../services/auditLog.service'
+import { staleCatalogue, staleWording } from '../../services/standardWording.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -19,10 +21,22 @@ import { sendResponse } from '../../utils/response'
  * and can never be edited in place.
  */
 
-/** GET /site-content — every section as the site shows it now, and what each may hold. */
+/**
+ * GET /site-content — every section as the site shows it now, what each may
+ * hold, and `stale`: the texts that still say bookings are not refundable.
+ */
 export const getContent = catchAsync(async (_req: Request, res: Response) => {
    const { updatedAt, ...content } = await getSiteContent()
-   return sendResponse(res, 200, 'OK', { content, shape: SITE_SECTIONS, updatedAt })
+   return sendResponse(res, 200, 'OK', {
+      content,
+      shape: SITE_SECTIONS,
+      updatedAt,
+      stale: staleWording(content),
+      // Offers' and hotels' own texts saying the same: each a way to its page.
+      staleCatalogue: await staleCatalogue(),
+      // What the website shipped with, so a replaced part can be put back.
+      builtIn: SITE_CONTENT_DEFAULTS,
+   })
 })
 
 /**

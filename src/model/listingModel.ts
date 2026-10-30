@@ -34,6 +34,54 @@ import {
 export const isScheduledRoute = (vertical: string) =>
    vertical === VERTICALS.BUS || vertical === VERTICALS.FLIGHT
 
+/** Today in Kinshasa (UTC+1, like KINSHASA_OFFSET), as YYYY-MM-DD. */
+const kinshasaDay = (now: number) => new Date(now + 3600_000).toISOString().slice(0, 10)
+
+/** A promotion whose last day is already over in Kinshasa. */
+export const promotionEnded = (endsAt: Date | null | undefined, now = Date.now()) =>
+   Boolean(endsAt && new Date(endsAt).toISOString().slice(0, 10) < kinshasaDay(now))
+
+/**
+ * The discount customers see, in whole percent of the old price (whole
+ * francs). The numerator is multiplied first, so 14.5 % is exact and shows 15.
+ * The admin's save check uses it too, so no promotion saved shows "−0 %".
+ */
+export const promotionPercent = (old: number, sell: number) => Math.round(((old - sell) * 100) / old)
+
+/**
+ * The promotion customers see, or nothing: an old price above a sell price,
+ * through the end of its last day. Display only — the sell price is charged.
+ */
+export const livePromotion = (
+   l: Pick<IListing, 'sellPrice' | 'promoCompareAtPrice' | 'promoEndsAt'>,
+   now = Date.now()
+) => {
+   const old = baseAmount(l.promoCompareAtPrice)
+   const sell = baseAmount(l.sellPrice)
+   return sell > 0 && old > sell && !promotionEnded(l.promoEndsAt, now)
+      ? { old, sell, endsAt: l.promoEndsAt ? new Date(l.promoEndsAt) : undefined }
+      : undefined
+}
+
+/** `livePromotion` as query clauses, for an `$and`. */
+export const livePromotionClauses = (now = Date.now()) => [
+   { 'promoCompareAtPrice.CDF': { $gt: 0 } },
+   {
+      $expr: {
+         $and: [
+            { $gt: ['$sellPrice.CDF', 0] },
+            { $gt: ['$promoCompareAtPrice.CDF', '$sellPrice.CDF'] },
+         ],
+      },
+   },
+   {
+      $or: [
+         { promoEndsAt: null },
+         { promoEndsAt: { $gte: new Date(`${kinshasaDay(now)}T00:00:00.000Z`) } },
+      ],
+   },
+]
+
 /** §5.2 per-vertical fields. Validated per vertical in `publishBlockers`. */
 const attributesSchema = new Schema(
    {
@@ -87,8 +135,9 @@ const attributesSchema = new Schema(
       year: Number,
       /**
        * The car type, a code the panel picks: SUV, BERLINE, BUS, PICKUP,
-       * MINIBUS, TRUCK, LUXE. No enum: one typed as text before the list
-       * existed must not stop the car being saved.
+       * MINIBUS, TRUCK, LUXE, MINIVAN, VAN, COUPE, ROADSTER, LIMOUSINE,
+       * MICROCAR. No enum: one typed as text before the list existed must not
+       * stop the car being saved.
        */
       category: String,
       transmission: { type: String, enum: ['MANUAL', 'AUTOMATIC'] },
@@ -177,6 +226,15 @@ export interface IListing extends Document {
    sixHourSellPrice: Money
    twelveHourCostPrice: Money
    twelveHourSellPrice: Money
+   /**
+    * A promotion, for display only (see `livePromotion`): the price before it,
+    * in francs, struck through beside the sell price until the end of
+    * `promoEndsAt` (a day, at 00:00 UTC; none = until removed). Customers
+    * always pay the sell price: nothing that prices or charges an order reads
+    * these. Never `validUntil`, which expires the whole listing.
+    */
+   promoCompareAtPrice?: Money
+   promoEndsAt?: Date | null
    quantityTotal: number
    quantitySold: number
    quantityHeld: number
@@ -232,6 +290,8 @@ const listingSchema = new Schema<IListing>(
       sixHourSellPrice: moneyField(),
       twelveHourCostPrice: moneyField(),
       twelveHourSellPrice: moneyField(),
+      promoCompareAtPrice: moneyField(),
+      promoEndsAt: Date,
       quantityTotal: { type: Number, default: 0, min: 0 },
       quantitySold: { type: Number, default: 0, min: 0 },
       quantityHeld: { type: Number, default: 0, min: 0 },

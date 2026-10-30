@@ -332,26 +332,38 @@ export const createMenuItem = catchAsync(
    }
 )
 
-export const updateMenuItem = catchAsync(async (req: Request, res: Response) => {
-   // §BUG-010: allow-listed — restaurant is excluded, so a dish can never be
-   // re-pointed at a different kitchen, and status moves only via archive.
-   const patch: Record<string, unknown> = pick(req.body, MENUITEM_EDITABLE)
-   // parseMoney drops blanks, so an untouched currency box never becomes 0.
-   if (req.body.costPrice !== undefined) patch.costPrice = parseMoney(req.body.costPrice)
-   if (req.body.sellPrice !== undefined) patch.sellPrice = parseMoney(req.body.sellPrice)
+export const updateMenuItem = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      // Only a dish of the restaurant in the URL: any other id is not found here.
+      if (!(await ownDish(req))) return next(new AppError('Menu item not found', 404))
+      // §BUG-010: allow-listed — restaurant is excluded, so a dish can never be
+      // re-pointed at a different kitchen, and status moves only via archive.
+      const patch: Record<string, unknown> = pick(req.body, MENUITEM_EDITABLE)
+      // A blank price box (`{}`) leaves that price as it is: both are required.
+      const cost = parseMoney(req.body.costPrice)
+      if (cost?.CDF !== undefined) patch.costPrice = cost
+      const sell = parseMoney(req.body.sellPrice)
+      if (sell?.CDF !== undefined) {
+         if (!(sell.CDF > 0)) return next(new AppError('The sell price must be more than 0 FC', 400))
+         patch.sellPrice = sell
+      }
 
-   const item = await updateDoc<any>(req, MenuItem, req.params.menuItemId, patch, {
-      entityType: MENU_ENTITY,
-   })
-   return sendResponse(res, 200, 'Menu item updated', { item: presentMenuItem(item) })
-})
+      const item = await updateDoc<any>(req, MenuItem, req.params.menuItemId, patch, {
+         entityType: MENU_ENTITY,
+      })
+      return sendResponse(res, 200, 'Menu item updated', { item: presentMenuItem(item) })
+   }
+)
 
-export const archiveMenuItem = catchAsync(async (req: Request, res: Response) => {
-   const item = await archiveDoc<any>(req, MenuItem, req.params.menuItemId, {
-      entityType: MENU_ENTITY,
-   })
-   return sendResponse(res, 200, 'Menu item archived', { item: presentMenuItem(item) })
-})
+export const archiveMenuItem = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      if (!(await ownDish(req))) return next(new AppError('Menu item not found', 404))
+      const item = await archiveDoc<any>(req, MenuItem, req.params.menuItemId, {
+         entityType: MENU_ENTITY,
+      })
+      return sendResponse(res, 200, 'Menu item archived', { item: presentMenuItem(item) })
+   }
+)
 
 /** The dish, only if it belongs to the restaurant named in the URL. */
 const ownDish = (req: Request) =>
@@ -411,21 +423,27 @@ export const deactivateMenuItem = catchAsync(
  *
  * Money goes through `parseMoney` for the same reason it does everywhere else:
  * it drops blank boxes rather than turning them into a real 0, and a delivery
- * fee of zero is a very different promise from one that was never typed.
+ * fee of zero is a very different promise from one that was never typed. So a
+ * zone without a name or a fee is refused, naming the box — never dropped.
  */
 const parseZones = (input: any) => {
    if (!Array.isArray(input)) return undefined
-   return input
-      .filter((z) => String(z?.name ?? '').trim())
-      .slice(0, 30)
-      .map((z) => ({
+   return input.slice(0, 30).map((z) => {
+      const name = String(z?.name ?? '').trim()
+      if (!name) throw new AppError('Each delivery zone needs a name', 400)
+      const fee = parseMoney(z.fee)
+      if (!(Number(fee?.CDF) >= 0)) {
+         throw new AppError(`Delivery zone “${name}”: enter its fee in FC (0 for free delivery)`, 400)
+      }
+      return {
          ...(z.id ? { _id: z.id } : {}),
-         name: String(z.name).trim(),
-         fee: parseMoney(z.fee),
+         name,
+         fee,
          minOrder: parseMoney(z.minOrder),
          etaMinutes: Number(z.etaMinutes) || 45,
          isActive: z.isActive !== false,
-      }))
+      }
+   })
 }
 
 /** DELETE /restaurants/:id — for good, with its menu. Food orders keep their own copy of what was ordered. */

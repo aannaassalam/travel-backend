@@ -1,4 +1,10 @@
 /**
+ * One of the pictures the website ships with (its public/img/photos), served
+ * by the website itself: the built-in home cards and the seeded city photos.
+ */
+export const BUILT_IN_PICTURE = /^\/img\/photos\/[a-z0-9-]+\.(webp|jpg|png)$/
+
+/**
  * Whether an address is one our own storage hands out for a public file in
  * `folder`: <storage>/[public/]<folder>/<generated name><extension>, and
  * nothing else.

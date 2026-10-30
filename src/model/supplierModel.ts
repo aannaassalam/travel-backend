@@ -20,8 +20,21 @@ export interface ISupplier extends Document {
    notes: string
    /** Switched off rather than deleted while anything still points at it. */
    isActive: boolean
+   /** Written only by the upload and remove routes, never from a request body. */
+   documents: Types.DocumentArray<ISupplierDocument>
    createdAt: Date
    updatedAt: Date
+}
+
+/** A contract, a licence, an ID: a private file, reached only through a signed link. */
+export interface ISupplierDocument {
+   _id: Types.ObjectId
+   fileName: string
+   storageKey: string
+   mimeType: string
+   size: number
+   uploadedAt: Date
+   uploadedBy?: string
 }
 
 const supplierSchema = new Schema<ISupplier>(
@@ -33,6 +46,19 @@ const supplierSchema = new Schema<ISupplier>(
       address: { type: String, default: '', trim: true, maxlength: 500 },
       notes: { type: String, default: '', trim: true, maxlength: 2000 },
       isActive: { type: Boolean, default: true, index: true },
+      documents: {
+         type: [
+            {
+               fileName: { type: String, required: true },
+               storageKey: { type: String, required: true },
+               mimeType: String,
+               size: Number,
+               uploadedAt: { type: Date, default: Date.now },
+               uploadedBy: String,
+            },
+         ],
+         default: [],
+      },
    },
    { timestamps: true, optimisticConcurrency: true }
 )

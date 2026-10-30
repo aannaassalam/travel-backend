@@ -1,5 +1,6 @@
 import { Request, Response } from 'express'
 import { VERTICALS } from '../../constants/domain.constants'
+import { Customer } from '../../model/customerModel.admin'
 import { Enquiry, ENQUIRY_KINDS } from '../../model/enquiryModel'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import { notify } from '../../services/notifications/notify.service'
@@ -146,18 +147,25 @@ export const createEnquiry = catchAsync(async (req: Request, res: Response) => {
    })
 
    // Acknowledge the lead. §7 makes an unanswered enquiry the thing to avoid;
-   // the first thing that stops it is the customer knowing it arrived.
-   void notify({
-      event: NOTIFICATION_EVENTS.ENQUIRY_RECEIVED,
-      recipient: enquiry.phone,
-      vars: {
-         customer_name: enquiry.customerName,
-         order_ref: enquiry.reference,
-         listing_title: enquiry.listingLabel ?? '',
-         // The office's template may quote the departure asked for, as an order's does.
-         departure_date: resolvedTrip ? `${resolvedTrip.date} ${resolvedTrip.time}` : undefined,
-      },
-   })
+   // the first thing that stops it is the customer knowing it arrived. App only
+   // (no SMS, 2026-10-26): pushed to the account that has this number, if any.
+   void Customer.exists({ phone: enquiry.phone })
+      .then((account) =>
+         notify({
+            event: NOTIFICATION_EVENTS.ENQUIRY_RECEIVED,
+            recipient: enquiry.phone,
+            customer: account?._id,
+            sms: false,
+            vars: {
+               customer_name: enquiry.customerName,
+               order_ref: enquiry.reference,
+               listing_title: enquiry.listingLabel ?? '',
+               // The office's template may quote the departure asked for, as an order's does.
+               departure_date: resolvedTrip ? `${resolvedTrip.date} ${resolvedTrip.time}` : undefined,
+            },
+         })
+      )
+      .catch((err) => console.error('[notify] ENQUIRY_RECEIVED failed:', err.message))
 
    sendResponse(res, 201, 'Enquiry received', { reference: enquiry.reference })
 })

@@ -1,6 +1,6 @@
 import { VERTICALS } from '../../constants/domain.constants'
 import { IHotel, IRoomType } from '../../model/hotelModel'
-import { IListing, isScheduledRoute } from '../../model/listingModel'
+import { IListing, isScheduledRoute, livePromotion, promotionPercent } from '../../model/listingModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
 import { baseAmount, geoPoint, Localized, Money } from '../../model/shared.schema'
 import { inAllCurrencies } from '../../services/fx.service'
@@ -74,6 +74,21 @@ const listingFields: FieldMap<IListing> = {
       l.vertical === VERTICALS.CAR
          ? carRates(l).map((r) => ({ hours: r.hours, price: pickMoney(r.sell) }))
          : undefined,
+   /**
+    * While a promotion runs: the old price (shown struck through) and the
+    * discount, rounded, from the francs. Display only: `sellPrice` is charged.
+    * `endsAt` is its last day, at 00:00 UTC.
+    */
+   promotion: (l) => {
+      const p = livePromotion(l)
+      return p
+         ? {
+              compareAtPrice: pickMoney(p.old),
+              discountPercent: promotionPercent(p.old, p.sell),
+              endsAt: p.endsAt?.toISOString(),
+           }
+         : undefined
+   },
    /**
     * §4.5 availability, computed. The raw sold/held columns stay internal.
     * Absent for a bus or flight route: its seats are not counted.

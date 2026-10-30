@@ -3,7 +3,7 @@ import mongoose, { Schema } from 'mongoose'
 import { LOCALES } from '../constants/domain.constants'
 import { SITE_CONTENT_DEFAULTS } from '../constants/siteContent.defaults'
 import AppError from '../utils/appError'
-import { isOwnPublicFile } from '../utils/ownFile'
+import { BUILT_IN_PICTURE, isOwnPublicFile } from '../utils/ownFile'
 import { Localized } from './shared.schema'
 
 /**
@@ -20,11 +20,15 @@ import { Localized } from './shared.schema'
 
 type Text = { kind: 'text'; max: number; label: string }
 type Image = { kind: 'image'; label: string }
-type List = { kind: 'list'; max: number; label: string; of: Text | Record<string, Text> }
+/** Where a card leads: a page of this website (`/hotels?destination=Goma`) or an https:// address. */
+type Link = { kind: 'link'; max: number; label: string }
+type Part = Text | Image | Link
+type List = { kind: 'list'; max: number; label: string; of: Text | Record<string, Part> }
 type Field = Text | Image | List
 
 const text = (label: string, max: number): Text => ({ kind: 'text', max, label })
 const image = (label: string): Image => ({ kind: 'image', label })
+const link = (label: string, max: number): Link => ({ kind: 'link', max, label })
 const list = (label: string, max: number, of: List['of']): List => ({ kind: 'list', max, label, of })
 
 /**
@@ -37,6 +41,16 @@ export const SITE_SECTIONS: Record<SiteSection, Record<string, Field>> = {
       heroImage: image('Banner picture'),
       heroTitle: text('Headline', 120),
       heroSubtitle: text('Text under the headline', 300),
+      // "Ideas worth travelling for". The title first: an entry is named by it.
+      ideasTitle: text('Ideas heading', 120),
+      ideasSubtitle: text('Text under the ideas heading', 300),
+      ideas: list('Ideas', 8, {
+         title: text('Idea title', 120),
+         kicker: text('Word above the idea title', 40),
+         body: text('Idea text', 200),
+         image: image('Idea picture'),
+         href: link('Idea link', 500),
+      }),
    },
    about: {
       image: image('Banner picture'),
@@ -135,15 +149,49 @@ const readText = (raw: unknown, field: Text, required = true): Localized => {
 /**
  * A picture uploaded through the panel, or none. Exactly what the upload on
  * that screen hands back — our storage, the website's own folder, a generated
- * name — and nothing else (see `isOwnPublicFile`).
+ * name — and nothing else (see `isOwnPublicFile`). Or one of the pictures the
+ * website ships with, which the built-in home cards use.
  */
 const readImage = (raw: unknown, field: Image): string => {
    if (raw === undefined || raw === null || raw === '') return ''
+   if (typeof raw === 'string' && BUILT_IN_PICTURE.test(raw)) return raw
    if (!isOwnPublicFile(raw, 'site', '(\\.[a-z0-9]{1,5})?')) {
       throw new AppError(`${field.label}: upload the picture from this screen`, 400)
    }
    return raw
 }
+
+/** An https:// address a browser opens as a page, written out in full. */
+const isHttps = (value: string) => {
+   try {
+      return /^https:\/\//i.test(value) && new URL(value).protocol === 'https:'
+   } catch {
+      return false
+   }
+}
+
+/**
+ * Where a card leads, required: a page of this website, which starts with one
+ * `/` (`//host` and `/\host` are another site to a browser), or a full https://
+ * address. No spaces, backslashes or control characters in either.
+ */
+const readLink = (raw: unknown, field: Link): string => {
+   const value = typeof raw === 'string' ? raw.trim() : ''
+   if (value.length > field.max) throw new AppError(`${field.label} is limited to ${field.max} characters`, 400)
+   // Its own message: "/hotels?destination=Lac Kivu" does start with /.
+   if (/\s/.test(value)) throw new AppError(`${field.label}: no spaces — write %20 for a space`, 400)
+   const internal = /^\/(?![\/\\])/.test(value)
+   if (/[\\\p{Cc}]/u.test(value) || !(internal || isHttps(value))) {
+      throw new AppError(
+         `${field.label}: a page of this website starting with / (for example /hotels), or an address starting with https://`,
+         400
+      )
+   }
+   return value
+}
+
+const readPart = (raw: unknown, part: Part) =>
+   part.kind === 'image' ? readImage(raw, part) : part.kind === 'link' ? readLink(raw, part) : readText(raw, part)
 
 const readList = (raw: unknown, field: List): unknown[] => {
    if (raw === undefined || raw === null) return []
@@ -158,9 +206,9 @@ const readList = (raw: unknown, field: List): unknown[] => {
    }
    return raw.map((item) =>
       Object.fromEntries(
-         Object.entries(of as Record<string, Text>).map(([key, part]) => [
+         Object.entries(of as Record<string, Part>).map(([key, part]) => [
             key,
-            readText((item as any)?.[key], part),
+            readPart((item as any)?.[key], part),
          ])
       )
    )

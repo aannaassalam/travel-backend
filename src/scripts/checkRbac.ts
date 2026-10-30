@@ -36,6 +36,7 @@ import {
    requireStepUp,
 } from '../middleware/adminAuth'
 import adminRouter from '../routes/admin/v1'
+import { attachmentHeader, isOrderDocumentKey } from '../services/storage/storage.types'
 import authRouter from '../routes/admin/v1/authRouter'
 
 let failures = 0
@@ -406,6 +407,36 @@ check('role input', () => {
    ;['SUPER_ADMIN', 'staff', 'Break-glass', 'super admin'].forEach((name) =>
       assert.strictEqual(refused({ name, permissions: [] }), 400, `"${name}" should be reserved`)
    )
+})
+
+check('the order-documents link signs order documents only', () => {
+   ;['orders/zz-ab12/1.pdf', 'private/orders/zz-ab12/1.pdf'].forEach((k) =>
+      assert.strictEqual(isOrderDocumentKey(k), true, k)
+   )
+   ;[
+      'suppliers/6a1/1.pdf',
+      'private/suppliers/6a1/1.pdf',
+      'orders/../suppliers/6a1/1.pdf',
+      'private/orders/..\\suppliers/1.pdf',
+      '/orders/x.pdf',
+      'ordersx/1.pdf',
+      '',
+   ].forEach((k) => assert.strictEqual(isOrderDocumentKey(k), false, k))
+})
+
+check('a download keeps its name, accents and all, and its header stays safe', () => {
+   assert.strictEqual(
+      attachmentHeader('Contrat signé.pdf'),
+      `attachment; filename="Contrat sign_.pdf"; filename*=UTF-8''Contrat%20sign%C3%A9.pdf`
+   )
+   assert.strictEqual(attachmentHeader(''), 'attachment')
+   // Cut at 120 characters, never through an emoji; a lone half is replaced.
+   const long = attachmentHeader('x'.repeat(119) + '\u{1F600}\u{1F600}.pdf')
+   assert.ok(long.endsWith(`x%F0%9F%98%80`), long.slice(-40))
+   assert.ok(attachmentHeader('a\uD800b.pdf').includes('a%EF%BF%BDb.pdf'))
+   assert.strictEqual(attachmentHeader(undefined), 'attachment')
+   const evil = attachmentHeader('a"\r\nSet-Cookie: x=1 (copie)*.pdf')
+   assert.ok(!/[\r\n]/.test(evil) && !/filename\*=[^;]*['()*"]/.test(evil.replace("UTF-8''", '')), evil)
 })
 
 console.log(

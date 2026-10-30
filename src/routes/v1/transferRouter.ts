@@ -4,6 +4,7 @@ import {
    alertTransfer,
    listCategories,
    listPlaces,
+   nameMapPoint,
    quoteTransfer,
    rateTransfer,
 } from '../../controllers/public/transferController'
@@ -15,6 +16,18 @@ const router = express.Router()
  * places box fires as the customer types, so a loop here costs a third party.
  */
 const quoteLimiter = rateLimit({
+   max: 120,
+   windowMs: 5 * 60 * 1000,
+   standardHeaders: true,
+   legacyHeaders: false,
+   message: { message: 'Too many requests, please slow down' },
+})
+
+/**
+ * Its own budget: the map picker names the pin each time the map comes to
+ * rest, and a customer exploring the map must never use up the quotes'.
+ */
+const nameLimiter = rateLimit({
    max: 120,
    windowMs: 5 * 60 * 1000,
    standardHeaders: true,
@@ -46,6 +59,7 @@ const privateOnly: express.RequestHandler = (_req, res, next) => {
 
 router.get('/transfers/categories', cacheable(300), listCategories)
 router.get('/transfers/places', quoteLimiter, cacheable(60), listPlaces)
+router.get('/transfers/places/reverse', nameLimiter, cacheable(600), nameMapPoint)
 router.post('/transfers/quote', quoteLimiter, quoteTransfer)
 
 // On a booked ride, by its reference (the read capability, as for the order).

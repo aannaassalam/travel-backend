@@ -339,7 +339,10 @@ const activity = (doc: any, fail: Fail) => {
  * car to this list: the record has no enum, so a type typed as text before
  * the list existed still saves.
  */
-const CAR_TYPES = ['SUV', 'BERLINE', 'BUS', 'PICKUP', 'MINIBUS', 'TRUCK', 'LUXE'] as const
+const CAR_TYPES = [
+   'SUV', 'BERLINE', 'BUS', 'PICKUP', 'MINIBUS', 'TRUCK', 'LUXE',
+   'MINIVAN', 'VAN', 'COUPE', 'ROADSTER', 'LIMOUSINE', 'MICROCAR',
+] as const
 
 const DAY = 86400000
 const NEXT_YEAR = new Date().getUTCFullYear() + 1
@@ -449,7 +452,7 @@ const GROUPS: Record<string, GroupSpec> = {
          col('baggage', 'Baggage allowance', 'text', 'attributes.baggage',
             '1 bagage en soute 23 kg + 1 bagage cabine', 'What is included.', { max: 300 }),
          col('fare_rules', 'Fare rules', 'text', 'attributes.fareRules',
-            'Non modifiable. Non remboursable.', 'Change and refund conditions.', { max: 1000 }),
+            'Non modifiable. Remboursable à 80 % après déduction des frais de dossier.', 'Change and refund conditions.', { max: 1000 }),
          ...FARES,
          ...REFERENCE,
       ],
@@ -502,7 +505,8 @@ const GROUPS: Record<string, GroupSpec> = {
          col('year', 'Year', 'int', 'attributes.year', '2022', 'Year of manufacture.',
             { min: 1980, max: NEXT_YEAR }),
          col('category', 'Car type', 'enum', 'attributes.category', 'SUV',
-            'SUV, BERLINE (saloon), BUS, PICKUP, MINIBUS, TRUCK or LUXE (luxury).',
+            'SUV, BERLINE (saloon), BUS, PICKUP, MINIBUS, TRUCK, LUXE (luxury), MINIVAN, VAN, ' +
+               'COUPE, ROADSTER, LIMOUSINE or MICROCAR.',
             { options: CAR_TYPES }),
          col('transmission', 'Gearbox', 'enum', 'attributes.transmission', 'AUTOMATIC',
             'How it is driven.', { options: ['MANUAL', 'AUTOMATIC'] }),

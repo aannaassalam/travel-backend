@@ -154,6 +154,8 @@ export const NOTIFICATION_EVENTS = {
    CASH_DEADLINE_REMINDER: 'CASH_DEADLINE_REMINDER',
    DOCUMENTS_ISSUED: 'DOCUMENTS_ISSUED',
    ORDER_CANCELLED: 'ORDER_CANCELLED',
+   /** The office marked the booking completed: one of the few customer texts left (2026-10-26). */
+   ORDER_COMPLETED: 'ORDER_COMPLETED',
    ENQUIRY_RECEIVED: 'ENQUIRY_RECEIVED',
    QUOTE_SENT: 'QUOTE_SENT',
    /** Transfers: to the customer as their ride moves, to the driver when given one, to the office on an alert. */
@@ -271,7 +273,9 @@ const notificationLogSchema = new Schema<INotificationLog>(
       order: { type: Schema.Types.ObjectId, ref: 'Order', index: true },
       status: {
          type: String,
-         enum: ['QUEUED', 'SENT', 'DELIVERED', 'FAILED'],
+         // SKIPPED: not texted by rule (customers get SMS only for a new or a
+         // completed booking) and no app to push to — so nothing reached them.
+         enum: ['QUEUED', 'SENT', 'DELIVERED', 'FAILED', 'SKIPPED'],
          default: 'QUEUED',
       },
       body: { type: String, maxlength: 1000 },
