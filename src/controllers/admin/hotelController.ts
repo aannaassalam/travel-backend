@@ -46,6 +46,8 @@ const HOTEL_EDITABLE = [
    'city',
    'country',
    'amenities',
+   // `{ [amenity]: Localized }`; words no longer listed are dropped on save.
+   'tagTranslations',
    'images',
    'videoUrl',
    'checkInTime',
@@ -61,6 +63,7 @@ const ROOMTYPE_EDITABLE = [
    'maxChildren',
    'beds',
    'amenities',
+   'tagTranslations',
    'images',
    'sizeSqm',
    'mealPlan',

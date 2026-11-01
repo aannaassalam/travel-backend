@@ -5,6 +5,7 @@ import {
    DEFAULT_LOCALE,
    LOCALES,
 } from '../constants/domain.constants'
+import { LocalizedText, toLocalized } from './shared.schema'
 
 /**
  * §12: everything here is changeable without a deployment. §15 lists "making
@@ -26,7 +27,8 @@ export interface IOffice {
    phone: string
    whatsapp: string
    email: string
-   hours: string
+   /** Opening hours, per language (one typed before reads as French). */
+   hours: LocalizedText
    geo?: { lat: number; lng: number }
    /** Exactly one — it fills the legacy single-office fields on the public API. */
    isPrimary: boolean
@@ -40,7 +42,9 @@ const officeSchema = new Schema<IOffice>(
       phone: { type: String, default: '' },
       whatsapp: { type: String, default: '' },
       email: { type: String, default: '' },
-      hours: { type: String, default: '' },
+      // `localizedText()`, written out: shared.schema loads fx.service, which
+      // loads this file, so nothing of it may be used before a value is set.
+      hours: { type: Schema.Types.Mixed, set: (v: unknown) => toLocalized(v) },
       geo: { lat: Number, lng: Number },
       isPrimary: { type: Boolean, default: false },
    },

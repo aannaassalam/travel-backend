@@ -2,8 +2,10 @@ import { IHotel, IRoomType } from '../../model/hotelModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
 import {
    baseAmount,
+   everyLocale,
    geoPoint,
    resolveLocalized,
+   tagTranslationsOf,
    translationStatus,
 } from '../../model/shared.schema'
 import { FieldMap, present, presentList } from '../../utils/present'
@@ -28,6 +30,8 @@ const hotelFields: FieldMap<IHotel> = {
    country: (h) => h.country,
    geo: (h) => geoPoint(h.geo),
    amenities: (h) => h.amenities,
+   /** `{ [amenity]: every language }`, French being the word. */
+   tagTranslations: (h) => tagTranslationsOf(h.tagTranslations, h.amenities ?? [], true),
    images: (h) => h.images,
    videoUrl: (h) => h.videoUrl,
    // The id, whether or not the record was read with its supplier alongside.
@@ -35,7 +39,7 @@ const hotelFields: FieldMap<IHotel> = {
    supplierName: (h) => (h.supplier as any)?.name,
    checkInTime: (h) => h.checkInTime,
    checkOutTime: (h) => h.checkOutTime,
-   policies: (h) => h.policies,
+   policies: (h) => everyLocale(h.policies),
    /**
     * §5.1 translation indicator. A locale counts as done only when BOTH the
     * name and the description exist — a translated description under an
@@ -64,8 +68,9 @@ const roomTypeFields: FieldMap<IRoomType> = {
    description: (r) => r.description,
    maxAdults: (r) => r.maxAdults,
    maxChildren: (r) => r.maxChildren,
-   beds: (r) => r.beds,
+   beds: (r) => everyLocale(r.beds),
    amenities: (r) => r.amenities,
+   tagTranslations: (r) => tagTranslationsOf(r.tagTranslations, r.amenities ?? [], true),
    images: (r) => r.images,
    /** Per night, for every future night; whole francs (cost never leaves the admin). */
    costPrice: (r) => r.costPrice,
@@ -102,13 +107,14 @@ const restaurantFields: FieldMap<IRestaurant> = {
    description: (r) => r.description,
    status: (r) => r.status,
    cuisines: (r) => r.cuisines,
+   tagTranslations: (r) => tagTranslationsOf(r.tagTranslations, r.cuisines ?? [], true),
    address: (r) => r.address,
    city: (r) => r.city,
    country: (r) => r.country,
    geo: (r) => geoPoint(r.geo),
    images: (r) => r.images,
    videoUrl: (r) => r.videoUrl,
-   openingHours: (r) => r.openingHours,
+   openingHours: (r) => everyLocale(r.openingHours),
    prepTimeMinutes: (r) => r.prepTimeMinutes,
    phone: (r) => r.phone,
    rating: (r) => r.rating,
@@ -117,7 +123,7 @@ const restaurantFields: FieldMap<IRestaurant> = {
    deliveryZones: (r) =>
       (r.deliveryZones ?? []).map((z: any) => ({
          id: z._id?.toString(),
-         name: z.name,
+         name: everyLocale(z.name),
          fee: z.fee,
          minOrder: z.minOrder,
          etaMinutes: z.etaMinutes,

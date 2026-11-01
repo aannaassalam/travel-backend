@@ -26,16 +26,20 @@ import {
 import { presentAuditLogs } from '../dto/admin/auditLog.dto'
 import { presentOrderList } from '../dto/admin/order.dto'
 import { presentPublicUser } from '../dto/public/user.dto'
-import { presentHotel, presentListing } from '../dto/public/catalogue.dto'
+import { presentHotel, presentListing, presentRestaurant } from '../dto/public/catalogue.dto'
+import { getSiteContact } from '../controllers/public/siteController'
+import * as settingsModel from '../model/settingsModel'
 import { presentOrder } from '../dto/public/order.dto'
 import { presentOwnReview, presentReviews } from '../dto/public/review.dto'
 import { presentDriverRide, presentPublicCategory, presentPublicRide } from '../dto/public/transfer.dto'
 import { authorNameOf } from '../services/reviews.service'
+import { asClient } from '../utils/clientContent'
 
 let failures = 0
+// As the website and today's app read the API (?i18n=1); older app builds are checked on their own below.
 const check = (name: string, fn: () => void) => {
    try {
-      fn()
+      asClient(true, fn)
       console.log(`  ✓ ${name}`)
    } catch (err: any) {
       failures += 1
@@ -348,6 +352,120 @@ check('presentReviews never names the customer behind a review', () => {
    assert.strictEqual(authorNameOf('Aline', ''), 'Aline')
 })
 
+console.log('\nTexts per language and translated words (2026-10-31)')
+/** A stored list of translations: one for a listed word, one for a word since removed, internals alongside. */
+const storedTags = (word: string) => [
+   { tag: word, text: { fr: 'LEAKED', en: 'In English', ar: '', zh: '  ' }, _id: 'LEAKED' },
+   { tag: 'Removed word', text: { en: 'LEAKED' } },
+]
+/** No language left blank, no stored-array internals, no stale word. */
+const assertCleanTexts = (label: string, out: any) => {
+   const json = JSON.stringify(out)
+   assert.ok(!json.includes('LEAKED'), `${label} leaked — ${json}`)
+   assert.ok(!/"(?:fr|en|pt|es|zh|ar|ru)":"\s*"/.test(json), `${label} sent an empty language — ${json}`)
+   assert.ok(!/"tag":|"text":/.test(json), `${label} sent the stored translation list — ${json}`)
+}
+
+check('presentHotel: texts in the languages that have them, translations of listed words only', () => {
+   const out: any = presentHotel(
+      poisoned({
+         name: { fr: 'Hôtel', en: '' },
+         slug: 'h',
+         policies: { fr: 'Pièce demandée', en: '', ru: ' ' },
+         amenities: ['Piscine'],
+         tagTranslations: storedTags('Piscine'),
+         roomTypes: [poisoned({ hotel: 'h', name: { fr: 'Standard' }, beds: 'Un grand lit', amenities: [], tagTranslations: storedTags('Clim') })],
+      }) as any
+   )
+   assertNoFields('presentHotel', out, [...NEVER_ANYWHERE, ...NEVER_PUBLIC])
+   assertCleanTexts('presentHotel', out)
+   assert.deepStrictEqual(out.policies, { fr: 'Pièce demandée' })
+   assert.deepStrictEqual({ ...out.tagTranslations }, { Piscine: { fr: 'Piscine', en: 'In English' } })
+   assert.deepStrictEqual(out.roomTypes[0].beds, { fr: 'Un grand lit' }, 'a legacy string is French')
+   assert.deepStrictEqual({ ...out.roomTypes[0].tagTranslations }, {})
+})
+
+check('presentListing: attribute texts per language, nothing for an empty one', () => {
+   const out: any = presentListing(
+      poisoned({
+         vertical: 'ACTIVITY',
+         title: { fr: 'Visite' },
+         slug: 'v',
+         attributes: { meetingPoint: { fr: '', en: '' }, fareRules: 'Non modifiable', inclusions: ['Guide'] },
+         tagTranslations: storedTags('Guide'),
+      }) as any
+   )
+   assertNoFields('presentListing', out, [...NEVER_ANYWHERE, ...NEVER_PUBLIC])
+   assertCleanTexts('presentListing', out)
+   assert.ok(!('meetingPoint' in out.attributes), 'an empty text was sent')
+   assert.deepStrictEqual(out.attributes.fareRules, { fr: 'Non modifiable' })
+   assert.ok(!('tagTranslations' in out.attributes))
+   assert.deepStrictEqual({ ...out.tagTranslations }, { Guide: { fr: 'Guide', en: 'In English' } })
+})
+
+check('presentRestaurant: opening hours and zone names per language', () => {
+   const out: any = presentRestaurant(
+      poisoned({
+         name: { fr: 'Chez Mama' },
+         slug: 'm',
+         openingHours: 'Lun–Sam 11h–22h',
+         cuisines: ['Congolais'],
+         tagTranslations: storedTags('Congolais'),
+         deliveryZones: [
+            { _id: 'z1', name: { fr: 'Gombe', en: '', zh: '贡贝' }, fee: { CDF: 2_000 }, isActive: true },
+            { _id: 'z2', name: 'LEAKED', fee: { CDF: 0 }, isActive: false },
+         ],
+      }) as any
+   )
+   assertNoFields('presentRestaurant', out, [...NEVER_ANYWHERE, ...NEVER_PUBLIC])
+   assertCleanTexts('presentRestaurant', out)
+   assert.deepStrictEqual(out.openingHours, { fr: 'Lun–Sam 11h–22h' })
+   assert.deepStrictEqual(out.deliveryZones.map((z: any) => z.name), [{ fr: 'Gombe', zh: '贡贝' }])
+   assert.deepStrictEqual({ ...out.tagTranslations }, { Congolais: { fr: 'Congolais', en: 'In English' } })
+})
+
+const contactChecks = async () => {
+   ;(settingsModel as any).getSettings = async () =>
+      poisoned({
+         companyName: 'Flexi Agency',
+         supportEmail: 'office@example.com',
+         exchangeRates: { USD: 2850 },
+         transferAlertPhone: '+243LEAKED',
+         holdTtlCashHours: 48,
+         offices: [
+            {
+               _id: 'o1',
+               name: 'Siège',
+               city: 'Kinshasa',
+               phone: '+243810000000',
+               hours: { fr: 'Lun–Ven 8h–17h', en: '', ar: 'الاثنين' },
+               isPrimary: true,
+               internalNotes: 'LEAKED',
+            },
+            { _id: 'o2', name: 'Goma', city: 'Goma', hours: 'Lun–Sam 9h–16h' },
+         ],
+      })
+   const contactAs = (perLanguage: boolean): Promise<any> =>
+      asClient(perLanguage, () => new Promise((resolve, reject) => {
+         const res: any = { set: () => res, status: () => res, json: resolve }
+         getSiteContact({} as any, res, reject)
+      }))
+   const body: any = await contactAs(true)
+   // An app built before languages asked nothing: the French hours, as one string.
+   const old: any = await contactAs(false)
+   check('site contact for an older app: office hours as the French string', () => {
+      assert.deepStrictEqual(old.contact.offices.map((o: any) => o.hours), ['Lun–Ven 8h–17h', 'Lun–Sam 9h–16h'])
+      assert.strictEqual(old.contact.officeHours, 'Lun–Ven 8h–17h')
+   })
+   check('site contact: office hours per language, and nothing else of Settings', () => {
+      const c = body.contact
+      assertNoFields('site contact', c, [...NEVER_ANYWHERE, ...NEVER_PUBLIC, 'exchangeRates', 'transferAlertPhone', 'holdTtlCashHours'])
+      assertCleanTexts('site contact', c)
+      assert.deepStrictEqual(c.offices.map((o: any) => o.hours), [{ fr: 'Lun–Ven 8h–17h', ar: 'الاثنين' }, { fr: 'Lun–Sam 9h–16h' }])
+      assert.deepStrictEqual(c.officeHours, { fr: 'Lun–Ven 8h–17h', ar: 'الاثنين' })
+   })
+}
+
 console.log('\nAdmin surface DTOs')
 check('presentAdminUser hides credentials', () => {
    const out = presentAdminUser(poisoned({ createdAt: new Date() }) as any, {
@@ -446,15 +564,21 @@ check('admin surface does not import the public user DTO', () => {
    assert.strictEqual(offenders.length, 0, `admin DTOs importing public DTOs: ${offenders}`)
 })
 
-console.log(
-   failures === 0
-      ? '\nAll leak tests passed.\n'
-      : `\n${failures} leak test(s) FAILED.\n`
-)
-
 // ponytail: covers the DTO layer only. handleFactory.ts still returns raw
 // Mongoose documents on /api/v1/user — it is inherited health-consultant
 // scaffolding due for deletion with the domain model. Extend NEVER_PUBLIC and
 // add a live-response assertion once real endpoints replace it.
 
-process.exit(failures === 0 ? 0 : 1)
+contactChecks()
+   .catch((err) => {
+      failures += 1
+      console.error(`  ✗ site contact\n      ${err.message}`)
+   })
+   .then(() => {
+      console.log(
+         failures === 0
+            ? '\nAll leak tests passed.\n'
+            : `\n${failures} leak test(s) FAILED.\n`
+      )
+      process.exit(failures === 0 ? 0 : 1)
+   })

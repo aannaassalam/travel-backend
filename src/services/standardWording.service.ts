@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { PREVIOUS_SITE_WORDING } from '../constants/siteContent.defaults'
 import { Hotel } from '../model/hotelModel'
 import { Listing } from '../model/listingModel'
+import { localizedMatch } from '../model/shared.schema'
 import SiteContentModel, { getSiteContent, SITE_SECTION_NAMES, SITE_SECTIONS, SiteSection } from '../model/siteContentModel'
 import { systemAudit } from './scheduledJobs.service'
 
@@ -34,8 +35,9 @@ const quote = (text: any) => {
  */
 export const staleCatalogue = async (limit = 50) => {
    const described = [{ 'description.fr': NO_REFUND_WORDING }, { 'description.en': NO_REFUND_WORDING }]
-   const offers = { status: { $ne: 'ARCHIVED' }, $or: [{ 'attributes.fareRules': NO_REFUND_WORDING }, ...described] }
-   const stays = { status: { $ne: 'ARCHIVED' }, $or: [{ policies: NO_REFUND_WORDING }, ...described] }
+   // Fare rules and hotel conditions: in any language, or the French string they may still be.
+   const offers = { status: { $ne: 'ARCHIVED' }, $or: [...localizedMatch('attributes.fareRules', NO_REFUND_WORDING), ...described] }
+   const stays = { status: { $ne: 'ARCHIVED' }, $or: [...localizedMatch('policies', NO_REFUND_WORDING), ...described] }
    const [listings, listingCount, hotels, hotelCount] = await Promise.all([
       Listing.find(offers).select('title vertical').sort({ vertical: 1, _id: 1 }).limit(limit).lean(),
       Listing.countDocuments(offers),

@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import {
    BASE_CURRENCY,
+   customerLocale,
    onlinePaymentsEnabled,
    ORDER_STATUS,
    OFFLINE_RAILS,
@@ -80,7 +81,7 @@ export const startPayment = catchAsync(
       const reference = String(req.params.reference).toUpperCase()
       const order = await Order.findOne({ reference }).populate(
          'customer',
-         'firstName lastName email phone'
+         'firstName lastName email phone locale'
       )
       if (!order) return next(new AppError('Order not found', 404))
 
@@ -202,7 +203,8 @@ export const startPayment = catchAsync(
          currency,
          phone: c?.phone,
          email: c?.email,
-         locale: String(req.body?.locale ?? 'fr'),
+         // The page the customer is on, else the language they booked in, else theirs, else English.
+         locale: customerLocale(req.body?.locale, order.consent?.locale, c?.locale),
          tokens,
       })
 

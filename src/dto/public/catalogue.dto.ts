@@ -3,6 +3,8 @@ import { IHotel, IRoomType } from '../../model/hotelModel'
 import {
    IListing,
    isScheduledRoute,
+   LISTING_TEXT_ATTRIBUTES,
+   listingTags,
    livePromotion,
    livePromotionOf,
    MAIN_PROMO,
@@ -11,19 +13,14 @@ import {
    promotionPercent,
 } from '../../model/listingModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
-import { baseAmount, geoPoint, Localized, Money } from '../../model/shared.schema'
+import { baseAmount, geoPoint, Money, tagTranslationsOf, toLocalized } from '../../model/shared.schema'
 import { inAllCurrencies } from '../../services/fx.service'
 import { carRates } from '../../services/orders/rental.service'
+import { textOut } from '../../utils/clientContent'
 import { FieldMap, present, presentList } from '../../utils/present'
 
-/** Only the locales that actually have text — blanks are noise on the wire. */
-const localized = (value: Localized | string | undefined) => {
-   if (!value) return {}
-   if (typeof value === 'string') return { fr: value }
-   return Object.fromEntries(
-      Object.entries(value).filter(([, v]) => typeof v === 'string' && v.trim())
-   )
-}
+/** Only the locales that actually have text — blanks are noise on the wire. A plain string is French. */
+const localized = toLocalized
 
 /**
  * A price in every currency on offer: the francs stored, and USD and EUR worked
@@ -169,8 +166,16 @@ const listingFields: FieldMap<IListing> = {
       delete a.blackoutDates
       delete a.bookingDeadline
       delete a.recurrence
+      // The texts customers read: only the languages with text, gone when there is none.
+      for (const k of LISTING_TEXT_ATTRIBUTES) {
+         const text = textOut(a[k], localized)
+         if (typeof text === 'string' ? text : Object.keys(text).length) a[k] = text
+         else delete a[k]
+      }
       return a
    },
+   /** `{ [word]: Localized }`: how to show each word of the lists, where the office translated it. */
+   tagTranslations: (l) => tagTranslationsOf(l.tagTranslations, listingTags(l), false),
 }
 
 export const presentListing = (l: IListing) => present(l, listingFields)
@@ -185,8 +190,9 @@ const roomTypeFields: FieldMap<IRoomType> = {
    description: (r) => localized(r.description),
    maxAdults: (r) => r.maxAdults,
    maxChildren: (r) => r.maxChildren,
-   beds: (r) => r.beds,
+   beds: (r) => textOut(r.beds, localized),
    amenities: (r) => r.amenities ?? [],
+   tagTranslations: (r) => tagTranslationsOf(r.tagTranslations, r.amenities ?? [], false),
    images: (r) => r.images ?? [],
    mealPlan: (r) => r.mealPlan ?? 'ROOM_ONLY',
    /** Per night, for every night: one price holds until the office changes it. Rooms are not counted. */
@@ -213,11 +219,12 @@ const hotelFields: FieldMap<HotelWithRooms> = {
    country: (h) => h.country,
    geo: (h) => geoPoint(h.geo),
    amenities: (h) => h.amenities ?? [],
+   tagTranslations: (h) => tagTranslationsOf(h.tagTranslations, h.amenities ?? [], false),
    images: (h) => h.images ?? [],
    videoUrl: (h) => h.videoUrl,
    checkInTime: (h) => h.checkInTime,
    checkOutTime: (h) => h.checkOutTime,
-   policies: (h) => h.policies,
+   policies: (h) => textOut(h.policies, localized),
    rating: ratingOf,
    reviewCount: reviewCountOf,
    fromPrice: (h) => pickMoney(h.fromPrice),
@@ -262,7 +269,7 @@ const menuItemFields: FieldMap<IMenuItem> = {
  */
 const deliveryZoneFields: FieldMap<any> = {
    id: (z) => z._id.toString(),
-   name: (z) => z.name,
+   name: (z) => textOut(z.name, localized),
    fee: (z) => pickMoney(z.fee),
    minOrder: (z) => (baseAmount(z.minOrder) > 0 ? pickMoney(z.minOrder) : undefined),
    etaMinutes: (z) => z.etaMinutes,
@@ -281,13 +288,14 @@ const restaurantFields: FieldMap<RestaurantWithMenu> = {
    slug: (r) => r.slug,
    description: (r) => localized(r.description),
    cuisines: (r) => r.cuisines ?? [],
+   tagTranslations: (r) => tagTranslationsOf(r.tagTranslations, r.cuisines ?? [], false),
    address: (r) => r.address,
    city: (r) => r.city,
    country: (r) => r.country,
    geo: (r) => geoPoint(r.geo),
    images: (r) => r.images ?? [],
    videoUrl: (r) => r.videoUrl,
-   openingHours: (r) => r.openingHours,
+   openingHours: (r) => textOut(r.openingHours, localized),
    prepTimeMinutes: (r) => r.prepTimeMinutes,
    phone: (r) => r.phone,
    rating: ratingOf,

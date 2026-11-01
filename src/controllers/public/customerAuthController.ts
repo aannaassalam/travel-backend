@@ -1,5 +1,6 @@
 import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
+import { knownLocale } from '../../constants/domain.constants'
 import { presentOrder } from '../../dto/public/order.dto'
 import { Customer } from '../../model/customerModel.admin'
 import { DeviceToken } from '../../model/deviceTokenModel'
@@ -166,6 +167,15 @@ const checkOtp = async (phone: string, code: string) => {
    return { record: bumped }
 }
 
+/**
+ * The language the site or app is in, from an optional body `locale`: one of
+ * the seven, or nothing. A wrong one never fails a sign-in — it is ignored.
+ */
+const localeOf = (req: Request) => {
+   const locale = knownLocale(req.body?.locale)
+   return locale ? { locale } : {}
+}
+
 /** §7.5: one rule, so the client and the server cannot disagree about it. */
 const checkPassword = (raw: unknown) => {
    const password = String(raw ?? '')
@@ -252,6 +262,7 @@ export const verifyOtp = catchAsync(
                password: await hashPassword(password),
                firstName,
                ...(lastName ? { lastName } : {}),
+               ...localeOf(req),
             },
          }
       )
@@ -306,6 +317,12 @@ export const login = catchAsync(
          return next(
             new AppError('That phone number or password is not correct', 401, 'BAD_CREDENTIALS')
          )
+      }
+
+      // Messages follow the language they sign in with.
+      const locale = knownLocale(req.body?.locale)
+      if (locale && locale !== customer!.locale) {
+         await Customer.updateOne({ _id: customer!._id }, { $set: { locale } })
       }
 
       const token = signCustomerToken(customer!._id.toString())
@@ -450,6 +467,8 @@ export const updateMe = catchAsync(
          }
          patch.email = v
       }
+      // Sent by the site and the app on a language switch.
+      Object.assign(patch, localeOf(req))
 
       await Customer.updateOne({ _id: c._id }, { $set: patch })
       const fresh = await Customer.findById(c._id)

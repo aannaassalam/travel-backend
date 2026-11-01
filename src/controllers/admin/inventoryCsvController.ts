@@ -9,6 +9,7 @@ import { Listing } from '../../model/listingModel'
 import { Location } from '../../model/locationModel'
 import { Restaurant } from '../../model/restaurantModel'
 import { Supplier } from '../../model/supplierModel'
+import { toLocalized } from '../../model/shared.schema'
 import { cleanTimetable, WeeklyTime } from '../../services/orders/schedule.service'
 import { recordAudit } from '../../services/auditLog.service'
 import AppError from '../../utils/appError'
@@ -901,8 +902,11 @@ type Delimiter = ',' | ';'
 const localNumber = (n: string, delimiter: Delimiter) =>
    delimiter === ';' ? n.replace('.', ',') : n
 
-const writeCell = (c: Column, doc: any, delimiter: Delimiter): string => {
-   const v = getPath(doc, c.path)
+export const writeCell = (c: Column, doc: any, delimiter: Delimiter): string => {
+   const raw = getPath(doc, c.path)
+   // A text kept per language (policies, a meeting point…) leaves as its French,
+   // the language an import writes it in; one stored before languages is a string.
+   const v = c.kind === 'text' && raw && typeof raw === 'object' ? toLocalized(raw).fr : raw
    if (v === undefined || v === null || v === '') return ''
    switch (c.kind) {
       case 'money':

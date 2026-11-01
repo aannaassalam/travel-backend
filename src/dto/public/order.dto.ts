@@ -1,4 +1,5 @@
 import { BASE_CURRENCY } from '../../constants/domain.constants'
+import { textOut } from '../../utils/clientContent'
 import { paymentAwaited } from '../../services/payments/maxicash.service'
 import { FieldMap, present } from '../../utils/present'
 import { presentPublicRide } from './transfer.dto'
@@ -88,7 +89,8 @@ const travellerFields: FieldMap<any> = {
  */
 const deliveryFields: FieldMap<any> = {
    address: (d) => d.address,
-   zoneName: (d) => d.zoneName,
+   // Localized (an order made before 2026-10-31 held a French string).
+   zoneName: (d) => textOut(d.zoneName),
    fee: (d) => d.fee,
    feeCharged: (d) => d.feeCharged,
    etaMinutes: (d) => d.etaMinutes,

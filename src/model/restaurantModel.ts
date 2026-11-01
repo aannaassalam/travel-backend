@@ -7,11 +7,15 @@ import {
 } from '../constants/domain.constants'
 import {
    baseAmount,
+   keepTagTranslations,
    Localized,
    localizedField,
+   LocalizedText,
+   localizedText,
    Money,
    moneyField,
    resolveLocalized,
+   tagTranslationsField,
    videoField,
 } from './shared.schema'
 
@@ -42,7 +46,8 @@ import {
  */
 const deliveryZoneSchema = new Schema(
    {
-      name: { type: String, required: true, trim: true },
+      // Per language since 2026-10-31; one typed before reads as French.
+      name: localizedText({ required: true }),
       fee: moneyField({ required: true }),
       /** Below this the kitchen will not send a driver. Optional. */
       minOrder: moneyField(),
@@ -59,6 +64,8 @@ export interface IRestaurant extends Document {
    description: Localized
    status: ListingStatus
    cuisines: string[]
+   /** Each cuisine in the other languages (see `tagTranslationsField`). */
+   tagTranslations: { tag: string; text: Localized }[]
    address: string
    city: string
    country: string
@@ -66,8 +73,8 @@ export interface IRestaurant extends Document {
    images: string[]
    /** The optional video: the address its upload answered with (see `videoField`). */
    videoUrl?: string
-   /** Free text per §18 — opening hours vary too much to enum usefully. */
-   openingHours: string
+   /** Free text per §18 — opening hours vary too much to enum usefully. Per language. */
+   openingHours: LocalizedText
    deliveryZones: any
    /** Minutes from order accepted to food ready, before any travel time. */
    prepTimeMinutes: number
@@ -96,6 +103,7 @@ const restaurantSchema = new Schema<IRestaurant>(
          index: true,
       },
       cuisines: { type: [String], default: [] },
+      tagTranslations: tagTranslationsField(),
       address: { type: String, default: '' },
       // Same reasoning as hotels: string for now, trimmed and indexed so it can
       // migrate to an enum once the DRC city list is agreed (§18).
@@ -104,7 +112,7 @@ const restaurantSchema = new Schema<IRestaurant>(
       geo: { lat: Number, lng: Number },
       images: { type: [String], default: [] },
       videoUrl: videoField(),
-      openingHours: { type: String, default: '' },
+      openingHours: localizedText(),
       deliveryZones: { type: [deliveryZoneSchema], default: [] },
       prepTimeMinutes: { type: Number, min: 0, default: 30 },
       phone: { type: String, trim: true },
@@ -135,6 +143,8 @@ restaurantSchema.methods.publishBlockers = function (): string[] {
    }
    return blockers
 }
+
+keepTagTranslations(restaurantSchema, (r) => r.cuisines ?? [])
 
 restaurantSchema.methods.displayName = function (locale?: string) {
    return resolveLocalized(this.name, locale)

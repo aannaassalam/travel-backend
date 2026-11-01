@@ -4,6 +4,7 @@ import { getSettings } from '../../model/settingsModel'
 import { currentRates } from '../../services/fx.service'
 import { getSiteContent, SITE_SECTION_NAMES } from '../../model/siteContentModel'
 import { geoPoint } from '../../model/shared.schema'
+import { textOut } from '../../utils/clientContent'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
 
@@ -35,7 +36,8 @@ export const getSiteContact = catchAsync(async (_req: Request, res: Response) =>
       phone: o.phone ?? '',
       whatsapp: o.whatsapp ?? '',
       email: o.email ?? '',
-      hours: o.hours ?? '',
+      // Per language, only those with text (hours typed before languages are French).
+      hours: textOut(o.hours),
       geo: geoPoint(o.geo),
       isPrimary: o.isPrimary === true,
    }))
@@ -50,7 +52,7 @@ export const getSiteContact = catchAsync(async (_req: Request, res: Response) =>
          city: primary?.city ?? '',
          // Every office is in-country; the JSON-LD wants the ISO code.
          country: 'CD',
-         officeHours: primary?.hours ?? '',
+         officeHours: primary?.hours ?? textOut(undefined),
          offices,
       },
    })

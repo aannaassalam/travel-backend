@@ -181,6 +181,24 @@ export const MEAL_PLANS = {
    ALL_INCLUSIVE: 'ALL_INCLUSIVE',
 } as const
 
-export const LOCALES = ['fr', 'en', 'pt', 'es'] as const
-/** §2.3: admin UI in French by default. */
+/**
+ * The languages content can be typed in and the sites are shown in (zh, ar, ru
+ * added 2026-10-31). Messages to customers (e-mail, SMS, the consent text)
+ * exist in French and English only: other languages get the English ones.
+ */
+export const LOCALES = ['fr', 'en', 'pt', 'es', 'zh', 'ar', 'ru'] as const
+/**
+ * §2.3: admin UI in French by default. Also the language a plain text from
+ * before languages is in (what the office typed) — not a customer's language.
+ */
 export const DEFAULT_LOCALE = 'fr'
+/** A customer whose language is unknown is written to in English (2026-10-31). */
+export const UNKNOWN_CUSTOMER_LOCALE = 'en'
+
+/** One of the seven languages, or undefined: anything else a client sends is ignored. */
+export const knownLocale = (value: unknown) =>
+   (LOCALES as readonly unknown[]).includes(value) ? (value as (typeof LOCALES)[number]) : undefined
+
+/** The language to write to a customer in: the first known of these, else English. */
+export const customerLocale = (...candidates: unknown[]) =>
+   candidates.map(knownLocale).find(Boolean) ?? UNKNOWN_CUSTOMER_LOCALE

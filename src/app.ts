@@ -12,6 +12,7 @@ import adminV1Routes from './routes/admin/v1'
 import v1Routes from './routes/v1'
 import { PUBLIC_DIR, PUBLIC_URL_PREFIX } from './services/storage/localDisk.storage'
 import AppError from './utils/appError'
+import { clientContent } from './utils/clientContent'
 import { guardHeaders } from './utils/headerSafe'
 
 const app = express()
@@ -175,6 +176,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 })
 
 // 3) Routes
+// Per-language texts only for clients that ask (?i18n=1): app builds from before render them as strings.
+app.use('/api/v1', clientContent)
 app.use(
    '/api/v1',
    rateLimit({

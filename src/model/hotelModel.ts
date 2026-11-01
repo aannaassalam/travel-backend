@@ -6,11 +6,15 @@ import {
 } from '../constants/domain.constants'
 import {
    baseAmount,
+   keepTagTranslations,
    Localized,
    localizedField,
+   LocalizedText,
+   localizedText,
    Money,
    moneyField,
    resolveLocalized,
+   tagTranslationsField,
    videoField,
 } from './shared.schema'
 
@@ -39,6 +43,8 @@ export interface IHotel extends Document {
    country: string
    geo?: { lat: number; lng: number }
    amenities: string[]
+   /** Each amenity in the other languages (see `tagTranslationsField`). */
+   tagTranslations: { tag: string; text: Localized }[]
    images: string[]
    /** The optional video: the address its upload answered with (see `videoField`). */
    videoUrl?: string
@@ -46,7 +52,7 @@ export interface IHotel extends Document {
    supplier?: Types.ObjectId
    checkInTime: string
    checkOutTime: string
-   policies: string
+   policies: LocalizedText
    rating?: number
    reviewCount?: number
    /** Worked out from approved customer reviews (reviews.service); what the public sees. */
@@ -76,12 +82,13 @@ const hotelSchema = new Schema<IHotel>(
       country: { type: String, default: 'CD' },
       geo: { lat: Number, lng: Number },
       amenities: { type: [String], default: [] },
+      tagTranslations: tagTranslationsField(),
       images: { type: [String], default: [] },
       videoUrl: videoField(),
       supplier: { type: Schema.Types.ObjectId, ref: 'Supplier', index: true },
       checkInTime: { type: String, default: '14:00' },
       checkOutTime: { type: String, default: '11:00' },
-      policies: { type: String, default: '' },
+      policies: localizedText(),
       // Legacy, never published any more: `reviewStats` is the customers' own.
       rating: { type: Number, min: 0, max: 5 },
       reviewCount: { type: Number, min: 0, default: 0 },
@@ -90,6 +97,8 @@ const hotelSchema = new Schema<IHotel>(
    },
    { timestamps: true, optimisticConcurrency: true }
 )
+
+keepTagTranslations(hotelSchema, (h) => h.amenities ?? [])
 
 /** §5.1 publish validation, enforced server-side rather than only in the form. */
 hotelSchema.methods.publishBlockers = function (): string[] {
@@ -117,8 +126,10 @@ export interface IRoomType extends Document {
    description: Localized
    maxAdults: number
    maxChildren: number
-   beds: string
+   beds: LocalizedText
    amenities: string[]
+   /** Each amenity in the other languages (see `tagTranslationsField`). */
+   tagTranslations: { tag: string; text: Localized }[]
    images: string[]
    sizeSqm?: number
    /**
@@ -153,8 +164,9 @@ const roomTypeSchema = new Schema<IRoomType>(
       description: localizedField(),
       maxAdults: { type: Number, default: 2, min: 1 },
       maxChildren: { type: Number, default: 0, min: 0 },
-      beds: { type: String, default: '' },
+      beds: localizedText(),
       amenities: { type: [String], default: [] },
+      tagTranslations: tagTranslationsField(),
       images: { type: [String], default: [] },
       sizeSqm: { type: Number, min: 0 },
       costPrice: moneyField(),
@@ -176,6 +188,8 @@ const roomTypeSchema = new Schema<IRoomType>(
    },
    { timestamps: true, optimisticConcurrency: true }
 )
+
+keepTagTranslations(roomTypeSchema, (r) => r.amenities ?? [])
 
 export const RoomType = mongoose.model<IRoomType>('RoomType', roomTypeSchema)
 

@@ -9,7 +9,7 @@ import {
    presentRestaurants,
 } from '../../dto/public/catalogue.dto'
 import { Hotel, IRoomType, RoomType } from '../../model/hotelModel'
-import { baseAmount, Money } from '../../model/shared.schema'
+import { baseAmount, localizedMatch, Money } from '../../model/shared.schema'
 import {
    bestDiscountOf,
    bestPromoted,
@@ -157,13 +157,13 @@ const rankedPage = async (
 /**
  * Besides the title and city, the attributes the search box on a listing page
  * looks in: the carrier, the car, the meeting point, the kind of property.
+ * The meeting point is per language (`localizedMatch`).
  */
 // A flight's carrier lives on its segments, so an airline name matches there.
 const SEARCHED_ATTRIBUTES = [
    'operator',
    'destination',
    'segments.carrier',
-   'meetingPoint',
    'model',
    'make',
    'propertyType',
@@ -197,6 +197,7 @@ export const searchListings = catchAsync(async (req: Request, res: Response) => 
                ...LOCALES.map((l) => ({ [`title.${l}`]: value })),
                { city: value },
                ...SEARCHED_ATTRIBUTES.map((a) => ({ [`attributes.${a}`]: value })),
+               ...localizedMatch('attributes.meetingPoint', value),
             ],
          },
       ]

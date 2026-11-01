@@ -1,4 +1,5 @@
 import { Types } from 'mongoose'
+import { customerLocale } from '../../constants/domain.constants'
 import {
    NOTIFICATION_EVENTS,
    NotificationLog,
@@ -8,6 +9,7 @@ import {
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import { Ride, RIDE_STATUS } from '../../model/rideModel'
+import { resolveLocalized } from '../../model/shared.schema'
 import { rideVars } from '../transfers/rideVars'
 import { BookingStage, emailOffice } from './officeMail.service'
 import { sendSms, smsConfigured } from './sms.service'
@@ -57,6 +59,12 @@ export interface NotifyInput {
     * (see notifyOrder).
     */
    sms?: boolean
+   /**
+    * The language to send in: the template's text in it, else English, else
+    * French (resolveLocalized). Unsaid: French — what drivers and the office read.
+    * A customer's message always says it (customerLocale: English when unknown).
+    */
+   locale?: string
 }
 
 /**
@@ -120,11 +128,13 @@ export const notify = async ({
    appendIfMissing,
    customer,
    sms = true,
+   locale = 'fr',
 }: NotifyInput): Promise<number> => {
    let sent = 0
    try {
       const templates = await NotificationTemplate.find({ event, isActive: true })
       if (!templates.length) return 0
+      const textOf = (t: (typeof templates)[number]) => resolveLocalized(t.body, locale)
 
       // One template per channel - the unique index guarantees it.
       const byChannel = new Map<string, (typeof templates)[number]>()
@@ -136,7 +146,7 @@ export const notify = async ({
       if (customer && pushTemplate && pushConfigured()) {
          const devices = await activeDevices(customer)
          if (devices.length) {
-            const body = pushBody(pushTemplate.body, vars)
+            const body = pushBody(textOf(pushTemplate), vars)
             const log = { event, channel: 'PUSH', recipient, order, body }
             try {
                const result = await sendPush(
@@ -170,10 +180,11 @@ export const notify = async ({
       // -------------------------------------------------------------- SMS
       const template = byChannel.get('SMS')
       if (template && !pushed) {
+         const wording = textOf(template)
          const source =
-            appendIfMissing && !template.body.includes(appendIfMissing.token)
-               ? template.body + appendIfMissing.text
-               : template.body
+            appendIfMissing && !wording.includes(appendIfMissing.token)
+               ? wording + appendIfMissing.text
+               : wording
          const body = render(source, vars)
          const log = { event, channel: 'SMS', recipient, order, body }
 
@@ -315,6 +326,9 @@ export const notifyOrder = async (
          order: order._id,
          customer: customer._id,
          sms: text,
+         // The language the customer booked in (the site's, at checkout), else
+         // the one on their record, else English.
+         locale: customerLocale(order.consent?.locale, customer.locale),
          vars: {
             customer_name: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
             order_ref: order.reference,

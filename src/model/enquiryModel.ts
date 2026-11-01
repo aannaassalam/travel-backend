@@ -1,5 +1,6 @@
 import mongoose, { Document, Schema, Types } from 'mongoose'
 import { VERTICALS } from '../constants/domain.constants'
+import { LocalizedText, localizedText } from './shared.schema'
 
 /**
  * §7: property is enquiry-driven and request-to-book is the recovery path for
@@ -132,16 +133,10 @@ export const Enquiry = mongoose.model<IEnquiry>('Enquiry', enquirySchema)
 // ---------------------------------------------------------------------------
 
 /**
- * §11 notification templates. One per event per channel.
- *
- * Deliberately NOT per locale. An SMS is often the first thing we send a phone
- * number, before any customer record exists to hold a language preference - the
- * sign-in code is exactly that case. Guessing wrong is worse than picking one
- * language and being consistent, so operational messages are English.
- *
- * The legal text in PolicyVersion is a different matter and stays bilingual:
- * the site knows which language it is rendering, and consent has to be in a
- * language the customer actually read.
+ * §11 notification templates. One per event per channel, its wording in each
+ * language the office typed (2026-10-31; a template saved before holds one
+ * string, read as French). A customer gets their order's language, then
+ * English, then French (notify.service); drivers and the office get French.
  *
  * §11 is explicit that notification content must NOT contain sensitive data —
  * no passport numbers, no full payment details, no permanent document links.
@@ -211,8 +206,8 @@ export type NotificationChannel = (typeof NOTIFICATION_CHANNELS)[number]
 export interface INotificationTemplate extends Document {
    event: string
    channel: string
-   subject: string
-   body: string
+   subject: LocalizedText
+   body: LocalizedText
    isActive: boolean
    updatedAt: Date
 }
@@ -236,8 +231,8 @@ const notificationTemplateSchema = new Schema<INotificationTemplate>(
          enum: NOTIFICATION_CHANNELS,
          required: true,
       },
-      subject: { type: String, default: '' },
-      body: { type: String, required: true },
+      subject: localizedText(),
+      body: localizedText({ required: true }),
       isActive: { type: Boolean, default: true },
    },
    { timestamps: true, optimisticConcurrency: true }

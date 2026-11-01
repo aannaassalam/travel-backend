@@ -1,5 +1,5 @@
 import { Request, Response } from 'express'
-import { VERTICALS } from '../../constants/domain.constants'
+import { customerLocale, VERTICALS } from '../../constants/domain.constants'
 import { Customer } from '../../model/customerModel.admin'
 import { Enquiry, ENQUIRY_KINDS } from '../../model/enquiryModel'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
@@ -149,13 +149,15 @@ export const createEnquiry = catchAsync(async (req: Request, res: Response) => {
    // Acknowledge the lead. §7 makes an unanswered enquiry the thing to avoid;
    // the first thing that stops it is the customer knowing it arrived. App only
    // (no SMS, 2026-10-26): pushed to the account that has this number, if any.
-   void Customer.exists({ phone: enquiry.phone })
+   void Customer.findOne({ phone: enquiry.phone }).select('locale').lean()
       .then((account) =>
          notify({
             event: NOTIFICATION_EVENTS.ENQUIRY_RECEIVED,
             recipient: enquiry.phone,
             customer: account?._id,
             sms: false,
+            // The language on their record, else English.
+            locale: customerLocale(account?.locale),
             vars: {
                customer_name: enquiry.customerName,
                order_ref: enquiry.reference,

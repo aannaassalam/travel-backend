@@ -347,7 +347,9 @@ const main = async () => {
       const events = NOTIFICATION_TEMPLATE_DEFAULTS.map((t) => t.event).sort()
       assert.deepStrictEqual(events, Object.values(NOTIFICATION_EVENTS).sort(), 'an event with no default sends nothing')
       for (const t of NOTIFICATION_TEMPLATE_DEFAULTS) {
-         for (const [, v] of t.body.matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)) {
+         // French in each: the office's language, and the one required on save.
+         assert.ok(t.body.fr, `${t.event}: no French wording`)
+         for (const [, v] of Object.values(t.body).join(' ').matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)) {
             assert.ok((TEMPLATE_VARIABLES as readonly string[]).includes(v), `${t.event}: {{${v}}} is not a template variable`)
          }
       }
@@ -394,7 +396,7 @@ const main = async () => {
       assert.strictEqual(sms('DRIVER_WELCOME').length, 1, 'a push template is not an SMS one: the SMS default is added')
       assert.strictEqual(sms('QUOTE_SENT').length, 0, 'deleted by the office: stays deleted')
       assert.strictEqual(sms('DRIVER_RIDE_REMOVED')[0]?.isActive, true)
-      assert.ok(sms('DRIVER_RIDE_REMOVED')[0].body.includes('ne vous est plus attribuée'))
+      assert.ok(sms('DRIVER_RIDE_REMOVED')[0].body.fr.includes('ne vous est plus attribuée'))
       assert.strictEqual(audits.length, 1, 'one audit entry, from the boot that added some')
       assert.strictEqual(audits[0].action, 'NOTIFICATION_TEMPLATES_ADDED')
       assert.strictEqual(audits[0].after.count, NOTIFICATION_TEMPLATE_DEFAULTS.length - 3)

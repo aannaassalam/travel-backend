@@ -2,7 +2,15 @@ import { NextFunction, Request, Response } from 'express'
 
 import { AUDIT_ACTIONS } from '../../constants/admin.constants'
 import { LISTING_STATUS, LOCALES, VERTICALS } from '../../constants/domain.constants'
-import { IListing, isScheduledRoute, Listing, PROMO_FIELDS, promoSlotsOf } from '../../model/listingModel'
+import {
+   IListing,
+   isScheduledRoute,
+   Listing,
+   LISTING_TEXT_ATTRIBUTES,
+   listingTags,
+   PROMO_FIELDS,
+   promoSlotsOf,
+} from '../../model/listingModel'
 import { Location, ServicedRoute } from '../../model/locationModel'
 import { Supplier } from '../../model/supplierModel'
 import { OPTIONAL_CAR_RATES } from '../../services/orders/rental.service'
@@ -11,10 +19,12 @@ import { supplierRef } from './supplierController'
 import {
    availableCurrencies,
    baseAmount,
+   everyLocale,
    geoPoint,
    parseGeo,
    parseMoney,
    resolveLocalized,
+   tagTranslationsOf,
    translationStatus,
 } from '../../model/shared.schema'
 import { getSettings } from '../../model/settingsModel'
@@ -58,6 +68,8 @@ const LISTING_EDITABLE = [
    'validFrom',
    'validUntil',
    'attributes',
+   // `{ [word]: Localized }` for the words of the attribute lists; dropped on save once unlisted.
+   'tagTranslations',
    'publishAt',
    'unpublishAt',
 ] as const
@@ -116,7 +128,13 @@ const listingFields: FieldMap<IListing> = {
       Math.max(l.quantityTotal - l.quantitySold - l.quantityHeld, 0),
    validFrom: (l) => l.validFrom,
    validUntil: (l) => l.validUntil,
-   attributes: (l) => l.attributes,
+   // The texts customers read, in every language ('' when empty), the rest as stored.
+   attributes: (l) => {
+      const a = (l.attributes as any)?.toObject ? (l.attributes as any).toObject() : { ...(l.attributes as any) }
+      for (const k of LISTING_TEXT_ATTRIBUTES) if (a[k] !== undefined && a[k] !== null) a[k] = everyLocale(a[k])
+      return a
+   },
+   tagTranslations: (l) => tagTranslationsOf(l.tagTranslations, listingTags(l), true),
    publishAt: (l) => l.publishAt,
    unpublishAt: (l) => l.unpublishAt,
    translations: (l) => {

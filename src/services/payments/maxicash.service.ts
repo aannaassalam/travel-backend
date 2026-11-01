@@ -408,6 +408,13 @@ export interface InitResult {
 }
 
 /**
+ * The payment page speaks French and English only: French for a French
+ * visitor, English for every other site language and for none said.
+ */
+export const payPageLanguage = (locale?: string) =>
+    locale?.toLowerCase().startsWith("fr") ? "fr" : "en";
+
+/**
  * Opens a transaction and returns the URL to send the customer to.
  *
  * Step 1 of Pay Entry Web. The body is the guide's sample, field for field,
@@ -443,9 +450,7 @@ export const initializePayment = async (
             Amount: String(amount),
             Currency: PROVIDER_CURRENCIES[input.currency],
             Telephone: input.phone ?? "",
-            Language: input.locale?.toLowerCase().startsWith("en")
-                ? "en"
-                : "fr",
+            Language: payPageLanguage(input.locale),
             Reference: input.reference,
             SuccessURL: back(input.tokens.success),
             FailureURL: back(input.tokens.failure),
@@ -463,7 +468,7 @@ export const initializePayment = async (
         Amount: String(amount),
         Currency: PROVIDER_CURRENCIES[input.currency],
         Telephone: input.phone ?? "",
-        Language: input.locale?.toLowerCase().startsWith("en") ? "en" : "fr",
+        Language: payPageLanguage(input.locale),
         Reference: input.reference,
         SuccessURL: back(input.tokens.success),
         FailureURL: back(input.tokens.failure),

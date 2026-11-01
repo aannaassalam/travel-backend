@@ -2,7 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { isValidObjectId } from 'mongoose'
 
 import { AUDIT_ACTIONS, PANEL_WORDS } from '../../constants/admin.constants'
-import { LOCALES, PAYMENT_STATUS } from '../../constants/domain.constants'
+import { customerLocale, LOCALES, PAYMENT_STATUS } from '../../constants/domain.constants'
 import { POLICY_DEFAULTS } from '../../constants/policy.defaults'
 import {
    Enquiry,
@@ -18,7 +18,7 @@ import AuditLog from '../../model/auditLogModel'
 import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import SettingsModel, { getSettings, PolicyVersion } from '../../model/settingsModel'
-import { geoPoint, parseGeo } from '../../model/shared.schema'
+import { everyLocale, geoPoint, parseGeo, parseLocalized, resolveLocalized, toLocalized } from '../../model/shared.schema'
 import { byWords, customerNameSort, deleteDoc, paginate, sortBy } from '../../services/adminCrud.service'
 import { recordAudit } from '../../services/auditLog.service'
 import { money, notify, pushBody, render } from '../../services/notifications/notify.service'
@@ -216,13 +216,15 @@ const applyStage = (enquiry: any, stage: string, detail: string | null | undefin
    // A quote the customer is never told about is not a quote. App only (no
    // SMS, 2026-10-26): pushed to the account that has this number, if any.
    if (stage === ENQUIRY_STAGES.QUOTED) {
-      void Customer.exists({ phone: enquiry.phone })
+      void Customer.findOne({ phone: enquiry.phone }).select('locale').lean()
          .then((account) =>
             notify({
                event: NOTIFICATION_EVENTS.QUOTE_SENT,
                recipient: enquiry.phone,
                customer: account?._id,
                sms: false,
+               // The language on their record, else English.
+               locale: customerLocale(account?.locale),
                vars: {
                   customer_name: enquiry.customerName,
                   order_ref: enquiry.reference,
@@ -575,7 +577,8 @@ const settingsFields: FieldMap<any> = {
          phone: o.phone,
          whatsapp: o.whatsapp,
          email: o.email,
-         hours: o.hours,
+         // Every language ('' when empty); hours typed before languages are French.
+         hours: everyLocale(o.hours),
          geo: geoPoint(o.geo),
          isPrimary: o.isPrimary,
       })),
@@ -666,7 +669,7 @@ export const parseOffices = (input: unknown) => {
          phone: officePhone(o.phone, `${label} phone`),
          whatsapp: officePhone(o.whatsapp, `${label} WhatsApp`),
          email: officeText(o.email, `${label} email`, 200),
-         hours: officeText(o.hours, `${label} hours`, 200),
+         hours: parseLocalized(o.hours, `${label} hours`, 200),
          geo: parseGeo(o.geo) ?? undefined,
          isPrimary: o.isPrimary === true,
       }
@@ -775,8 +778,9 @@ const templateFields: FieldMap<any> = {
    event: (t) => t.event,
 
    channel: (t) => t.channel,
-   subject: (t) => t.subject,
-   body: (t) => t.body,
+   // Every language ('' when empty); a template saved before languages is French.
+   subject: (t) => everyLocale(t.subject),
+   body: (t) => everyLocale(t.body),
    isActive: (t) => t.isActive,
    updatedAt: (t) => t.updatedAt,
 }
@@ -831,9 +835,12 @@ const SENSITIVE_PLACEHOLDERS = [
 
 export const upsertTemplate = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const { event, channel, subject, body, isActive } = req.body
-      if (!event || !channel || !body) {
-         return next(new AppError('event, channel and body are required', 400))
+      const { event, channel, isActive } = req.body
+      // Per language; a plain string (an older panel) is French, which is required.
+      const subject = toLocalized(req.body.subject)
+      const body = toLocalized(req.body.body)
+      if (!event || !channel || !body.fr) {
+         return next(new AppError('event, channel and the French body are required', 400))
       }
       /**
        * Checked here, explicitly.
@@ -856,7 +863,8 @@ export const upsertTemplate = catchAsync(
          return next(new AppError('Unknown event', 400, 'UNKNOWN_EVENT'))
       }
 
-      const used = [...String(body).matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)].map(
+      const words = Object.values(body).join('\n')
+      const used = [...words.matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)].map(
          (m) => m[1]
       )
       const unknown = used.filter(
@@ -871,7 +879,7 @@ export const upsertTemplate = catchAsync(
          )
       }
       const sensitive = SENSITIVE_PLACEHOLDERS.filter((s) =>
-         `${subject ?? ''} ${body}`.toLowerCase().includes(s)
+         `${Object.values(subject).join(' ')} ${words}`.toLowerCase().includes(s)
       )
       if (sensitive.length) {
          return next(
@@ -885,7 +893,7 @@ export const upsertTemplate = catchAsync(
       const before = await NotificationTemplate.findOne({ event, channel })
       const template = await NotificationTemplate.findOneAndUpdate(
          { event, channel },
-         { subject, body, isActive: isActive ?? true },
+         { ...(req.body.subject !== undefined ? { subject } : {}), body, isActive: isActive ?? true },
          { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
       )
 
@@ -912,7 +920,9 @@ export const upsertTemplate = catchAsync(
  */
 export const sendTestNotification = catchAsync(
    async (req: Request, res: Response, next: NextFunction) => {
-      const { event, channel, body } = req.body
+      const { event, channel } = req.body
+      // One language's text, or the template's per language with the one to try in `locale`.
+      const body = resolveLocalized(toLocalized(req.body.body), String(req.body.locale ?? 'fr'))
       const admin = (req as any).admin
       const to = String(req.body.to || admin.phone || '').trim()
 

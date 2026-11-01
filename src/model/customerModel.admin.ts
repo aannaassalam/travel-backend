@@ -1,5 +1,4 @@
 import mongoose, { Document, Schema, Types } from 'mongoose'
-import { DEFAULT_LOCALE } from '../constants/domain.constants'
 
 /**
  * Platform customers (§8). Separate from the inherited `customerModel.ts`,
@@ -14,7 +13,8 @@ export interface ICustomer extends Document {
    fullName: string
    email?: string
    phone: string
-   locale: string
+   /** Their language, as the site or app last said. Unset: unknown — written to in English. */
+   locale?: string
    city?: string
    isBlocked: boolean
    /**
@@ -63,7 +63,8 @@ const customerSchema = new Schema<ICustomer>(
          // E.164 — free-text phone numbers make merge-on-phone (§8) impossible.
          match: [/^\+?[1-9]\d{6,14}$/, 'Phone must be in E.164 format'],
       },
-      locale: { type: String, default: DEFAULT_LOCALE },
+      // No default: a French one made every customer who never said French.
+      locale: String,
       city: { type: String, trim: true },
       isBlocked: { type: Boolean, default: false },
       /**

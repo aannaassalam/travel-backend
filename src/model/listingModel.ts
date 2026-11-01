@@ -9,10 +9,13 @@ import { CAR_RATES, OPTIONAL_CAR_RATES } from '../services/orders/rental.service
 import { hasTimetable } from '../services/orders/schedule.service'
 import {
    baseAmount,
+   keepTagTranslations,
    Localized,
    localizedField,
+   localizedText,
    Money,
    moneyField,
+   tagTranslationsField,
    videoField,
 } from './shared.schema'
 
@@ -161,6 +164,35 @@ export const listingPromotionClauses = (now = Date.now()) => [
    notEndedClause(now),
 ]
 
+/**
+ * The attributes customers read as text, one per language since 2026-10-31
+ * (`localizedText`: one typed before reads as French).
+ */
+export const LISTING_TEXT_ATTRIBUTES = [
+   'meetingPoint',
+   'mileageLimit',
+   'insuranceTerms',
+   'baggage',
+   'fareRules',
+   'titleDeedStatus',
+] as const
+
+/** The attributes that are words from a list (and a bus's class): kept French, translated per listing. */
+export const LISTING_TAG_ATTRIBUTES = [
+   'features',
+   'inclusions',
+   'exclusions',
+   'pickupLocations',
+   'languages',
+   'vehicleClass',
+] as const
+
+/** Every word of a listing's lists, as `tagTranslations` is keyed. */
+export const listingTags = (l: { attributes?: any }): string[] =>
+   LISTING_TAG_ATTRIBUTES.flatMap((k) => l.attributes?.[k] ?? []).filter(
+      (w): w is string => typeof w === 'string' && Boolean(w)
+   )
+
 /** §5.2 per-vertical fields. Validated per vertical in `publishBlockers`. */
 const attributesSchema = new Schema(
    {
@@ -194,8 +226,8 @@ const attributesSchema = new Schema(
          },
       ],
       cabin: { type: String, enum: ['ECONOMY', 'PREMIUM', 'BUSINESS', 'FIRST'] },
-      baggage: String,
-      fareRules: String,
+      baggage: localizedText(),
+      fareRules: localizedText(),
       bookingDeadline: Date,
 
       // --- Bus ---
@@ -223,9 +255,9 @@ const attributesSchema = new Schema(
       /** Unset when the office has not said: not the same as self-drive. */
       withDriver: Boolean,
       deposit: Number,
-      mileageLimit: String,
+      mileageLimit: localizedText(),
       pickupLocations: [String],
-      insuranceTerms: String,
+      insuranceTerms: localizedText(),
 
       // --- Activities & Tours ---
       durationMinutes: Number,
@@ -236,7 +268,7 @@ const attributesSchema = new Schema(
       maxParticipants: Number,
       inclusions: [String],
       exclusions: [String],
-      meetingPoint: String,
+      meetingPoint: localizedText(),
       languages: [String],
       childPrice: Number,
 
@@ -251,7 +283,7 @@ const attributesSchema = new Schema(
       bathrooms: Number,
       plotSizeSqm: Number,
       features: [String],
-      titleDeedStatus: String,
+      titleDeedStatus: localizedText(),
       availabilityStatus: {
          type: String,
          enum: ['AVAILABLE', 'UNDER_OFFER', 'SOLD', 'RENTED'],
@@ -328,6 +360,8 @@ export interface IListing extends Document {
    /** The service this departure was repeated from (§5.2 recurrence). */
    repeatOf?: Types.ObjectId
    attributes: any
+   /** Each word of the attribute lists in the other languages (see `tagTranslationsField`). */
+   tagTranslations: { tag: string; text: Localized }[]
    rating?: number
    reviewCount?: number
    /** Worked out from approved customer reviews (reviews.service); what the public sees. */
@@ -392,6 +426,7 @@ const listingSchema = new Schema<IListing>(
       /** Drives §4 at-risk and spoilage for non-hotel stock. */
       validUntil: { type: Date, index: true },
       attributes: { type: attributesSchema, default: {} },
+      tagTranslations: tagTranslationsField(),
       // Legacy figures from seeds and imports, not from customers: kept, never
       // published or sorted on any more. `reviewStats` replaced them.
       rating: { type: Number, min: 0, max: 5 },
@@ -421,6 +456,8 @@ listingSchema.pre('validate', function () {
    const legs = (this.attributes as any)?.segments as unknown[] | undefined
    if (legs?.some((leg) => !leg)) (this.attributes as any).segments = legs.filter(Boolean)
 })
+
+keepTagTranslations(listingSchema, listingTags)
 
 /** §5.1 validate-before-publish, plus the per-vertical rules from §5.2. */
 listingSchema.methods.publishBlockers = function (): string[] {

@@ -9,7 +9,7 @@ import {
    presentRestaurants,
 } from '../../dto/admin/inventory.dto'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
-import { baseAmount, parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
+import { baseAmount, parseGeo, parseMoney, resolveLocalized, toLocalized } from '../../model/shared.schema'
 import {
    archiveDoc,
    confirmOverOpenBookings,
@@ -37,6 +37,8 @@ const RESTAURANT_EDITABLE = [
    'name',
    'description',
    'cuisines',
+   // `{ [cuisine]: Localized }`; words no longer listed are dropped on save.
+   'tagTranslations',
    'address',
    'city',
    'country',
@@ -429,15 +431,17 @@ export const deactivateMenuItem = catchAsync(
 const parseZones = (input: any) => {
    if (!Array.isArray(input)) return undefined
    return input.slice(0, 30).map((z) => {
-      const name = String(z?.name ?? '').trim()
-      if (!name) throw new AppError('Each delivery zone needs a name', 400)
+      // Per language; a plain string (an older panel) is French, which is required.
+      const names = toLocalized(z?.name)
+      const name = names.fr
+      if (!name) throw new AppError('Each delivery zone needs a name in French', 400)
       const fee = parseMoney(z.fee)
       if (!(Number(fee?.CDF) >= 0)) {
          throw new AppError(`Delivery zone “${name}”: enter its fee in FC (0 for free delivery)`, 400)
       }
       return {
          ...(z.id ? { _id: z.id } : {}),
-         name,
+         name: names,
          fee,
          minOrder: parseMoney(z.minOrder),
          etaMinutes: Number(z.etaMinutes) || 45,

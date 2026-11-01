@@ -8,6 +8,8 @@ import {
    PAYMENT_METHOD,
    PAYMENT_STATUS,
    VERTICALS,
+   customerLocale,
+   knownLocale,
 } from '../../constants/domain.constants'
 import { currentDocuments, presentOrder } from '../../dto/public/order.dto'
 import { storage } from '../../services/storage'
@@ -15,6 +17,7 @@ import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import { Restaurant } from '../../model/restaurantModel'
 import { IRide, Ride } from '../../model/rideModel'
+import { toLocalized } from '../../model/shared.schema'
 import { rideOfOrder } from '../../services/transfers/rideLookup'
 import { PolicyVersion, getSettings } from '../../model/settingsModel'
 import {
@@ -286,9 +289,14 @@ export const createOrder = catchAsync(
          )
       }
 
-      // The locale the customer is actually being served, used for the consent
-      // snapshot here and the customer record below.
-      const wanted = ['fr', 'en'].includes(locale) ? locale : 'fr'
+      // The language the customer is actually being served, as it is: kept on
+      // the consent snapshot and a new customer record, and the language their
+      // messages go in (notify.service; English, then French, where the office
+      // has not written one). None said: nothing is stored, so the messages
+      // fall to the customer's own language, then English (2026-10-31);
+      // `wanted` only picks the terms shown.
+      const served = knownLocale(locale)
+      const wanted = customerLocale(served)
 
       // --- 0. Consent evidence (§2.2) ----------------------------------------
       /**
@@ -305,7 +313,14 @@ export const createOrder = catchAsync(
          PolicyVersion.findOne({ kind: 'NO_REFUND', locale: lang, isLive: true }).sort({
             createdAt: -1,
          })
-      const policy = (await live(wanted)) ?? (await live('fr'))
+      // The consent text in the visitor's language when the office has published
+      // one, then English, then French: the order the website shows it in, so
+      // the version recorded is the one the customer read.
+      let policy = null
+      for (const lang of new Set([wanted, 'en', 'fr'])) {
+         policy = await live(lang)
+         if (policy) break
+      }
       if (!policy) {
          return next(
             new AppError(
@@ -423,7 +438,8 @@ export const createOrder = catchAsync(
          deliveryDoc = {
             address: address.slice(0, 300),
             zoneId: zone._id,
-            zoneName: zone.name,
+            // As the restaurant has it, every language: each reader picks its own.
+            zoneName: toLocalized(zone.name),
             etaMinutes: (restaurant.prepTimeMinutes ?? 0) + (zone.etaMinutes ?? 0),
             notes: String(delivery?.notes ?? '').trim().slice(0, 300) || undefined,
          }
@@ -479,7 +495,7 @@ export const createOrder = catchAsync(
           */
          const onInsert: Record<string, unknown> = {
             phone,
-            locale: wanted,
+            ...(served ? { locale: served } : {}),
             hasAccount: false,
             firstName: String(contact.firstName).trim().slice(0, 80),
             lastName: String(contact.lastName).trim().slice(0, 80),
@@ -617,7 +633,7 @@ export const createOrder = catchAsync(
                policyVersionId: policy._id,
                policyVersionLabel: policy.label,
                textShown: policy.body,
-               locale: wanted,
+               locale: served,
                acceptedAt: new Date(),
                ip: req.ip,
                userAgent: req.header('User-Agent')?.slice(0, 300),

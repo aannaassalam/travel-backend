@@ -10,18 +10,36 @@
  */
 import assert from 'assert'
 
-import { readCell } from '../controllers/admin/inventoryCsvController'
+import { Types } from 'mongoose'
+
+import { customerLocale, knownLocale } from '../constants/domain.constants'
+import { readCell, writeCell } from '../controllers/admin/inventoryCsvController'
+import { presentListing as presentAdminListing } from '../controllers/admin/listingController'
 import { parseOffices, parseRates } from '../controllers/admin/opsController'
-import { geoPoint, parseGeo, parseMoney } from '../model/shared.schema'
+import { login, updateMe, verifyOtp } from '../controllers/public/customerAuthController'
+import { hashOtp, hashPassword } from '../middleware/customerAuth'
+import { Customer } from '../model/customerModel.admin'
+import { Order } from '../model/orderModel'
+import { PhoneVerification } from '../model/phoneVerificationModel'
+import { geoPoint, parseGeo, parseMoney, resolveLocalized, tagTranslationsOf, toLocalized } from '../model/shared.schema'
 import { bestDiscountOf, bestPromoted, discountOf, Listing, PROMO_FIELDS, promoSlotsOf } from '../model/listingModel'
-import { presentListing } from '../dto/public/catalogue.dto'
+import { Hotel } from '../model/hotelModel'
+import { Restaurant } from '../model/restaurantModel'
+import { NotificationLog, NotificationTemplate } from '../model/enquiryModel'
+import { presentHotel as presentAdminHotel, presentRestaurant as presentAdminRestaurant } from '../dto/admin/inventory.dto'
+import { presentHotel, presentListing, presentRestaurant } from '../dto/public/catalogue.dto'
+import { notify, notifyOrder } from '../services/notifications/notify.service'
+import * as smsService from '../services/notifications/sms.service'
+import { payPageLanguage } from '../services/payments/maxicash.service'
 import { francRateProblem } from '../services/fx.service'
 import { applyPromotion } from '../services/promotion.service'
+import { asClient } from '../utils/clientContent'
 
 let failures = 0
+// As the website and today's app read the API (?i18n=1); older app builds are checked on their own below.
 const check = (name: string, fn: () => void) => {
    try {
-      fn()
+      asClient(true, fn)
       console.log(`  ✓ ${name}`)
    } catch (err: any) {
       failures += 1
@@ -162,6 +180,14 @@ check('exactly one primary office', () => {
    )
    // Only a real boolean true counts as marked.
    assert.deepStrictEqual(flags([office(), office({ isPrimary: 'true' })]), [true, false])
+})
+
+check('office hours are per language; a plain string is French; each language capped at 200', () => {
+   assert.deepStrictEqual(parseOffices([office()])![0].hours, { fr: 'Lun–Ven 8h–17h' })
+   const [o] = parseOffices([office({ hours: { fr: ' Lun–Ven ', en: 'Mon–Fri', zh: '', xx: 'dropped' } })])!
+   assert.deepStrictEqual(o.hours, { fr: 'Lun–Ven', en: 'Mon–Fri' })
+   assert.strictEqual(refused(() => parseOffices([office({ hours: { en: 'x'.repeat(201) } })])), 400)
+   assert.strictEqual(refused(() => parseOffices([office({ hours: ['Lun'] })])), 400)
 })
 
 check('a pin on an office follows the same rule', () => {
@@ -392,10 +418,279 @@ check('every promotion field is a field of a listing', () => {
    }
 })
 
-console.log(
-   failures === 0
-      ? '\nAll catalogue checks passed.\n'
-      : `\n${failures} catalogue check(s) FAILED.\n`
-)
+/** `check` for what has to be awaited (a model's validation, a notification). */
+const checkAsync = async (name: string, fn: () => Promise<void>) => {
+   try {
+      await asClient(true, fn)
+      console.log(`  ✓ ${name}`)
+   } catch (err: any) {
+      failures += 1
+      console.error(`  ✗ ${name}\n      ${err.message}`)
+   }
+}
+const plain = (v: unknown) => JSON.parse(JSON.stringify(v))
+const ALL_EMPTY = { fr: '', en: '', pt: '', es: '', zh: '', ar: '', ru: '' }
 
-process.exit(failures === 0 ? 0 : 1)
+const main = async () => {
+   console.log('\nTexts per language (2026-10-31)')
+   check('a text in any shape: a plain string is French, only content languages with text are kept', () => {
+      assert.deepStrictEqual(toLocalized(' Pièce d’identité '), { fr: 'Pièce d’identité' })
+      assert.deepStrictEqual(toLocalized({ fr: 'a', en: ' ', ru: 'б', xx: 'no', es: 3 }), { fr: 'a', ru: 'б' })
+      ;[undefined, null, '', ['a'], 5].forEach((v) => assert.deepStrictEqual(toLocalized(v), {}))
+   })
+
+   check('the language chain: asked → English → French (French: French → English); a legacy string is itself', () => {
+      assert.strictEqual(resolveLocalized({ fr: 'F', en: 'E', zh: 'Z' }, 'zh'), 'Z')
+      assert.strictEqual(resolveLocalized({ fr: 'F', en: 'E' }, 'zh'), 'E')
+      assert.strictEqual(resolveLocalized({ fr: 'F' }, 'ar'), 'F')
+      assert.strictEqual(resolveLocalized({ en: 'E' }, 'fr'), 'E')
+      assert.strictEqual(resolveLocalized({ fr: 'F', en: 'E' }), 'F')
+      assert.strictEqual(resolveLocalized('Ancien texte', 'en'), 'Ancien texte')
+      // The payment page has French and English only: English for every other language, and for none.
+      assert.deepStrictEqual(['fr', undefined, 'en', 'zh', 'ar'].map(payPageLanguage), ['fr', 'en', 'en', 'en', 'en'])
+   })
+
+   await checkAsync('a hotel: policies stored per language, translations kept only for listed words', async () => {
+      const h = new Hotel({
+         name: { fr: 'Hôtel du Fleuve' },
+         slug: 'fleuve',
+         city: 'Kinshasa',
+         policies: "Pièce d'identité demandée",
+         amenities: ['Piscine', 'Wifi gratuit'],
+         // Map in: French is the word, so a French sent is ignored; Parking is not listed.
+         tagTranslations: { Piscine: { fr: 'x', en: 'Pool', zh: '游泳池', ar: '' }, 'Wifi gratuit': { en: '' }, Parking: { en: 'Parking' } },
+      })
+      await h.validate()
+      assert.deepStrictEqual(plain(h.policies), { fr: "Pièce d'identité demandée" })
+      assert.deepStrictEqual(plain(h.tagTranslations), [{ tag: 'Piscine', text: { en: 'Pool', zh: '游泳池' } }])
+      // A word taken off the list takes its translation with it, on the next save.
+      h.amenities = ['Wifi gratuit']
+      await h.validate()
+      assert.deepStrictEqual(plain(h.tagTranslations), [])
+
+      const admin: any = presentAdminHotel(h)
+      assert.deepStrictEqual(admin.policies, { ...ALL_EMPTY, fr: "Pièce d'identité demandée" })
+      h.amenities = ['Piscine', 'Wifi gratuit']
+      h.tagTranslations = { Piscine: { en: 'Pool' } } as any
+      await h.validate()
+      assert.deepStrictEqual({ ...(presentAdminHotel(h) as any).tagTranslations }, { Piscine: { ...ALL_EMPTY, fr: 'Piscine', en: 'Pool' } })
+      // Public: only words with a translation, only languages with text, French being the word.
+      const pub: any = plain(presentHotel(h.toObject() as any))
+      assert.deepStrictEqual({ ...pub.tagTranslations }, { Piscine: { fr: 'Piscine', en: 'Pool' } })
+      assert.deepStrictEqual(pub.policies, { fr: "Pièce d'identité demandée" })
+   })
+
+   check('a record from before languages reads on: its string is French, admin and public', () => {
+      const h = Hotel.hydrate({
+         _id: new Types.ObjectId(),
+         name: { fr: 'Ancien' },
+         slug: 'ancien',
+         city: 'Goma',
+         policies: 'Texte ancien',
+         amenities: ['Piscine'],
+      })
+      assert.strictEqual(h.policies, 'Texte ancien', 'read as stored, no migration')
+      assert.deepStrictEqual((presentAdminHotel(h) as any).policies, { ...ALL_EMPTY, fr: 'Texte ancien' })
+      assert.deepStrictEqual({ ...(presentAdminHotel(h) as any).tagTranslations }, {})
+      const pub: any = presentHotel(h.toObject() as any)
+      assert.deepStrictEqual(pub.policies, { fr: 'Texte ancien' })
+      assert.deepStrictEqual({ ...pub.tagTranslations }, {})
+      // Stale translations in the database (a word since removed) never leave.
+      const stale = Hotel.hydrate({ ...h.toObject(), tagTranslations: [{ tag: 'Sauna', text: { en: 'Sauna' } }] })
+      assert.deepStrictEqual({ ...(presentAdminHotel(stale) as any).tagTranslations }, {})
+      assert.deepStrictEqual({ ...(presentHotel(stale.toObject() as any) as any).tagTranslations }, {})
+   })
+
+   await checkAsync('a restaurant: opening hours and zone names per language; a zone needs its French name', async () => {
+      const zone = { fee: { CDF: 2_000 } }
+      const r = new Restaurant({
+         name: { fr: 'Chez Mama' },
+         slug: 'mama',
+         city: 'Kinshasa',
+         openingHours: { fr: 'Lun–Sam 11h–22h', en: 'Mon–Sat 11am–10pm', pt: '' },
+         cuisines: ['Congolais'],
+         deliveryZones: [{ ...zone, name: 'Gombe' }, { ...zone, name: { fr: 'Limete', en: 'Limete' } }],
+      })
+      await r.validate()
+      assert.deepStrictEqual(plain(r.openingHours), { fr: 'Lun–Sam 11h–22h', en: 'Mon–Sat 11am–10pm' })
+      assert.deepStrictEqual(plain(r.deliveryZones.map((z: any) => z.name)), [{ fr: 'Gombe' }, { fr: 'Limete', en: 'Limete' }])
+      const admin: any = presentAdminRestaurant(r)
+      assert.deepStrictEqual(admin.deliveryZones[0].name, { ...ALL_EMPTY, fr: 'Gombe' })
+      const pub: any = plain(presentRestaurant(r.toObject() as any))
+      assert.deepStrictEqual(pub.deliveryZones[1].name, { fr: 'Limete', en: 'Limete' })
+      assert.deepStrictEqual(pub.openingHours, { fr: 'Lun–Sam 11h–22h', en: 'Mon–Sat 11am–10pm' })
+
+      const noFrench = new Restaurant({ ...r.toObject(), _id: undefined, deliveryZones: [{ ...zone, name: { en: 'Gombe' } }] })
+      await assert.rejects(noFrench.validate(), /French text is required/)
+   })
+
+   await checkAsync('an app built before languages (no ?i18n=1) still gets each text as one French string', async () => {
+      const zone = { fee: { CDF: 2_000 } }
+      const r = new Restaurant({
+         name: { fr: 'Chez Mama' },
+         slug: 'mama-old',
+         city: 'Kinshasa',
+         openingHours: { fr: 'Lun–Sam 11h–22h', zh: '周一至周六' },
+         deliveryZones: [{ ...zone, name: { fr: 'Limete', ar: 'ليميتي' } }],
+      })
+      await r.validate()
+      const old: any = plain(asClient(false, () => presentRestaurant(r.toObject() as any)))
+      assert.strictEqual(old.openingHours, 'Lun–Sam 11h–22h')
+      assert.strictEqual(old.deliveryZones[0].name, 'Limete')
+      const now: any = plain(presentRestaurant(r.toObject() as any))
+      assert.deepStrictEqual(now.openingHours, { fr: 'Lun–Sam 11h–22h', zh: '周一至周六' })
+   })
+
+   await checkAsync('a listing: attribute texts per language, list words translated, both shown right', async () => {
+      const l = new Listing({
+         vertical: 'ACTIVITY',
+         title: { fr: 'Visite du marché' },
+         slug: 'marche',
+         city: 'Kinshasa',
+         attributes: {
+            durationMinutes: 120,
+            meetingPoint: 'Devant la poste',
+            languages: ['Français', 'Anglais'],
+            inclusions: ['Guide'],
+         },
+         tagTranslations: { Français: { en: 'French' }, Guide: { en: 'Guide', zh: '导游' }, Retiré: { en: 'Gone' } },
+      })
+      await l.validate()
+      assert.deepStrictEqual(plain(l.attributes.meetingPoint), { fr: 'Devant la poste' })
+      assert.deepStrictEqual(plain(l.tagTranslations).map((t: any) => t.tag), ['Français', 'Guide'])
+
+      const admin: any = plain(presentAdminListing(l))
+      assert.deepStrictEqual(admin.attributes.meetingPoint, { ...ALL_EMPTY, fr: 'Devant la poste' })
+      assert.deepStrictEqual(admin.attributes.languages, ['Français', 'Anglais'], 'the words stay French')
+      assert.deepStrictEqual(admin.tagTranslations.Guide, { ...ALL_EMPTY, fr: 'Guide', en: 'Guide', zh: '导游' })
+
+      l.attributes.meetingPoint = { fr: 'Devant la poste', en: 'Outside the post office', ru: ' ' }
+      const pub: any = plain(presentListing(l))
+      assert.deepStrictEqual(pub.attributes.meetingPoint, { fr: 'Devant la poste', en: 'Outside the post office' })
+      assert.deepStrictEqual({ ...pub.tagTranslations }, { Français: { fr: 'Français', en: 'French' }, Guide: { fr: 'Guide', en: 'Guide', zh: '导游' } })
+      assert.ok(!('fareRules' in pub.attributes), 'an unset text is not sent')
+      // A text with nothing in any language is not sent at all.
+      const empty: any = plain(presentListing(Listing.hydrate({ ...l.toObject(), attributes: { meetingPoint: '' } })))
+      assert.ok(!('meetingPoint' in empty.attributes), JSON.stringify(empty.attributes))
+      // A bus class is one word, treated as a list word.
+      const bus = new Listing({ vertical: 'BUS', title: { fr: 'K→M' }, slug: 'km', city: 'Kinshasa', attributes: { vehicleClass: 'Climatisé' }, tagTranslations: { Climatisé: { en: 'Air-conditioned' } } })
+      await bus.validate()
+      assert.deepStrictEqual({ ...(presentListing(bus) as any).tagTranslations }, { Climatisé: { fr: 'Climatisé', en: 'Air-conditioned' } })
+      // Any word is a word, whatever an object happens to call its own.
+      assert.deepStrictEqual(plain(tagTranslationsOf([{ tag: 'constructor', text: { en: 'x' } }], ['constructor'], false)), {
+         constructor: { fr: 'constructor', en: 'x' },
+      })
+   })
+
+   check('the spreadsheet: a text per language leaves as its French; a legacy string as itself', () => {
+      const col = { key: 'policies', kind: 'text', path: 'policies' } as any
+      assert.strictEqual(writeCell(col, { policies: { fr: 'Pièce demandée', en: 'ID required' } }, ','), 'Pièce demandée')
+      assert.strictEqual(writeCell(col, { policies: { en: 'ID required' } }, ','), '')
+      assert.strictEqual(writeCell(col, { policies: 'Ancien' }, ','), 'Ancien')
+      const meeting = { key: 'meeting_point', kind: 'text', path: 'attributes.meetingPoint' } as any
+      assert.strictEqual(writeCell(meeting, { attributes: { meetingPoint: { fr: 'La poste' } } }, ';'), 'La poste')
+      // An import writes the cell's text as the French one.
+      assert.deepStrictEqual(plain(new Listing({ attributes: { meetingPoint: 'La poste' } }).attributes.meetingPoint), { fr: 'La poste' })
+   })
+
+   await checkAsync("a notification goes in the customer's language, then English, then French", async () => {
+      const texts: string[] = []
+      ;(NotificationTemplate as any).find = async () => [
+         { channel: 'SMS', body: { fr: 'Réservation {{order_ref}}', en: 'Booking {{order_ref}}', zh: '预订 {{order_ref}}' } },
+      ]
+      ;(NotificationLog as any).create = async () => undefined
+      ;(smsService as any).smsConfigured = () => true
+      ;(smsService as any).sendSms = async (_to: string, body: string) => {
+         texts.push(body)
+         return { sid: 'SM1', status: 'queued' }
+      }
+      const send = (locale?: string) =>
+         notify({ event: 'ORDER_CONFIRMED', recipient: '+243810000042', vars: { order_ref: 'FA-1' }, locale })
+      for (const l of ['zh', 'ar', 'fr', 'en', undefined]) await send(l)
+      assert.deepStrictEqual(texts.splice(0), ['预订 FA-1', 'Booking FA-1', 'Réservation FA-1', 'Booking FA-1', 'Réservation FA-1'])
+      // A template saved before languages: its one text for everyone.
+      ;(NotificationTemplate as any).find = async () => [{ channel: 'SMS', body: 'Booking {{order_ref}}' }]
+      await send('zh')
+      assert.deepStrictEqual(texts, ['Booking FA-1'])
+   })
+
+   check("a customer's language: the first of the seven given, else English; a legacy text stays French", () => {
+      assert.strictEqual(customerLocale(undefined, null, ''), 'en')
+      assert.strictEqual(customerLocale('de', 'EN', 7), 'en')
+      assert.strictEqual(customerLocale(undefined, 'fr'), 'fr')
+      assert.strictEqual(customerLocale('zh', 'fr'), 'zh')
+      assert.strictEqual(knownLocale('xx'), undefined)
+      // A new record that was told no language has none, not French.
+      assert.strictEqual(new Customer({ phone: '+243810000042', firstName: 'Aline' }).locale, undefined)
+      assert.strictEqual(resolveLocalized({ fr: 'F', en: 'E' }), 'F', 'the office and legacy default is French')
+   })
+
+   await checkAsync('an order message: the booking language, then the record, then English', async () => {
+      const texts: string[] = []
+      ;(NotificationTemplate as any).find = async () => [
+         { channel: 'SMS', body: { fr: 'Réservation {{order_ref}}', en: 'Booking {{order_ref}}', zh: '预订 {{order_ref}}' } },
+      ]
+      ;(smsService as any).sendSms = async (_to: string, body: string) => {
+         texts.push(body)
+         return { sid: 'SM1', status: 'queued' }
+      }
+      const orderOf = (consent?: object, locale?: string) => {
+         ;(Order as any).findById = async () => ({ _id: new Types.ObjectId(), reference: 'FA-2', chargedTotal: 1_000, chargedCurrency: 'CDF', items: [{ vertical: 'HOTEL' }], consent })
+         ;(Customer as any).findById = async () => ({ _id: new Types.ObjectId(), phone: '+243810000042', firstName: 'Aline', locale })
+         return notifyOrder('ORDER_CONFIRMED', new Types.ObjectId(), { sms: true })
+      }
+      await orderOf()
+      await orderOf({}, 'zh')
+      await orderOf({ locale: 'fr' }, 'zh')
+      await orderOf(undefined, 'xx')
+      assert.deepStrictEqual(texts, ['Booking FA-2', '预订 FA-2', 'Réservation FA-2', 'Booking FA-2'])
+   })
+
+   await checkAsync('signing up, signing in and the profile record the language in use; anything else is ignored', async () => {
+      process.env.JWT_SECRET ||= 'self-check only'
+      // The controller's answer: the response body, or what it passed to next().
+      const call = (handler: any, body: object, customer?: object) =>
+         new Promise<any>((resolve) => {
+            const res: any = { set: () => res, status: () => res, cookie: () => res, json: resolve }
+            handler({ body, customer }, res, resolve)
+         })
+      const sets: any[] = []
+      const account: any = { _id: new Types.ObjectId(), phone: '+243810000042', firstName: 'Aline', hasAccount: true, locale: 'fr' }
+      let found: any = null
+      ;(Customer as any).findOne = () => ({ select: async () => found })
+      ;(Customer as any).findById = async () => account
+      ;(Customer as any).create = async (doc: object) => ({ ...doc, _id: account._id })
+      ;(Customer as any).updateOne = async (_q: unknown, update: any) => void sets.push(update.$set)
+      const code = { _id: 1, expiresAt: new Date(Date.now() + 60_000), codeHash: hashOtp('123456'), attempts: 1 }
+      ;(PhoneVerification as any).findOne = async () => code
+      ;(PhoneVerification as any).findOneAndUpdate = async () => code
+      ;(PhoneVerification as any).deleteOne = async () => undefined
+
+      const signUp = { phone: account.phone, code: '123456', firstName: 'Aline', password: 'long enough 1' }
+      for (const locale of ['zh', 'de', undefined]) {
+         const out = await call(verifyOtp, { ...signUp, locale })
+         assert.ok(out.token, `sign-up with ${locale}: ${out.message}`)
+      }
+      assert.deepStrictEqual(sets.splice(0).map((s) => s.locale), ['zh', undefined, undefined])
+
+      found = { ...account, password: await hashPassword(signUp.password) }
+      for (const locale of ['ar', 'fr', 'xx', 7]) {
+         const out = await call(login, { phone: account.phone, password: signUp.password, locale })
+         assert.ok(out.token, `sign-in with ${locale}: ${out.message}`)
+      }
+      // French is already theirs: nothing to write.
+      assert.deepStrictEqual(sets.splice(0), [{ locale: 'ar' }])
+
+      for (const locale of ['ru', 'EN', null]) await call(updateMe, { locale }, account)
+      assert.deepStrictEqual(sets.splice(0), [{ locale: 'ru' }, {}, {}])
+   })
+
+   console.log(
+      failures === 0
+         ? '\nAll catalogue checks passed.\n'
+         : `\n${failures} catalogue check(s) FAILED.\n`
+   )
+   process.exit(failures === 0 ? 0 : 1)
+}
+
+void main()

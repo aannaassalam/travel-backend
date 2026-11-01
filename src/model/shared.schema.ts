@@ -1,3 +1,4 @@
+import { Schema } from 'mongoose'
 import {
    BASE_CURRENCY,
    Currency,
@@ -29,10 +30,140 @@ export const localizedField = (opts: { required?: boolean } = {}) => ({
       // resolves to — it is the one that cannot be blank.
       required: opts.required ? [true, 'French text is required'] : false,
    },
-   en: { type: String, default: '', trim: true },
-   pt: { type: String, default: '', trim: true },
-   es: { type: String, default: '', trim: true },
+   // Every other content language, from the one list (zh, ar, ru were missing
+   // here: a strict schema silently dropped what the office typed in them).
+   ...Object.fromEntries(
+      LOCALES.filter((l) => l !== 'fr').map((l) => [l, { type: String, default: '', trim: true }])
+   ),
 })
+
+/** A text that may still be the plain string it was before it had languages. */
+export type LocalizedText = Localized | string
+
+/**
+ * Any stored or sent text as `{ lang: text }`, only the languages with text:
+ * a plain string (a record or a panel from before languages) is French, and
+ * anything but the content languages is dropped. Also what the public API sends.
+ */
+export const toLocalized = (value: unknown): Localized => {
+   if (typeof value === 'string') return value.trim() ? { fr: value.trim() } : {}
+   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+   const out: Localized = {}
+   for (const l of LOCALES) {
+      const text = (value as any)[l]
+      if (typeof text === 'string' && text.trim()) out[l] = text.trim()
+   }
+   return out
+}
+
+/** Every language, '' where there is none: what the admin edits. */
+export const everyLocale = (value: unknown) => {
+   const t = toLocalized(value)
+   return Object.fromEntries(LOCALES.map((l) => [l, t[l] ?? ''])) as Record<(typeof LOCALES)[number], string>
+}
+
+/**
+ * A single text that became one per language (2026-10-31). Mixed, so a record
+ * that still holds the plain string reads on (as French) with no migration;
+ * every write is stored as `toLocalized` makes it. Readers take both shapes.
+ */
+export const localizedText = (opts: { required?: boolean } = {}) => ({
+   type: Schema.Types.Mixed,
+   set: toLocalized,
+   ...(opts.required
+      ? {
+           required: true,
+           validate: { validator: (v: unknown) => Boolean(toLocalized(v).fr), message: 'French text is required' },
+        }
+      : {}),
+})
+
+/**
+ * A localized text from a form, for a field with a length cap: a plain string
+ * is French; each language trimmed and held to `max`.
+ */
+export const parseLocalized = (raw: unknown, label: string, max: number): Localized => {
+   if (raw === undefined || raw === null) return {}
+   if (typeof raw !== 'string' && (typeof raw !== 'object' || Array.isArray(raw))) {
+      throw new AppError(`${label} must be text`, 400)
+   }
+   const out = toLocalized(raw)
+   for (const [l, text] of Object.entries(out)) {
+      if (text.length > max) throw new AppError(`${label} is limited to ${max} characters (${l.toUpperCase()})`, 400)
+   }
+   return out
+}
+
+/** A query matching a localized text in any language, or as the plain string it may still be. */
+export const localizedMatch = (path: string, value: RegExp) => [
+   { [path]: value },
+   ...LOCALES.map((l) => ({ [`${path}.${l}`]: value })),
+]
+
+// --- Words of a list, translated on the item -----------------------------------
+
+type TagEntry = { tag: string; text: Localized }
+
+/**
+ * Each word of an item's lists (amenities, cuisines…) in the other languages.
+ * The lists keep the French words, which filters and search use; this says
+ * how to show each one. An array, not a map: a word may hold "." or "$".
+ * Sent and returned as `{ [frenchWord]: Localized }` — the setter takes that.
+ */
+export const tagTranslationsField = () => ({
+   type: [new Schema({ tag: { type: String, required: true }, text: Schema.Types.Mixed }, { _id: false })],
+   default: [],
+   set: (v: unknown) =>
+      v === null
+         ? []
+         : typeof v === 'object' && !Array.isArray(v)
+           ? Object.entries(v as object).map(([tag, text]) => ({ tag, text: toLocalized(text) }))
+           : v,
+})
+
+/**
+ * On every save: one entry per word the lists still hold, with at least one
+ * language besides French (French is the word itself), so a word taken off a
+ * list takes its translations with it.
+ */
+export const keepTagTranslations = (schema: Schema, words: (doc: any) => unknown[]) => {
+   schema.pre('validate', function () {
+      const doc = this as any
+      const kept = new Set(words(doc).filter((w): w is string => typeof w === 'string'))
+      const seen = new Set<string>()
+      const entries: TagEntry[] = []
+      for (const e of doc.tagTranslations ?? []) {
+         if (!kept.has(e?.tag) || seen.has(e.tag)) continue
+         const text = toLocalized(e.text)
+         delete text.fr // the word itself
+         if (!Object.keys(text).length) continue
+         seen.add(e.tag)
+         entries.push({ tag: e.tag, text })
+      }
+      if (JSON.stringify(entries) !== JSON.stringify((doc.tagTranslations ?? []).map((e: any) => ({ tag: e.tag, text: e.text })))) {
+         doc.tagTranslations = entries
+      }
+   })
+}
+
+/**
+ * `{ [frenchWord]: Localized }` for the words the lists hold now, French being
+ * the word. Admin: every language ('' when empty). Public: only the languages
+ * with text, and only words with a translation.
+ */
+export const tagTranslationsOf = (entries: unknown, words: unknown[], admin: boolean) => {
+   const kept = new Set(words)
+   // No prototype: a word such as "constructor" is a word like any other.
+   const out: Record<string, Localized> = Object.create(null)
+   for (const e of (Array.isArray(entries) ? entries : []) as TagEntry[]) {
+      if (!kept.has(e?.tag) || out[e.tag]) continue
+      const text = toLocalized(e.text)
+      delete text.fr
+      if (!Object.keys(text).length) continue
+      out[e.tag] = admin ? { ...everyLocale(text), fr: e.tag } : { fr: e.tag, ...text }
+   }
+   return out
+}
 
 /** Where the admin's video upload stores its files, and what it stores them as. */
 export const VIDEO_FOLDER = 'videos'
@@ -62,10 +193,10 @@ export const videoField = () => ({
 })
 
 /**
- * Resolve a localised value for display: asked-for locale, then the default
- * locale, then any populated translation. Never returns undefined for a record
- * that has any text at all — a blank name in a list is worse than a name in the
- * wrong language.
+ * Resolve a localised value for display: the asked-for locale, then English,
+ * then French (French: French, then English), then any populated translation.
+ * Never returns undefined for a record that has any text at all — a blank name
+ * in a list is worse than a name in the wrong language.
  */
 export const resolveLocalized = (
    value: Localized | string | undefined,
@@ -75,6 +206,7 @@ export const resolveLocalized = (
    if (typeof value === 'string') return value // pre-migration records
    return (
       value[locale as keyof Localized] ||
+      value.en ||
       value[DEFAULT_LOCALE] ||
       LOCALES.map((l) => value[l]).find(Boolean) ||
       ''

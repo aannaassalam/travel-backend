@@ -107,7 +107,8 @@ const deliverySchema = new Schema(
    {
       address: { type: String, required: true, trim: true },
       zoneId: Schema.Types.ObjectId,
-      zoneName: String,
+      /** The zone's name in every language it had (Localized); an order made before 2026-10-31 holds the French string. */
+      zoneName: Schema.Types.Mixed,
       fee: { type: Number, default: 0, min: 0 },
       feeCharged: { type: Number, default: 0, min: 0 },
       etaMinutes: Number,
