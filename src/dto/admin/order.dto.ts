@@ -57,6 +57,8 @@ const orderListFields: FieldMap<IOrder> = {
    chargedTotal: (o) => o.chargedTotal,
    chargedCurrency: (o) => o.chargedCurrency,
    paymentMethod: (o) => o.paymentMethod,
+   // What was booked (hotel room, flight, meal…), each kind once, in line order.
+   verticals: (o) => [...new Set((o.items ?? []).map((i) => i.vertical))],
    cashDeadline: (o) => o.cashDeadline,
    travelDate: (o) => o.travelDate,
    customer: (o: any) =>

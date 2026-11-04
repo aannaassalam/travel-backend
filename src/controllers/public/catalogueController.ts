@@ -492,7 +492,7 @@ export const getHotel = catchAsync(async (req: Request, res: Response) => {
  * airline we no longer sell is worse than no sidebar.
  */
 export const getFacets = catchAsync(async (_req: Request, res: Response) => {
-   const [cities, carriers, operators, categories, vehicleClasses, hotelAmenities, ranges, makes] =
+   const [cities, carriers, operators, categories, vehicleClasses, hotelAmenities, ranges, makes, hotelStars] =
       await Promise.all([
          Listing.distinct('city', { status: { $in: PUBLIC_STATUSES } }),
          // On sale only: an inactive route's agency is not a choice anyone can book.
@@ -512,6 +512,8 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
             },
          ]),
          Listing.distinct('attributes.make', { vertical: VERTICALS.CAR, status: { $in: PUBLIC_STATUSES } }),
+         // The ratings the office actually gave, so a 1- or 2-star hotel can be filtered for too.
+         Hotel.distinct('stars', { status: { $in: PUBLIC_STATUSES } }),
       ])
 
    const priceBounds: Record<string, [number, number]> = {}
@@ -540,6 +542,8 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
       categories: (categories as string[]).filter(Boolean).sort(),
       vehicleClasses: (vehicleClasses as string[]).filter(Boolean).sort(),
       hotelAmenities: (hotelAmenities as string[]).filter(Boolean).sort(),
+      // Highest first; 0 is "not rated", which no one filters for.
+      hotelStars: (hotelStars as number[]).filter((n) => Number.isInteger(n) && n > 0).sort((a, b) => b - a),
       // Each make once, however it was typed ("Toyota", "toyota "): `make` finds them all.
       makes: [
          ...new Map(
