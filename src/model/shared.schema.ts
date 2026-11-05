@@ -260,6 +260,10 @@ export const baseAmount = (money: Money | number | undefined): number => {
    return money?.[BASE_CURRENCY as Currency] ?? 0
 }
 
+/** A processing fee as the public API sends it: per currency, as a sell price; absent when there is none. */
+export const publicFee = (money: Money | number | undefined): Money | undefined =>
+   baseAmount(money) > 0 ? inAllCurrencies(money) : undefined
+
 /** Currencies this record can be sold in: CDF, and each one with a rate set. */
 export const availableCurrencies = (money: Money | number | undefined): Currency[] =>
    baseAmount(money) > 0 ? (Object.keys(inAllCurrencies(money)) as Currency[]) : []
@@ -282,6 +286,19 @@ export const parseMoney = (input: any): Money | undefined => {
    if (blank) return {}
    const n = Number(v)
    return Number.isNaN(n) ? {} : { CDF: Math.round(n) }
+}
+
+/**
+ * A processing fee from a form (2026-11-05): whole francs, as a sell price,
+ * charged once per booking whatever the quantity. A blank box is 0 — no fee,
+ * it is in the sell price — and below 0 is refused.
+ */
+export const parseFee = (input: any): Money | undefined => {
+   const m = parseMoney(input)
+   if (m === undefined) return undefined
+   const cdf = m.CDF ?? 0
+   if (cdf < 0) throw new AppError('The processing fee cannot be below 0 FC', 400)
+   return { CDF: cdf }
 }
 
 // ---------------------------------------------------------------------------

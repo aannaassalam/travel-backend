@@ -50,6 +50,8 @@ export interface IHotel extends Document {
    videoUrl?: string
    /** §5.2: who the rooms are bought from (§18 Q9) — see Supplier. */
    supplier?: Types.ObjectId
+   /** Charged once per booking, whatever the quantity; 0 when it is in the sell price (2026-11-05). */
+   processingFee?: Money
    checkInTime: string
    checkOutTime: string
    policies: LocalizedText
@@ -86,6 +88,8 @@ const hotelSchema = new Schema<IHotel>(
       images: { type: [String], default: [] },
       videoUrl: videoField(),
       supplier: { type: Schema.Types.ObjectId, ref: 'Supplier', index: true },
+      // Per hotel, not per room type: once per stay.
+      processingFee: moneyField(),
       checkInTime: { type: String, default: '14:00' },
       checkOutTime: { type: String, default: '11:00' },
       policies: localizedText(),

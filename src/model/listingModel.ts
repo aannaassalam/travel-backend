@@ -321,6 +321,8 @@ export interface IListing extends Document {
     */
    costPrice: Money
    sellPrice: Money
+   /** Charged once per booking, whatever the quantity; 0 when it is in the sell price (2026-11-05). */
+   processingFee?: Money
    /** Bus and flight fares for a child of 2 to 12, and for a baby under 2. */
    childCostPrice: Money
    childSellPrice: Money
@@ -399,6 +401,7 @@ const listingSchema = new Schema<IListing>(
       supplier: { type: Schema.Types.ObjectId, ref: 'Supplier', index: true },
       costPrice: moneyField(),
       sellPrice: moneyField(),
+      processingFee: moneyField(),
       childCostPrice: moneyField(),
       childSellPrice: moneyField(),
       infantCostPrice: moneyField(),
@@ -482,8 +485,9 @@ listingSchema.methods.publishBlockers = function (): string[] {
          // §15: optional cost price silently destroys margin reporting.
          b.push('A cost price is required')
       }
-      if (baseAmount(this.sellPrice) <= baseAmount(this.costPrice)) {
-         b.push('The sell price must be above the cost price')
+      // Equal is allowed: the processing fee can be the margin (2026-11-05).
+      if (baseAmount(this.sellPrice) < baseAmount(this.costPrice)) {
+         b.push('The sell price cannot be below the cost price')
       }
       // A route runs every day it is timetabled, with no seat count to keep.
       if (!isRoute && this.quantityTotal <= 0) b.push('Quantity must be above zero')
@@ -504,8 +508,8 @@ listingSchema.methods.publishBlockers = function (): string[] {
          )
       }
       if (baseAmount(this.childSellPrice) <= 0) b.push('A child fare (2–12 years) is required')
-      else if (baseAmount(this.childSellPrice) <= baseAmount(this.childCostPrice)) {
-         b.push('The child fare must be above its cost')
+      else if (baseAmount(this.childSellPrice) < baseAmount(this.childCostPrice)) {
+         b.push('The child fare cannot be below its cost')
       }
       if (baseAmount(this.infantSellPrice) < baseAmount(this.infantCostPrice)) {
          b.push('The baby fare (under 2) cannot be below its cost')
@@ -534,13 +538,13 @@ listingSchema.methods.publishBlockers = function (): string[] {
    if (this.vertical === VERTICALS.CAR) {
       if (!this.attributes?.make) b.push('Make and model are required')
       // A shorter rate is on sale once it has a price, so it is held to the
-      // same rule as the 24-hour one: a cost, and a price above it.
+      // same rule as the 24-hour one: a cost, and a price not below it.
       for (const r of OPTIONAL_CAR_RATES) {
          const sell = baseAmount(this[r.sellField])
          const cost = baseAmount(this[r.costField])
          if (sell <= 0) continue
          if (cost <= 0) b.push(`The ${r.name} price needs a cost`)
-         else if (sell <= cost) b.push(`The ${r.name} price must be above its cost`)
+         else if (sell < cost) b.push(`The ${r.name} price cannot be below its cost`)
       }
    }
    if (this.vertical === VERTICALS.ACTIVITY && !this.attributes?.durationMinutes) {

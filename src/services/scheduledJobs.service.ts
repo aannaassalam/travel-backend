@@ -24,6 +24,7 @@ import { notifyOrder } from './notifications/notify.service'
 import { askMaxicash } from './payments/settlement.service'
 import { cancelRideOfOrder } from './transfers/rideLifecycle'
 import { rideDriven } from './transfers/rideLookup'
+import { releaseVehiclesOf } from './vehicleSale.service'
 
 /** How long before a cash deadline the customer gets chased. */
 const REMINDER_WINDOW_MS = 12 * 60 * 60 * 1000
@@ -134,6 +135,8 @@ export const releaseExpiredCashHolds = async () => {
          actorEmail: 'system',
       })
       await order.save()
+      // A vehicle for sale it reserved goes back on sale.
+      await releaseVehiclesOf(order)
       // A transfer's ride lapses with its unpaid booking.
       await cancelRideOfOrder(order._id, 'CASH_DEADLINE_EXPIRED', 'SYSTEM', 'Booking not paid in time')
 

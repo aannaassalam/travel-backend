@@ -3,7 +3,7 @@ import { VERTICALS } from '../../constants/domain.constants'
 import { Location } from '../../model/locationModel'
 import { RIDE_MODES, RideMode } from '../../model/rideModel'
 import { getSettings } from '../../model/settingsModel'
-import { resolveLocalized } from '../../model/shared.schema'
+import { baseAmount, resolveLocalized } from '../../model/shared.schema'
 import { IVehicleCategory, VehicleCategory } from '../../model/vehicleCategoryModel'
 import AppError from '../../utils/appError'
 import { sameName } from '../../utils/sameName'
@@ -240,5 +240,8 @@ export const priceTransferItem = async (item: RequestedItem): Promise<PricedItem
       lineCost: chosen.cost,
       lineTotalByCurrency: { ...inAllCurrencies(chosen.price) } as Record<string, number>,
       transfer: draft,
+      // The category's, once per ride whatever the km or hours (added by priceProcessingFee).
+      processingFee: baseAmount(chosen.category.processingFee),
+      feeItem: String(chosen.category._id),
    }
 }

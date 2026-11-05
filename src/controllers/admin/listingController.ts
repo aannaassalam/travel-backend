@@ -21,6 +21,7 @@ import {
    baseAmount,
    everyLocale,
    geoPoint,
+   parseFee,
    parseGeo,
    parseMoney,
    resolveLocalized,
@@ -93,6 +94,8 @@ const listingFields: FieldMap<IListing> = {
    // Admin surface only — §2.1's canonical example of what must never leak.
    costPrice: (l) => l.costPrice,
    sellPrice: (l) => l.sellPrice,
+   // Charged once per booking, whatever the quantity; 0 = in the sell price. Francs, as sellPrice.
+   processingFee: (l) => ({ CDF: baseAmount(l.processingFee) }),
    childCostPrice: (l) => (isScheduledRoute(l.vertical) ? l.childCostPrice : undefined),
    childSellPrice: (l) => (isScheduledRoute(l.vertical) ? l.childSellPrice : undefined),
    infantCostPrice: (l) => (isScheduledRoute(l.vertical) ? l.infantCostPrice : undefined),
@@ -372,6 +375,9 @@ export const createListing = catchAsync(
          // A transfer has no listing: its fleet and prices live under /transfers.
          return next(new AppError('Transfers are not listings: use /transfers', 400))
       }
+      if (vertical === VERTICALS.VEHICLE_SALE) {
+         return next(new AppError('Vehicles for sale are not listings: use /vehicle-sales', 400))
+      }
       const cityProblem = await checkCity(city, vertical)
       if (cityProblem) return next(cityProblem)
       const data: Record<string, any> = {
@@ -379,6 +385,7 @@ export const createListing = catchAsync(
          vertical,
          costPrice: parseMoney(req.body.costPrice),
          sellPrice: parseMoney(req.body.sellPrice),
+         processingFee: parseFee(req.body.processingFee),
          geo: parseGeo(req.body.geo),
          slug: await uniqueSlug(Listing, [title, city]),
          createdBy: (req as any).admin._id,
@@ -440,6 +447,7 @@ export const updateListing = catchAsync(
       const patch: Record<string, any> = pick(req.body, LISTING_EDITABLE)
       if (req.body.costPrice !== undefined) patch.costPrice = parseMoney(req.body.costPrice)
       if (req.body.sellPrice !== undefined) patch.sellPrice = parseMoney(req.body.sellPrice)
+      patch.processingFee = parseFee(req.body.processingFee)
       patch.geo = parseGeo(req.body.geo)
       await routeAndSupplier(
          req.body,

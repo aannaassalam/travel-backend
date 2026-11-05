@@ -131,6 +131,8 @@ export const quoteTransfer = catchAsync(async (req: Request, res: Response) => {
             seats: category.seats,
             luggage: shown.luggage,
             price: inAllCurrencies(price),
+            // Added once to the ride's price at checkout; absent when none.
+            processingFee: shown.processingFee,
             available: category.seats >= q.passengers,
          }
       }),

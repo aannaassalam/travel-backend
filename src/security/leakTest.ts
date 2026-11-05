@@ -26,7 +26,14 @@ import {
 import { presentAuditLogs } from '../dto/admin/auditLog.dto'
 import { presentOrderList } from '../dto/admin/order.dto'
 import { presentPublicUser } from '../dto/public/user.dto'
-import { presentHotel, presentListing, presentRestaurant } from '../dto/public/catalogue.dto'
+import {
+   presentHotel,
+   presentListing,
+   presentParkings,
+   presentRestaurant,
+   presentVehicleCards,
+   presentVehicleDetail,
+} from '../dto/public/catalogue.dto'
 import { getSiteContact } from '../controllers/public/siteController'
 import * as settingsModel from '../model/settingsModel'
 import { presentOrder } from '../dto/public/order.dto'
@@ -265,6 +272,119 @@ check('presentOrder hides line costs, and gives the francs with what was charged
    assert.deepStrictEqual(out.total, { CDF: 513_000, USD: 18_000 }, 'lost the francs or the charge')
    assert.deepStrictEqual(out.items[0].lineTotal, { CDF: 513_000, USD: 18_000 })
    assert.deepStrictEqual(out.items[0].unitSellPrice, { CDF: 513_000 })
+})
+
+/** A vehicle for sale as the public endpoints read it: parking, type and specs populated. */
+const saleVehicle = () => {
+   const parking = poisoned({
+      _id: { toString: () => '507f1f77bcf86cd799439022' },
+      name: { fr: 'Parking Gombe' },
+      slug: 'parking-gombe',
+      city: 'Kinshasa',
+      address: '45, boulevard du 30 Juin',
+      openingHours: { fr: 'Lun–Sam 8h–18h' },
+      status: 'PUBLISHED',
+      supplier: { _id: 'x', name: 'Secret Supplier Ltd', phone: 'LEAKED' },
+   })
+   const spec = (key: string, valueType: string, extra: object = {}) => ({
+      _id: key,
+      key,
+      name: { fr: key },
+      valueType,
+      isActive: true,
+      onCard: true,
+      ...extra,
+   })
+   return poisoned({
+      stockRef: 'VS-000042',
+      make: 'Toyota',
+      model: 'Hilux',
+      year: 2020,
+      vin: 'LEAKED-VIN-123',
+      costPrice: { CDF: 74_100_000 },
+      sellPrice: { CDF: 88_350_000 },
+      promoCompareAtPrice: { CDF: 95_475_000 },
+      promoEndsAt: new Date('2099-01-01T00:00:00Z'),
+      reservedOrder: 'LEAKED-ORDER',
+      soldAt: new Date(),
+      createdBy: 'LEAKED-ADMIN',
+      availability: 'AVAILABLE',
+      images: ['/img/car-1.svg'],
+      parking,
+      vehicleType: { slug: 'pick-up', name: { fr: 'Pick-up' } },
+      specs: [
+         { spec: spec('boite', 'CHOICE', { choices: [{ key: 'manuelle', label: { fr: 'Manuelle', en: 'Manual' } }] }), choice: 'manuelle' },
+         { spec: spec('cylindree', 'NUMBER', { unit: 'cc' }), number: 2800 },
+      ],
+      accessories: ['acc1'],
+   })
+}
+const VEHICLE_PRIVATE = ['vin', 'costPrice', 'reservedOrder', 'soldAt', 'createdBy', 'supplier', ...RAW_PROMOTION]
+
+check('the vehicle card and page never carry the VIN, the cost or the reserving order', () => {
+   const card: any = presentVehicleCards([saleVehicle()])[0]
+   const page: any = presentVehicleDetail(saleVehicle(), [
+      { _id: 'acc1', key: 'abs', name: { fr: 'ABS' }, group: { fr: 'Sécurité' } },
+      { _id: 'acc2', key: 'gps', name: { fr: 'GPS' }, group: {} },
+   ])
+   for (const [label, out] of [['card', card], ['page', page]] as const) {
+      assertNoFields(`vehicle ${label}`, out, [...NEVER_ANYWHERE, ...NEVER_PUBLIC, ...VEHICLE_PRIVATE])
+      const json = JSON.stringify(out)
+      ;['LEAKED-VIN-123', '74100000', 'LEAKED-ORDER', 'LEAKED-ADMIN'].forEach((secret) =>
+         assert.ok(!json.includes(secret), `vehicle ${label} leaked ${secret} — ${json}`)
+      )
+      assert.ok(!VEHICLE_PRIVATE.some((f) => json.includes(`"${f}"`)), `vehicle ${label} names a private field — ${json}`)
+   }
+   assertNoFields('vehicle page parking', page.parking, [...NEVER_PUBLIC, 'status'])
+   assert.strictEqual(card.sellPrice.CDF, 88_350_000, 'lost the price')
+   assert.strictEqual(card.promotion.discountPercent, 7, 'lost the promotion')
+   assert.strictEqual(card.title, 'Toyota Hilux 2020', 'no title: make model year')
+   assert.deepStrictEqual(card.cardSpecs.map((s: any) => s.value), [{ fr: 'Manuelle', en: 'Manual' }, '2800'])
+   assert.deepStrictEqual(page.accessories.map((a: any) => a.has), [true, false], 'every active accessory, ticked or not')
+   assert.strictEqual(page.availability, 'AVAILABLE')
+})
+
+check('presentParkings hides the supplier and the office fields', () => {
+   const [out]: any = presentParkings([(saleVehicle() as any).parking])
+   assertNoFields('presentParkings', out, [...NEVER_ANYWHERE, ...NEVER_PUBLIC, 'status', 'createdBy'])
+   assert.strictEqual(out.slug, 'parking-gombe')
+})
+
+check('presentOrder: a vehicle line has its stock reference, the order its pickup parking, no cost', () => {
+   const out: any = presentOrder(
+      poisoned({
+         reference: 'FA-VEHIC-LE001',
+         baseCurrency: 'CDF',
+         total: 88_350_000,
+         chargedCurrency: 'CDF',
+         chargedTotal: 88_350_000,
+         items: [
+            poisoned({
+               vertical: 'VEHICLE_SALE',
+               listingLabel: 'Toyota Hilux 2020',
+               stockRef: 'VS-000042',
+               quantity: 1,
+               unitSellPrice: 88_350_000,
+               unitCostPrice: 74_100_000,
+               lineTotal: 88_350_000,
+               lineCost: 74_100_000,
+            }),
+         ],
+         pickup: poisoned({
+            parkingId: { toString: () => '507f1f77bcf86cd799439022' },
+            name: { fr: 'Parking Gombe', en: 'Gombe car park' },
+            city: 'Kinshasa',
+            address: '45, boulevard du 30 Juin',
+            openingHours: { fr: 'Lun–Sam 8h–18h' },
+            geo: { lat: -4.3, lng: 15.3 },
+         }),
+      })
+   )
+   assertNoFields('presentOrder pickup', out.pickup, [...NEVER_ANYWHERE, ...NEVER_PUBLIC])
+   assert.ok(!JSON.stringify(out).includes('74100000'), 'a vehicle cost reached the public order')
+   assert.strictEqual(out.items[0].stockRef, 'VS-000042')
+   assert.deepStrictEqual(out.pickup.name, { fr: 'Parking Gombe', en: 'Gombe car park' })
+   assert.deepStrictEqual(out.pickup.geo, { lat: -4.3, lng: 15.3 })
 })
 
 check('presentPublicCategory shows the fares and never what the office pays', () => {

@@ -61,7 +61,7 @@ export const officeMail = (stage: BookingStage, order: any, customer: any, ride?
    const first = items[0]
    const rv = ride ? rideVars(ride) : null
    const route = rv ? `${rv.pickup} → ${rv.dropoff}` : ''
-   const vertical = first?.vertical ? first.vertical.charAt(0) + first.vertical.slice(1).toLowerCase() : ''
+   const vertical = first?.vertical ? first.vertical.charAt(0) + first.vertical.slice(1).toLowerCase().replace(/_/g, ' ') : ''
    const people = ride?.passengers ?? order.travellers?.length
    const rows: [string, string][] = [
       ['Reference', order.reference],

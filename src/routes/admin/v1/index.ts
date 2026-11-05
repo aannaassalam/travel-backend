@@ -33,6 +33,7 @@ import {
 } from '../../../middleware/adminAuth'
 import authRouter from './authRouter'
 import { mountTransferRoutes } from './transferRoutes'
+import { mountVehicleSaleRoutes } from './vehicleSaleRoutes'
 
 /**
  * §2.1: /admin/v1 is a distinct API surface from /api/v1. It shares services
@@ -359,6 +360,9 @@ router.patch('/routes/:id', requirePermission('inventory:write'), locations.upda
 
 // --- Transfers: the fleet (inventory:*) and the rides (orders:*) -------------
 mountTransferRoutes(router)
+
+// --- Vehicles for sale: the lists, parkings and vehicles (inventory:*) -------
+mountVehicleSaleRoutes(router)
 
 // Must stay above any future /audit-logs/:id.
 router.get('/audit-logs/summary', requirePermission('audit:read'), auditLogSummary)

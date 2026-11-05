@@ -78,6 +78,8 @@ export interface IRestaurant extends Document {
    deliveryZones: any
    /** Minutes from order accepted to food ready, before any travel time. */
    prepTimeMinutes: number
+   /** Charged once per delivery order, not per dish; 0 when it is in the prices (2026-11-05). */
+   processingFee?: Money
    phone?: string
    rating?: number
    reviewCount?: number
@@ -115,6 +117,7 @@ const restaurantSchema = new Schema<IRestaurant>(
       openingHours: localizedText(),
       deliveryZones: { type: [deliveryZoneSchema], default: [] },
       prepTimeMinutes: { type: Number, min: 0, default: 30 },
+      processingFee: moneyField(),
       phone: { type: String, trim: true },
       // Legacy, never published any more: `reviewStats` is the customers' own.
       rating: { type: Number, min: 0, max: 5 },

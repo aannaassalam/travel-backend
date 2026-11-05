@@ -175,7 +175,7 @@ const PRICES: Column[] = [
       'What you pay the supplier for one, in francs. Never shown to customers.',
       { required: true, min: 0.01 }),
    col('sell_price_cdf', 'Sell price (FC)', 'money', 'sellPrice.CDF', '199500',
-      'What the customer pays for one, in francs. Must be above the cost price. USD and EUR prices are worked out from the exchange rates in Settings.',
+      'What the customer pays for one, in francs. Cannot be below the cost price. USD and EUR prices are worked out from the exchange rates in Settings.',
       { required: true, min: 0.01 }),
 ]
 
@@ -227,6 +227,11 @@ const CAR_PRICES: Column[] = [
    col('twelve_hour_price_cdf', '12-hour price (FC)', 'money', 'twelveHourSellPrice.CDF', '285000',
       'What the customer pays for 12 hours, in francs. Must be above the 12-hour cost.', { min: 0 }),
 ]
+
+/** Once per booking, whatever the quantity (2026-11-05): a property, an enquiry, has none. */
+const PROCESSING_FEE = col('processing_fee_cdf', 'Processing fee (FC)', 'money', 'processingFee.CDF', '0',
+   'Charged once per booking, whatever the quantity, nights or passengers, in francs. Leave blank or 0 when it is already included in the sell price.',
+   { min: 0 })
 
 /** A route's two ends: where it leaves from (the record's city) and where it goes. */
 const ROUTE_ENDS: Column[] = [
@@ -280,8 +285,8 @@ const SOLD = col('quantity_sold', 'Sold', 'int', 'quantitySold', '',
 const sellable = (doc: any, fail: Fail) => {
    const cost = doc.costPrice?.CDF ?? 0
    const sell = doc.sellPrice?.CDF ?? 0
-   if (cost && sell && sell <= cost) {
-      fail('sell_price_cdf', 'Sell price must be above the cost price')
+   if (cost && sell && sell < cost) {
+      fail('sell_price_cdf', 'Sell price cannot be below the cost price')
    }
 }
 
@@ -321,7 +326,7 @@ const car = (doc: any, fail: Fail) => {
       const cost = doc[costPath]?.CDF ?? 0
       if (!sell) continue
       if (!cost) fail(column, `Give the ${what} cost as well`)
-      else if (sell <= cost) fail(column, `Must be above the ${what} cost`)
+      else if (sell < cost) fail(column, `Cannot be below the ${what} cost`)
    }
 }
 
@@ -388,6 +393,7 @@ const GROUPS: Record<string, GroupSpec> = {
             "Une pièce d'identité est demandée à l'arrivée.",
             'House rules customers should know before booking.', { max: 5000 }),
          supplier('Hôtel du Fleuve direct'),
+         PROCESSING_FEE,
          ...PIN,
          ...REFERENCE,
       ],
@@ -421,6 +427,7 @@ const GROUPS: Record<string, GroupSpec> = {
             'Cuisine congolaise maison, grillades au feu de bois.',
             'Home-style Congolese cooking and wood-fired grills.'
          ),
+         PROCESSING_FEE,
          ...PIN,
          ...REFERENCE,
       ],
@@ -455,6 +462,7 @@ const GROUPS: Record<string, GroupSpec> = {
          col('fare_rules', 'Fare rules', 'text', 'attributes.fareRules',
             'Non modifiable. Remboursable à 80 % après déduction des frais de dossier.', 'Change and refund conditions.', { max: 1000 }),
          ...FARES,
+         PROCESSING_FEE,
          ...REFERENCE,
       ],
       finish: route,
@@ -483,6 +491,7 @@ const GROUPS: Record<string, GroupSpec> = {
          col('route_stops', 'Stops on the way', 'list', 'attributes.routeStops',
             'Kisantu | Mbanza-Ngungu', 'Towns the bus stops in, separated by a | bar.'),
          ...FARES,
+         PROCESSING_FEE,
          ...REFERENCE,
       ],
       finish: route,
@@ -522,6 +531,7 @@ const GROUPS: Record<string, GroupSpec> = {
          col('insurance_terms', 'Insurance', 'text', 'attributes.insuranceTerms',
             'Assurance au tiers, franchise 500 $', 'What cover is included.', { max: 500 }),
          ...CAR_PRICES,
+         PROCESSING_FEE,
          quantity('cars', '3'),
          VALID_FROM,
          supplier('Kinshasa Fleet'),
@@ -563,6 +573,7 @@ const GROUPS: Record<string, GroupSpec> = {
          col('child_price_cdf', 'Child price (FC)', 'money', 'attributes.childPrice', '99800',
             'In francs. Leave blank if children pay the full price.', { min: 0 }),
          ...PRICES,
+         PROCESSING_FEE,
          quantity('places', '12'),
          VALID_FROM,
          supplier('Kinshasa Tours'),

@@ -9,7 +9,7 @@ import {
    presentRestaurants,
 } from '../../dto/admin/inventory.dto'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
-import { baseAmount, parseGeo, parseMoney, resolveLocalized, toLocalized } from '../../model/shared.schema'
+import { baseAmount, parseFee, parseGeo, parseMoney, resolveLocalized, toLocalized } from '../../model/shared.schema'
 import {
    archiveDoc,
    confirmOverOpenBookings,
@@ -149,6 +149,8 @@ export const createRestaurant = catchAsync(async (req: Request, res: Response) =
          ...pick(req.body, RESTAURANT_EDITABLE),
          geo: parseGeo(req.body.geo),
          deliveryZones: parseZones(req.body.deliveryZones),
+         // Once per delivery order, not per dish.
+         processingFee: parseFee(req.body.processingFee),
          slug: await uniqueSlug(Restaurant, [resolveLocalized(name), city]),
          createdBy: (req as any).admin._id,
       },
@@ -167,6 +169,7 @@ export const updateRestaurant = catchAsync(async (req: Request, res: Response) =
       patch.deliveryZones = parseZones(req.body.deliveryZones)
    }
    patch.geo = parseGeo(req.body.geo)
+   patch.processingFee = parseFee(req.body.processingFee)
    const restaurant = await updateDoc<any>(req, Restaurant, req.params.id, patch, {
       entityType: ENTITY,
    })

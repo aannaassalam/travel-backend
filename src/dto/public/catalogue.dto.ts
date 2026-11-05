@@ -13,9 +13,10 @@ import {
    promotionPercent,
 } from '../../model/listingModel'
 import { IMenuItem, IRestaurant } from '../../model/restaurantModel'
-import { baseAmount, geoPoint, Money, tagTranslationsOf, toLocalized } from '../../model/shared.schema'
+import { baseAmount, geoPoint, Money, publicFee, tagTranslationsOf, toLocalized } from '../../model/shared.schema'
 import { inAllCurrencies } from '../../services/fx.service'
 import { carRates } from '../../services/orders/rental.service'
+import { vehicleName } from '../../services/vehicleSale.service'
 import { textOut } from '../../utils/clientContent'
 import { FieldMap, present, presentList } from '../../utils/present'
 
@@ -97,6 +98,8 @@ const listingFields: FieldMap<IListing> = {
     * or flight, the adult fare.
     */
    sellPrice: (l) => pickMoney(l.sellPrice),
+   /** Once per booking, whatever the quantity; absent when none (a property has no checkout). */
+   processingFee: (l) => (l.vertical === VERTICALS.PROPERTY ? undefined : publicFee(l.processingFee)),
    /** Bus and flight fares for a child of 2 to 12 and a baby under 2. */
    childPrice: (l) => (isScheduledRoute(l.vertical) ? pickMoney(l.childSellPrice) : undefined),
    infantPrice: (l) => (isScheduledRoute(l.vertical) ? pickMoney(l.infantSellPrice) : undefined),
@@ -228,6 +231,8 @@ const hotelFields: FieldMap<HotelWithRooms> = {
    rating: ratingOf,
    reviewCount: reviewCountOf,
    fromPrice: (h) => pickMoney(h.fromPrice),
+   /** The hotel's, once per stay whatever the rooms and nights; absent when none. */
+   processingFee: (h) => publicFee(h.processingFee),
    promotion: (h) => promotedItem(h.promoItem),
    roomTypes: (h) => presentList(h.roomTypes ?? [], roomTypeFields),
 }
@@ -304,6 +309,8 @@ const restaurantFields: FieldMap<RestaurantWithMenu> = {
    deliveryZones: (r) =>
       presentList((r.deliveryZones ?? []).filter((z: any) => z.isActive), deliveryZoneFields),
    fromPrice: (r) => pickMoney(r.fromPrice),
+   /** Once per delivery order, not per dish; absent when none. */
+   processingFee: (r) => publicFee(r.processingFee),
    promotion: (r) => promotedItem(r.promoItem),
    menu: (r) => presentList(r.menu ?? [], menuItemFields),
 }
@@ -311,3 +318,148 @@ const restaurantFields: FieldMap<RestaurantWithMenu> = {
 export const presentRestaurant = (r: RestaurantWithMenu) => present(r, restaurantFields)
 export const presentRestaurants = (r: RestaurantWithMenu[]) =>
    presentList(r, restaurantFields)
+
+/* -------------------------------------------------------- vehicles for sale */
+
+/**
+ * Vehicles for sale, read with their parking, type and specs populated.
+ *
+ * `costPrice`, `vin`, `reservedOrder`, `soldAt` and the parking's supplier have
+ * no entry here and never will (§14.3 rule 3): the office's, not the public's.
+ */
+
+type SpecDef = {
+   key: string
+   name: unknown
+   valueType: string
+   unit?: string
+   choices?: { key: string; label: unknown }[]
+   onCard?: boolean
+   isActive?: boolean
+   sortOrder?: number
+}
+
+/** A stored value as shown: a choice's label, a number as text, a text per language. */
+const specValue = (def: SpecDef, s: { choice?: string; number?: number; text?: unknown }) => {
+   if (def.valueType === 'CHOICE') {
+      const choice = def.choices?.find((c) => c.key === s.choice)
+      return choice ? localized(choice.label) : undefined
+   }
+   if (def.valueType === 'NUMBER') return typeof s.number === 'number' ? String(s.number) : undefined
+   const text = localized(s.text)
+   return Object.keys(text).length ? text : undefined
+}
+
+/** The vehicle's specs the office has active, in the office's order; only the card ones for a card. */
+const specRows = (v: any, cardOnly: boolean) =>
+   ((v.specs ?? []) as any[])
+      .filter((s) => s?.spec?.key && s.spec.isActive !== false && (!cardOnly || s.spec.onCard))
+      .sort((a, b) => (a.spec.sortOrder ?? 0) - (b.spec.sortOrder ?? 0))
+      .map((s) => ({ def: s.spec as SpecDef, value: specValue(s.spec, s) }))
+      .filter((r) => r.value !== undefined)
+
+const vehicleCardFields: FieldMap<any> = {
+   id: (v) => v._id.toString(),
+   stockRef: (v) => v.stockRef,
+   /** The office's title per language, else "Make Model Year" as one string. */
+   title: (v) => {
+      const title = localized(v.title)
+      return Object.keys(title).length ? title : vehicleName(v)
+   },
+   make: (v) => v.make,
+   model: (v) => v.model,
+   year: (v) => v.year,
+   mileageKm: (v) => v.mileageKm,
+   condition: (v) => v.condition,
+   colour: (v) => v.colour || undefined,
+   vehicleType: (v) => (v.vehicleType?.slug ? { slug: v.vehicleType.slug, name: localized(v.vehicleType.name) } : undefined),
+   // A vehicle's town is its parking's.
+   city: (v) => v.parking?.city,
+   parking: (v) => (v.parking?._id ? { id: v.parking._id.toString(), slug: v.parking.slug, name: localized(v.parking.name) } : undefined),
+   sellPrice: (v) => pickMoney(v.sellPrice),
+   /** Once per order; absent when none. */
+   processingFee: (v) => publicFee(v.processingFee),
+   promotion: (v) => promotionOf(v),
+   image: (v) => v.images?.[0],
+   imageCount: (v) => v.images?.length ?? 0,
+   cardSpecs: (v) =>
+      specRows(v, true).map(({ def, value }) => ({ key: def.key, name: localized(def.name), value, unit: def.unit || undefined })),
+   createdAt: (v) => v.createdAt?.toISOString?.() ?? v.createdAt,
+}
+
+export const presentVehicleCards = (v: any[]) => presentList(v, vehicleCardFields)
+
+/** A parking as the vehicle page shows it, where the vehicle is collected. */
+const parkingBlock = (p: any) =>
+   p?._id
+      ? {
+           id: p._id.toString(),
+           slug: p.slug,
+           name: localized(p.name),
+           city: p.city,
+           address: p.address,
+           geo: geoPoint(p.geo),
+           phone: p.phone || undefined,
+           openingHours: textOut(p.openingHours, localized),
+           images: p.images ?? [],
+        }
+      : undefined
+
+/**
+ * The vehicle page. `accessories`: every active accessory, in the office's
+ * order — the page ticks what this vehicle has and greys the rest.
+ */
+export const presentVehicleDetail = (v: any, accessories: any[]) =>
+   present(v, {
+      ...vehicleCardFields,
+      description: (x) => localized(x.description),
+      images: (x) => x.images ?? [],
+      videoUrl: (x) => x.videoUrl,
+      specs: (x) =>
+         specRows(x, false).map(({ def, value }) => ({
+            key: def.key,
+            name: localized(def.name),
+            valueType: def.valueType,
+            unit: def.unit || undefined,
+            value,
+         })),
+      accessories: (x) => {
+         const has = new Set(((x.accessories ?? []) as unknown[]).map(String))
+         return accessories.map((a) => {
+            const group = localized(a.group)
+            return {
+               key: a.key,
+               name: localized(a.name),
+               group: Object.keys(group).length ? group : undefined,
+               has: has.has(String(a._id)),
+            }
+         })
+      },
+      parking: (x) => parkingBlock(x.parking),
+      // RESERVED or SOLD still opens: the page says so and offers no order.
+      availability: (x) => x.availability,
+   })
+
+const parkingFields: FieldMap<any> = {
+   id: (p) => p._id.toString(),
+   slug: (p) => p.slug,
+   name: (p) => localized(p.name),
+   description: (p) => localized(p.description),
+   city: (p) => p.city,
+   address: (p) => p.address,
+   geo: (p) => geoPoint(p.geo),
+   phone: (p) => p.phone || undefined,
+   openingHours: (p) => textOut(p.openingHours, localized),
+   images: (p) => p.images ?? [],
+   // The types it holds, active ones, in the office's order.
+   vehicleTypes: (p) =>
+      ((p.vehicleTypes ?? []) as any[])
+         .filter((t) => t?.slug && t.isActive !== false)
+         .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+         .map((t) => ({ slug: t.slug, name: localized(t.name) })),
+   /** Vehicles on sale there now. */
+   vehicleCount: (p) => p.vehicleCount ?? 0,
+}
+
+export const presentParking = (p: any) => present(p, parkingFields)
+export const presentParkings = (p: any[]) => presentList(p, parkingFields)

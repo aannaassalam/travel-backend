@@ -7,7 +7,7 @@ import { Driver, IDriver } from '../../model/driverModel'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import { Location, LOCATION_KINDS } from '../../model/locationModel'
 import { Ride, RIDE_STATUS } from '../../model/rideModel'
-import { baseAmount, Localized, parseMoney } from '../../model/shared.schema'
+import { baseAmount, Localized, parseFee, parseMoney } from '../../model/shared.schema'
 import { ITransferPlace, PLACE_KINDS, TransferPlace } from '../../model/transferPlaceModel'
 import { IVehicleCategory, VehicleCategory } from '../../model/vehicleCategoryModel'
 import { IVehicle, Vehicle } from '../../model/vehicleModel'
@@ -90,7 +90,7 @@ const notFound = (what: string) => new AppError(`${what} not found`, 404)
 const CATEGORY = 'VehicleCategory'
 const CATEGORY_FIELDS = [
    'name', 'description', 'image', 'seats', 'luggage',
-   'pricePerKm', 'pricePerHour', 'minimumFare', 'costPerKm', 'costPerHour',
+   'pricePerKm', 'pricePerHour', 'minimumFare', 'costPerKm', 'costPerHour', 'processingFee',
    'sortOrder', 'isActive',
 ] as const
 
@@ -107,6 +107,8 @@ const categoryFields: FieldMap<IVehicleCategory> = {
    // Admin surface only: what the office pays.
    costPerKm: (c) => c.costPerKm,
    costPerHour: (c) => c.costPerHour,
+   // Once per ride, whatever the km or hours; 0 = in the fare. Francs, as the prices.
+   processingFee: (c) => ({ CDF: baseAmount(c.processingFee) }),
    sortOrder: (c) => c.sortOrder,
    isActive: (c) => c.isActive,
    version: (c) => (c as any).__v,
@@ -123,6 +125,7 @@ export const checkCategory = (body: Record<string, any>) => {
    for (const key of ['pricePerKm', 'pricePerHour', 'minimumFare', 'costPerKm', 'costPerHour'] as const) {
       if (body[key] !== undefined) body[key] = parseMoney(body[key]) ?? {}
    }
+   if (body.processingFee !== undefined) body.processingFee = parseFee(body.processingFee)
    if (body.sortOrder !== undefined) body.sortOrder = orderNumber(body.sortOrder)
    if (body.isActive !== undefined) body.isActive = Boolean(body.isActive)
 }

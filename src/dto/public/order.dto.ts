@@ -50,6 +50,8 @@ const itemFields = (currency: string, orderTotalBase: number, chargedTotal: numb
          i.vertical === 'CAR' && i.rentalHours ? i.endDate?.toISOString?.().slice(11, 16) : undefined,
       origin: (i) => i.origin,
       destination: (i) => i.destination,
+      /** A vehicle for sale: its stock reference, the page it is at (`roomTypeId` is the vehicle). */
+      stockRef: (i) => i.stockRef ?? undefined,
       quantity: (i) => i.quantity,
       passengers: (i) =>
          i.passengers
@@ -95,6 +97,17 @@ const deliveryFields: FieldMap<any> = {
    feeCharged: (d) => d.feeCharged,
    etaMinutes: (d) => d.etaMinutes,
    notes: (d) => d.notes,
+}
+
+/** Where a vehicle for sale is collected: the parking as the customer was told it (the line's listingId is the same parking). */
+const pickupFields: FieldMap<any> = {
+   parkingId: (p) => p.parkingId?.toString(),
+   name: (p) => textOut(p.name),
+   city: (p) => p.city,
+   address: (p) => p.address,
+   phone: (p) => p.phone,
+   openingHours: (p) => textOut(p.openingHours),
+   geo: (p) => (typeof p.geo?.lat === 'number' ? { lat: p.geo.lat, lng: p.geo.lng } : undefined),
 }
 
 const consentFields: FieldMap<any> = {
@@ -183,6 +196,10 @@ export const presentOrder = (o: any, ride?: any) => {
       // the order reference, which they already hold — not a new secret.
       cashReference: o.paymentMethod === 'CASH' ? o.reference : undefined,
       delivery: o.delivery ? present(o.delivery, deliveryFields) : undefined,
+      // Part of the total: francs, and in `chargedCurrency` as `delivery.feeCharged`. Absent when none.
+      processingFee: o.processingFee || undefined,
+      processingFeeCharged: o.processingFee ? o.processingFeeCharged : undefined,
+      pickup: o.pickup ? present(o.pickup, pickupFields) : undefined,
       consent: o.consent ? present(o.consent, consentFields) : undefined,
       documents: currentDocuments(o.documents).map((d: any) => ({
          id: d._id?.toString(),

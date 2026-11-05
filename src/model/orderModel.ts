@@ -81,6 +81,8 @@ const orderItemSchema = new Schema(
        * (older app builds), whose dates are days.
        */
       rentalHours: { type: Number, min: 1 },
+      /** A vehicle for sale: its stock reference (the vehicle itself is `roomTypeId`). */
+      stockRef: String,
       /** Whole francs, the base. Snapshotted so later price edits never
        *  retroactively change what a customer was charged. */
       unitSellPrice: { type: Number, required: true },
@@ -114,6 +116,24 @@ const deliverySchema = new Schema(
       etaMinutes: Number,
       /** "Second gate, ask for Papa Jean" — the thing that gets a driver there. */
       notes: String,
+   },
+   { _id: false }
+)
+
+/**
+ * Where a vehicle for sale is collected: its parking as the customer was told
+ * it, snapshotted like `delivery` so a later edit of the parking does not
+ * change it. Names and hours in every language they had.
+ */
+const pickupSchema = new Schema(
+   {
+      parkingId: Schema.Types.ObjectId,
+      name: Schema.Types.Mixed,
+      city: String,
+      address: String,
+      phone: String,
+      openingHours: Schema.Types.Mixed,
+      geo: { type: { _id: false, lat: Number, lng: Number }, default: undefined },
    },
    { _id: false }
 )
@@ -229,6 +249,14 @@ export interface IOrder extends Document {
    cashReminderSentAt?: Date
    /** Restaurant orders only; see deliverySchema. */
    delivery?: any
+   /**
+    * Processing fees (2026-11-05): each item's fee once, in the total. Francs
+    * (the base), and in `chargedCurrency` as `delivery.feeCharged` is. Absent when none.
+    */
+   processingFee?: number
+   processingFeeCharged?: number
+   /** Vehicle-for-sale orders only; see pickupSchema. */
+   pickup?: any
    consent?: any
    documents: any
    timeline: any
@@ -355,6 +383,9 @@ const orderSchema = new Schema<IOrder>(
       cashDeadline: { type: Date, index: true },
       cashReminderSentAt: Date,
       delivery: deliverySchema,
+      processingFee: { type: Number, min: 0 },
+      processingFeeCharged: { type: Number, min: 0 },
+      pickup: pickupSchema,
       consent: consentSchema,
       documents: {
          type: [

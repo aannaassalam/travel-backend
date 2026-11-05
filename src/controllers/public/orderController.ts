@@ -1,5 +1,6 @@
 import crypto from 'crypto'
 import { NextFunction, Request, Response } from 'express'
+import { Types } from 'mongoose'
 import {
    BASE_CURRENCY,
    FULFILMENT_STATUS,
@@ -31,6 +32,7 @@ import {
    cashDeadlineFor,
    priceDelivery,
    priceItem,
+   priceProcessingFee,
    settle,
 } from '../../services/orders/pricing.service'
 import { currentCustomer } from '../../middleware/customerAuth'
@@ -41,6 +43,7 @@ import {
    onlineCurrencies,
    onlineMinimumMinor,
 } from '../../services/payments/maxicash.service'
+import { releaseVehicle, reserveVehicle, vehicleSaleRefusal } from '../../services/vehicleSale.service'
 import { nudge } from './paymentController'
 import { NOTIFICATION_EVENTS } from '../../model/enquiryModel'
 import AppError from '../../utils/appError'
@@ -208,6 +211,7 @@ export const createOrder = catchAsync(
                )
             )
          }
+         await replay.populate('customer', 'phone')
          return sendResponse(res, 200, 'Order already created', {
             order: presentOrder(replay, await rideOfOrder(replay)),
          })
@@ -219,6 +223,9 @@ export const createOrder = catchAsync(
          return next(new AppError('At least one item is required', 400))
       }
       if (items.length > 10) return next(new AppError('Too many items', 400))
+      // A vehicle is bought alone, one at a time.
+      const vehicleRefusal = vehicleSaleRefusal(items)
+      if (vehicleRefusal) return next(new AppError(vehicleRefusal[0], 400, vehicleRefusal[1]))
       if (!contact?.firstName || !contact?.lastName) {
          return next(new AppError('Contact first and last name are required', 400))
       }
@@ -379,7 +386,7 @@ export const createOrder = catchAsync(
             // Coded, so the website and the app can say it in the customer's language.
             return next(new AppError('Those dates are not valid', 400, 'INVALID_DATES'))
          }
-         return next(new AppError('One of these items is no longer available', 409))
+         return next(new AppError('One of these items is no longer available', 409, 'ITEM_UNAVAILABLE'))
       }
 
       if (priced.some((p) => p.lineTotal <= 0)) {
@@ -478,6 +485,19 @@ export const createOrder = catchAsync(
          taken.push(item)
       }
 
+      /**
+       * A vehicle for sale is one of a kind: reserved for this order, by the
+       * order's own id (allotted here, before the order is written), in one
+       * conditional update — of two customers checking out the same vehicle,
+       * one gets it and the other this 409, and no order is made for them.
+       */
+      const orderId = new Types.ObjectId()
+      const vehicleLine = priced.find((p) => p.vertical === VERTICALS.VEHICLE_SALE)
+      if (vehicleLine && !(await reserveVehicle(vehicleLine.roomTypeId!, orderId))) {
+         await rollback(taken)
+         return next(new AppError('One of these items is no longer available', 409, 'ITEM_UNAVAILABLE'))
+      }
+
       try {
          // --- 3. Customer, merged on the canonical phone (§7.2) --------------
          /**
@@ -540,10 +560,12 @@ export const createOrder = catchAsync(
             )
          }
 
+         // Each item's processing fee once, whatever the quantity; not an item of the order.
+         const feeLine = priceProcessingFee(priced)
          const { chargedCurrency, chargedTotal, fxRate, totalBase } = settle(
-            // The fee settles with the food, not after it: converted per unit
+            // The fees settle with the lines, not after them: converted per unit
             // like every line, so the total charged is the prices shown added up.
-            deliveryLine ? [...priced, deliveryLine] : priced,
+            [...priced, ...(deliveryLine ? [deliveryLine] : []), ...(feeLine ? [feeLine] : [])],
             // As checked above: "usd" is USD, not a request for francs.
             asked
          )
@@ -586,6 +608,7 @@ export const createOrder = catchAsync(
          }
 
          const order = await createWithReference({
+            _id: orderId,
             idempotencyKey: key,
             idempotencyScope,
             /**
@@ -610,6 +633,7 @@ export const createOrder = catchAsync(
                origin: p.origin,
                destination: p.destination,
                rentalHours: p.rentalHours,
+               stockRef: p.stockRef,
                unitSellPrice: p.unitSellPrice,
                unitCostPrice: p.unitCostPrice,
                lineTotal: p.lineTotal,
@@ -649,6 +673,15 @@ export const createOrder = catchAsync(
                        deliveryLine!.lineTotal,
                  }
                : undefined,
+            // Absent when no item has one; charged in `chargedCurrency` (its minor units), as `delivery.feeCharged`.
+            ...(feeLine
+               ? {
+                    processingFee: feeLine.lineTotal,
+                    processingFeeCharged: feeLine.lineTotalByCurrency[chargedCurrency] ?? feeLine.lineTotal,
+                 }
+               : {}),
+            // Where a vehicle is collected, as the customer is told it now.
+            pickup: vehicleLine?.pickup,
             travelDate: priced.find((p) => p.startDate)?.startDate,
             timeline: [{ event: 'ORDER_CREATED', detail: `channel=WEB method=${method}` }],
          })
@@ -682,10 +715,14 @@ export const createOrder = catchAsync(
             void notifyOrder(NOTIFICATION_EVENTS.ORDER_CONFIRMED, order._id, { sms: true, office: 'NEW' })
          }
 
+         // The phone only, for the masked "sent to ••••0985" line, as getOrder does:
+         // unloaded, the app's first view of its new order said "sent to —".
+         await order.populate('customer', 'phone')
          return sendResponse(res, 201, 'Order created', { order: presentOrder(order, ride) })
       } catch (err) {
-         // Never leave stock held — or a ride waiting — for an order that does not exist.
+         // Never leave stock held — a vehicle reserved, or a ride waiting — for an order that does not exist.
          await rollback(taken)
+         if (vehicleLine) await releaseVehicle(vehicleLine.roomTypeId, orderId)
          if (ride && !ride.order) await Ride.deleteOne({ _id: ride._id }).catch(() => undefined)
          throw err
       }

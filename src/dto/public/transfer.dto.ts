@@ -1,5 +1,5 @@
 import { alertWindowOpen, RIDE_STATUS } from '../../model/rideModel'
-import { Localized } from '../../model/shared.schema'
+import { baseAmount, Localized, publicFee } from '../../model/shared.schema'
 import { inAllCurrencies } from '../../services/fx.service'
 
 /**
@@ -32,6 +32,8 @@ export const presentPublicCategory = (c: any) => ({
    pricePerKm: inAllCurrencies(c.pricePerKm),
    pricePerHour: inAllCurrencies(c.pricePerHour),
    minimumFare: inAllCurrencies(c.minimumFare),
+   // Once per ride, on top of the fare; absent when none.
+   processingFee: publicFee(c.processingFee),
 })
 
 export const presentPublicPlace = (p: any) => ({
@@ -101,7 +103,8 @@ export const presentDriverRide = (r: any, order?: any) => ({
    reference: r.reference,
    ...rideCore(r),
    customer: { name: r.customerName, phone: r.customerPhone },
-   price: inAllCurrencies(r.price),
+   // What the driver collects: the fare and the booking's processing fee, as the order's total.
+   price: inAllCurrencies(baseAmount(r.price) + (order?.processingFee ?? 0)),
    payment: order
       ? {
            method: order.paymentMethod,

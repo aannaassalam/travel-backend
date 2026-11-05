@@ -14,6 +14,8 @@ export const VERTICALS = {
    RESTAURANT: 'RESTAURANT',
    /** A ride with a driver (transfers). No listing: the order line names its Ride. */
    TRANSFER: 'TRANSFER',
+   /** A vehicle bought whole, collected at its parking. The line names the parking, the vehicle in `roomTypeId`. */
+   VEHICLE_SALE: 'VEHICLE_SALE',
 } as const
 export type Vertical = (typeof VERTICALS)[keyof typeof VERTICALS]
 

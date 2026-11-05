@@ -11,7 +11,7 @@ import {
    presentRoomTypes,
 } from '../../dto/admin/inventory.dto'
 import { Hotel, RatePlan, RoomType } from '../../model/hotelModel'
-import { baseAmount, parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
+import { baseAmount, parseFee, parseGeo, parseMoney, resolveLocalized } from '../../model/shared.schema'
 import { supplierRef } from './supplierController'
 import {
    archiveDoc,
@@ -71,8 +71,9 @@ const ROOMTYPE_EDITABLE = [
 
 /**
  * A room type's nightly price, as sent: francs only, for every future night. The
- * same rule as any listing — a cost, and a sell price above it — because a
- * room sold below cost is a loss on every night of every stay.
+ * same rule as any listing — a cost, and a sell price not below it — because a
+ * room sold below cost is a loss on every night of every stay. Equal is fine:
+ * the hotel's processing fee can be the margin.
  */
 const roomPrices = (body: any, patch: Record<string, any>) => {
    if (body.costPrice !== undefined) patch.costPrice = parseMoney(body.costPrice)
@@ -82,7 +83,7 @@ const roomPrices = (body: any, patch: Record<string, any>) => {
    const cost = baseAmount(patch.costPrice)
    if (sell <= 0) throw new AppError('Enter the nightly sell price in francs (FC)', 400)
    if (cost <= 0) throw new AppError('Enter the nightly cost price in francs (FC)', 400)
-   if (sell <= cost) throw new AppError('The sell price must be above the cost price', 400)
+   if (sell < cost) throw new AppError('The sell price cannot be below the cost price', 400)
    return patch
 }
 
@@ -158,6 +159,8 @@ export const createHotel = catchAsync(async (req: Request, res: Response) => {
       {
          ...pick(req.body, HOTEL_EDITABLE),
          supplier: await supplierRef(req.body.supplier),
+         // The hotel's, once per stay (not per room type).
+         processingFee: parseFee(req.body.processingFee),
          geo: parseGeo(req.body.geo),
          slug: await uniqueSlug(Hotel, [resolveLocalized(name), city]),
          createdBy: (req as any).admin._id,
@@ -175,6 +178,7 @@ export const updateHotel = catchAsync(async (req: Request, res: Response) => {
       {
          ...pick(req.body, HOTEL_EDITABLE),
          supplier: await supplierRef(req.body.supplier),
+         processingFee: parseFee(req.body.processingFee),
          geo: parseGeo(req.body.geo),
       },
       { entityType: ENTITY }

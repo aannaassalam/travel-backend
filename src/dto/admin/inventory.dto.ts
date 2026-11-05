@@ -40,6 +40,8 @@ const hotelFields: FieldMap<IHotel> = {
    checkInTime: (h) => h.checkInTime,
    checkOutTime: (h) => h.checkOutTime,
    policies: (h) => everyLocale(h.policies),
+   // Once per stay, whatever the rooms and nights; 0 = in the room prices. Francs, as sellPrice.
+   processingFee: (h) => ({ CDF: baseAmount(h.processingFee) }),
    /**
     * §5.1 translation indicator. A locale counts as done only when BOTH the
     * name and the description exist — a translated description under an
@@ -116,6 +118,8 @@ const restaurantFields: FieldMap<IRestaurant> = {
    videoUrl: (r) => r.videoUrl,
    openingHours: (r) => everyLocale(r.openingHours),
    prepTimeMinutes: (r) => r.prepTimeMinutes,
+   // Once per delivery order, not per dish; 0 = in the dish prices. Francs, as sellPrice.
+   processingFee: (r) => ({ CDF: baseAmount(r.processingFee) }),
    phone: (r) => r.phone,
    rating: (r) => r.rating,
    reviewCount: (r) => r.reviewCount,

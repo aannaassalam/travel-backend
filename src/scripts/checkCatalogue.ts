@@ -21,19 +21,33 @@ import { hashOtp, hashPassword } from '../middleware/customerAuth'
 import { Customer } from '../model/customerModel.admin'
 import { Order } from '../model/orderModel'
 import { PhoneVerification } from '../model/phoneVerificationModel'
-import { geoPoint, parseGeo, parseMoney, resolveLocalized, tagTranslationsOf, toLocalized } from '../model/shared.schema'
+import { geoPoint, parseFee, parseGeo, parseMoney, resolveLocalized, tagTranslationsOf, toLocalized } from '../model/shared.schema'
 import { bestDiscountOf, bestPromoted, discountOf, Listing, PROMO_FIELDS, promoSlotsOf } from '../model/listingModel'
-import { Hotel } from '../model/hotelModel'
-import { Restaurant } from '../model/restaurantModel'
+import { Hotel, RoomType } from '../model/hotelModel'
+import { MenuItem, Restaurant } from '../model/restaurantModel'
+import { Location } from '../model/locationModel'
+import { VehicleCategory } from '../model/vehicleCategoryModel'
 import { NotificationLog, NotificationTemplate } from '../model/enquiryModel'
 import { presentHotel as presentAdminHotel, presentRestaurant as presentAdminRestaurant } from '../dto/admin/inventory.dto'
-import { presentHotel, presentListing, presentRestaurant } from '../dto/public/catalogue.dto'
+import { presentHotel, presentListing, presentRestaurant, presentVehicleCards } from '../dto/public/catalogue.dto'
+import { presentPublicCategory } from '../dto/public/transfer.dto'
+import { presentOrder as presentAdminOrder } from '../dto/admin/order.dto'
+import { quoteTransfer } from '../controllers/public/transferController'
 import { notify, notifyOrder } from '../services/notifications/notify.service'
 import * as smsService from '../services/notifications/sms.service'
 import { payPageLanguage } from '../services/payments/maxicash.service'
-import { francRateProblem } from '../services/fx.service'
+import { francRateProblem, refreshRates } from '../services/fx.service'
 import { applyPromotion } from '../services/promotion.service'
 import { asClient } from '../utils/clientContent'
+import { createOrder } from '../controllers/public/orderController'
+import { transitionOrder } from '../controllers/admin/orderController'
+import AuditLog from '../model/auditLogModel'
+import { Ride } from '../model/rideModel'
+import * as settingsModel from '../model/settingsModel'
+import SettingsModel from '../model/settingsModel'
+import { SaleVehicle } from '../model/vehicleSaleModel'
+import { releaseExpiredCashHolds } from '../services/scheduledJobs.service'
+import { vehicleSaleRefusal } from '../services/vehicleSale.service'
 
 let failures = 0
 // As the website and today's app read the API (?i18n=1); older app builds are checked on their own below.
@@ -418,6 +432,25 @@ check('every promotion field is a field of a listing', () => {
    }
 })
 
+check('a sell price equal to its cost can be published; below it cannot (the processing fee is the margin)', () => {
+   const priceBlockers = (doc: Record<string, unknown>) =>
+      (new Listing({ images: ['/img/a.svg'], quantityTotal: 1, city: 'Kinshasa', ...doc }) as any)
+         .publishBlockers()
+         .filter((b: string) => /cost|price/i.test(b))
+   const activity = { vertical: 'ACTIVITY', attributes: { durationMinutes: 60 } }
+   assert.deepStrictEqual(priceBlockers({ ...activity, costPrice: { CDF: 10000 }, sellPrice: { CDF: 10000 } }), [])
+   assert.deepStrictEqual(priceBlockers({ ...activity, costPrice: { CDF: 10000 }, sellPrice: { CDF: 9900 } }), [
+      'The sell price cannot be below the cost price',
+   ])
+   const car = { vertical: 'CAR', attributes: { make: 'Toyota' }, costPrice: { CDF: 50000 }, sellPrice: { CDF: 50000 } }
+   assert.deepStrictEqual(priceBlockers({ ...car, hourlyCostPrice: { CDF: 5000 }, hourlySellPrice: { CDF: 5000 } }), [])
+   assert.ok(
+      priceBlockers({ ...car, hourlyCostPrice: { CDF: 5000 }, hourlySellPrice: { CDF: 4000 } }).some((b: string) =>
+         /cannot be below its cost/.test(b)
+      )
+   )
+})
+
 /** `check` for what has to be awaited (a model's validation, a notification). */
 const checkAsync = async (name: string, fn: () => Promise<void>) => {
    try {
@@ -683,6 +716,306 @@ const main = async () => {
 
       for (const locale of ['ru', 'EN', null]) await call(updateMe, { locale }, account)
       assert.deepStrictEqual(sets.splice(0), [{ locale: 'ru' }, {}, {}])
+   })
+
+   console.log('\nVehicles for sale (2026-11-04)')
+   check('a vehicle line stands alone and is one vehicle; other orders are untouched', () => {
+      const car = { vertical: 'VEHICLE_SALE', listingId: 'x', quantity: 1 }
+      assert.strictEqual(vehicleSaleRefusal([car]), null)
+      assert.strictEqual(vehicleSaleRefusal([{ vertical: 'RESTAURANT', quantity: 3 }, { vertical: 'RESTAURANT', quantity: 1 }]), null)
+      assert.strictEqual(vehicleSaleRefusal([car, { vertical: 'HOTEL', quantity: 1 }])?.[1], 'VEHICLE_ALONE')
+      assert.strictEqual(vehicleSaleRefusal([car, { ...car, listingId: 'y' }])?.[1], 'VEHICLE_ALONE')
+      assert.strictEqual(vehicleSaleRefusal([{ ...car, quantity: 2 }])?.[1], 'VEHICLE_QUANTITY')
+      assert.strictEqual(vehicleSaleRefusal([{ ...car, quantity: '1' }]), null, 'a quantity sent as text is still one')
+   })
+
+   await checkAsync('checkout answers 400 for a vehicle beside another line, or two of it, before pricing anything', async () => {
+      ;(Order as any).findOne = async () => null
+      const post = (items: unknown[]) =>
+         new Promise<any>((resolve) => {
+            const req: any = { header: (h: string) => (h === 'Idempotency-Key' ? 'k-1' : undefined), headers: {}, body: { items } }
+            const res: any = { set: () => res, status: () => res, json: resolve }
+            createOrder(req, res, resolve)
+         })
+      const car = { vertical: 'VEHICLE_SALE', listingId: String(new Types.ObjectId()), quantity: 1 }
+      const mixed = await post([car, { vertical: 'RESTAURANT', listingId: 'd', quantity: 1 }])
+      assert.strictEqual(mixed?.statusCode, 400, `mixed: ${mixed?.message}`)
+      assert.strictEqual(mixed.code, 'VEHICLE_ALONE')
+      const two = await post([{ ...car, quantity: 2 }])
+      assert.strictEqual(two?.statusCode, 400, `quantity 2: ${two?.message}`)
+      assert.strictEqual(two.code, 'VEHICLE_QUANTITY')
+   })
+
+   // Two vehicles, each reserved by its own order, and an update that honours its filter as Mongo would.
+   const ordA = new Types.ObjectId()
+   const ordB = new Types.ObjectId()
+   const carA: any = { _id: new Types.ObjectId(), availability: 'RESERVED', reservedOrder: ordA }
+   const carB: any = { _id: new Types.ObjectId(), availability: 'RESERVED', reservedOrder: ordB }
+   ;(SaleVehicle as any).updateOne = async (filter: any, update: any) => {
+      const hit = [carA, carB].find((v) => Object.entries(filter).every(([k, want]) => String(v[k]) === String(want)))
+      if (hit) {
+         Object.assign(hit, update.$set ?? {})
+         for (const k of Object.keys(update.$unset ?? {})) delete hit[k]
+      }
+      return { modifiedCount: hit ? 1 : 0 }
+   }
+   const line = (car: any) => ({ vertical: 'VEHICLE_SALE', listingId: new Types.ObjectId(), roomTypeId: car._id, quantity: 1, stockRef: 'VS-000001' })
+   const orderDoc = (id: Types.ObjectId, car: any, over: Record<string, unknown> = {}) => {
+      const o: any = {
+         _id: id,
+         reference: 'FA-VS',
+         status: 'SUBMITTED',
+         paymentStatus: 'UNPAID',
+         paymentMethod: 'CASH',
+         items: [line(car)],
+         timeline: [],
+         save: async () => o,
+         toObject: () => ({ ...o }),
+         ...over,
+      }
+      return o
+   }
+   const office = (order: any, body: Record<string, unknown>) =>
+      new Promise<any>((resolve) => {
+         ;(Order as any).findById = async () => order
+         const req: any = { params: { id: String(order._id) }, body, admin: { email: 'office@test' }, get: () => '', ip: '' }
+         const res: any = { set: () => res, status: () => res, json: resolve }
+         transitionOrder(req, res, resolve)
+      })
+   ;(AuditLog as any).create = async (doc: any) => doc
+   ;(Ride as any).findOne = async () => null
+   ;(Customer as any).findById = () => ({ select: async () => null })
+   ;(NotificationLog as any).create = async () => undefined
+   ;(settingsModel as any).getSettings = async () => ({})
+
+   await checkAsync("the office cancelling releases only the vehicle that order reserved", async () => {
+      // An order naming B, which order B holds: cancelling it frees nothing.
+      const stale = await office(orderDoc(ordA, carB), { to: 'CANCELLED', reason: 'test', cancellationReason: 'OTHER' })
+      assert.ok(!stale?.statusCode, stale?.message)
+      assert.strictEqual(carB.availability, 'RESERVED', "another order's vehicle was released")
+      assert.strictEqual(String(carB.reservedOrder), String(ordB))
+      const out = await office(orderDoc(ordA, carA), { to: 'CANCELLED', reason: 'test', cancellationReason: 'CUSTOMER_REQUEST' })
+      assert.ok(!out?.statusCode, out?.message)
+      assert.strictEqual(carA.availability, 'AVAILABLE')
+      assert.ok(!('reservedOrder' in carA), 'the released vehicle still names the order')
+   })
+
+   await checkAsync('the office completing a paid order marks its vehicle sold, and only that one', async () => {
+      const out = await office(orderDoc(ordB, carB, { status: 'CONFIRMED', paymentStatus: 'PAID' }), { to: 'COMPLETED', reason: 'handed over' })
+      assert.ok(!out?.statusCode, out?.message)
+      assert.strictEqual(carB.availability, 'SOLD')
+      assert.ok(carB.soldAt instanceof Date, 'no soldAt')
+      assert.strictEqual(String(carB.reservedOrder), String(ordB), 'a sold vehicle keeps the order that bought it')
+      // A's order was cancelled: completing it cannot sell A (and an unpaid one is refused anyway).
+      assert.strictEqual(carA.availability, 'AVAILABLE')
+   })
+
+   await checkAsync('the unpaid-cash expiry job releases the vehicle its order reserved', async () => {
+      const ordC = new Types.ObjectId()
+      Object.assign(carA, { availability: 'RESERVED', reservedOrder: ordC })
+      const lapsed = orderDoc(ordC, carA)
+      ;(Order as any).find = () => ({ limit: async () => [lapsed] })
+      ;(Listing as any).updateOne = async () => ({ modifiedCount: 0 })
+      ;(Customer as any).updateOne = async () => undefined
+      assert.strictEqual(await releaseExpiredCashHolds(), 1)
+      assert.strictEqual(lapsed.status, 'CANCELLED')
+      assert.strictEqual(carA.availability, 'AVAILABLE')
+      assert.strictEqual(carB.availability, 'SOLD', 'a sold vehicle came back on sale')
+   })
+
+
+   console.log('\nProcessing fees (2026-11-05)')
+   check('a fee box is whole francs; blank is 0 (no fee), absent leaves it, below 0 is a 400', () => {
+      assert.deepStrictEqual(parseFee({ CDF: '5700' }), { CDF: 5_700 })
+      assert.deepStrictEqual(parseFee({ CDF: '' }), { CDF: 0 })
+      assert.deepStrictEqual(parseFee(2_000), { CDF: 2_000 })
+      assert.strictEqual(parseFee(undefined), undefined)
+      assert.strictEqual(refused(() => parseFee({ CDF: -1 })), 400)
+   })
+
+   // Checkout, end to end, with every lookup stubbed: what the order is written with, and what it answers.
+   const inDaysUtc = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10)
+   ;(SettingsModel as any).findOne = () => ({ select: () => ({ lean: async () => ({ exchangeRates: { USD: 2_850, EUR: 3_100 } }) }) })
+   await refreshRates()
+   ;(settingsModel as any).getSettings = async () => ({ holdTtlCashHours: 24 })
+   ;(settingsModel.PolicyVersion as any).findOne = () => ({ sort: async () => ({ _id: new Types.ObjectId(), label: 'v1', body: 'No refund', locale: 'en' }) })
+   ;(Customer as any).findOneAndUpdate = async () => ({ _id: new Types.ObjectId(), hasAccount: false })
+   ;(Order as any).findById = async () => null // the order's messages: nothing to send in a check
+   let written: any = null
+   ;(Order as any).create = async (doc: any) => {
+      written = doc
+      return { ...doc, populate: async () => undefined }
+   }
+   let n = 0
+   const checkout = async (items: unknown[], extra: Record<string, unknown> = {}) => {
+      written = null
+      ;(Order as any).findOne = async () => null
+      const answer = await new Promise<any>((resolve) => {
+         const req: any = {
+            header: (h: string) => (h === 'Idempotency-Key' ? `fee-${++n}` : undefined),
+            headers: {},
+            ip: '127.0.0.1',
+            body: { items, contact: { firstName: 'Aline', lastName: 'K', phone: '0810000042' }, paymentMethod: 'CASH', locale: 'en', ...extra },
+         }
+         const res: any = { set: () => res, status: () => res, json: resolve }
+         createOrder(req, res, resolve)
+      })
+      assert.ok(written, `no order written: ${answer?.message}`)
+      return { doc: written, order: answer.order }
+   }
+
+   const flight = (fee?: number) =>
+      Listing.hydrate({
+         _id: new Types.ObjectId(),
+         vertical: 'FLIGHT',
+         status: 'PUBLISHED',
+         title: { fr: 'Kinshasa → Lubumbashi' },
+         slug: 'fih-fbm',
+         city: 'Kinshasa',
+         costPrice: { CDF: 200_000 },
+         sellPrice: { CDF: 285_000 },
+         ...(fee === undefined ? {} : { processingFee: { CDF: fee } }),
+         attributes: { destination: 'Lubumbashi', dailyTimes: ['08:00'] },
+      })
+   const flightLine = (l: any) => ({
+      vertical: 'FLIGHT',
+      listingId: String(l._id),
+      quantity: 10,
+      startDate: `${inDaysUtc(10)}T08:00`,
+      passengers: { adults: 10 },
+      baggage: { cabinKg: 7, checkedKg: 23 },
+   })
+
+   await checkAsync('10 flight tickets with a 5,700 FC fee: the fee once, in the total, never an item', async () => {
+      const l = flight(5_700)
+      ;(Listing as any).findOne = async () => l
+      const { doc, order } = await checkout([flightLine(l)])
+      assert.strictEqual(doc.items.length, 1, 'the fee became an item')
+      assert.strictEqual(doc.items[0].lineTotal, 2_850_000)
+      assert.strictEqual(doc.total, 2_855_700)
+      assert.strictEqual(doc.processingFee, 5_700)
+      assert.strictEqual(doc.processingFeeCharged, 5_700, 'charged in francs')
+      assert.strictEqual(order.processingFee, 5_700)
+      assert.strictEqual(order.processingFeeCharged, 5_700)
+      // In dollars: $2.00 once, beside $1,000.00 of tickets.
+      const usd = await checkout([flightLine(l)], { currency: 'USD' })
+      assert.strictEqual(usd.doc.chargedCurrency, 'USD')
+      assert.strictEqual(usd.doc.chargedTotal, 100_200)
+      assert.strictEqual(usd.doc.processingFeeCharged, 200)
+      assert.strictEqual(usd.doc.total, 2_855_700)
+      const admin: any = presentAdminOrder({ ...usd.doc, _id: new Types.ObjectId() } as any)
+      assert.strictEqual(admin.processingFee, 5_700)
+      assert.strictEqual(admin.processingFeeCharged, 200)
+   })
+
+   await checkAsync('no fee, or a 0 fee: the total is the lines, and the order has no processingFee', async () => {
+      for (const l of [flight(), flight(0)]) {
+         ;(Listing as any).findOne = async () => l
+         const { doc, order } = await checkout([flightLine(l)])
+         assert.strictEqual(doc.total, 2_850_000)
+         assert.ok(!('processingFee' in doc) && !('processingFeeCharged' in doc), `written with ${Object.keys(doc)}`)
+         // As it goes on the wire.
+         const sent = plain(order)
+         assert.ok(!('processingFee' in sent) && !('processingFeeCharged' in sent), 'the public order sends a fee')
+         assert.ok(!('processingFee' in (presentAdminOrder({ ...doc, _id: new Types.ObjectId() } as any) as any)), 'the admin order sends a fee')
+      }
+   })
+
+   await checkAsync('a restaurant order of 3 dishes: its fee once, the delivery fee unchanged', async () => {
+      const zoneId = new Types.ObjectId()
+      const r = Restaurant.hydrate({
+         _id: new Types.ObjectId(),
+         status: 'PUBLISHED',
+         name: { fr: 'Chez Mama' },
+         slug: 'mama-fee',
+         city: 'Kinshasa',
+         processingFee: { CDF: 1_500 },
+         deliveryZones: [{ _id: zoneId, name: { fr: 'Gombe' }, fee: { CDF: 2_000 }, isActive: true, etaMinutes: 30 }],
+      })
+      const dishes = [10_000, 12_000, 8_000].map((price) => ({
+         _id: new Types.ObjectId(),
+         restaurant: r._id,
+         name: { fr: 'Plat' },
+         sellPrice: { CDF: price },
+         costPrice: { CDF: price / 2 },
+         isAvailable: true,
+      }))
+      ;(MenuItem as any).findOne = async (q: any) => dishes.find((d) => String(d._id) === String(q._id))
+      ;(Restaurant as any).findOne = async () => r
+      const { doc, order } = await checkout(
+         dishes.map((d, i) => ({ vertical: 'RESTAURANT', listingId: String(d._id), quantity: i + 1 })),
+         { delivery: { zoneId: String(zoneId), address: '12 avenue du Port' } }
+      )
+      const food = 10_000 * 1 + 12_000 * 2 + 8_000 * 3
+      assert.strictEqual(doc.items.length, 3)
+      assert.strictEqual(doc.delivery.fee, 2_000)
+      assert.strictEqual(doc.processingFee, 1_500)
+      assert.strictEqual(doc.total, food + 2_000 + 1_500)
+      assert.strictEqual(order.delivery.fee, 2_000)
+      assert.strictEqual(order.processingFee, 1_500)
+   })
+
+   await checkAsync("a hotel stay of 2 rooms × 3 nights: the hotel's fee once", async () => {
+      const hotel = Hotel.hydrate({ _id: new Types.ObjectId(), status: 'PUBLISHED', name: { fr: 'Fleuve' }, slug: 'fleuve-fee', city: 'Kinshasa', processingFee: { CDF: 10_000 } })
+      const room = RoomType.hydrate({ _id: new Types.ObjectId(), hotel: hotel._id, status: 'PUBLISHED', name: { fr: 'Double' }, sellPrice: { CDF: 100_000 }, costPrice: { CDF: 70_000 } })
+      ;(RoomType as any).findOne = async () => room
+      ;(Hotel as any).findOne = () => ({ select: async () => hotel })
+      const { doc } = await checkout([
+         { vertical: 'HOTEL', listingId: String(hotel._id), roomTypeId: String(room._id), quantity: 2, startDate: inDaysUtc(5), endDate: inDaysUtc(8) },
+      ])
+      assert.strictEqual(doc.items[0].lineTotal, 600_000)
+      assert.strictEqual(doc.processingFee, 10_000)
+      assert.strictEqual(doc.total, 610_000)
+   })
+
+   await checkAsync("a ride: its category's fee once, whatever the hours, in the quote and on the order", async () => {
+      const category = VehicleCategory.hydrate({
+         _id: new Types.ObjectId(),
+         name: { fr: 'Berline' },
+         seats: 4,
+         pricePerHour: { CDF: 30_000 },
+         costPerHour: { CDF: 20_000 },
+         processingFee: { CDF: 3_000 },
+         isActive: true,
+      })
+      ;(VehicleCategory as any).find = () => ({ sort: () => ({ limit: async () => [category] }) })
+      ;(Location as any).exists = async () => true
+      ;(Ride as any).create = async (doc: any) => ({ ...doc, status: 'PENDING', save: async () => undefined })
+      const transfer = {
+         city: 'Kinshasa',
+         mode: 'HOURLY',
+         hours: 3,
+         pickup: { label: 'Aéroport de Ndjili', lat: -4.3858, lng: 15.4446 },
+         at: `${inDaysUtc(3)}T10:00`,
+         passengers: 2,
+         categoryId: String(category._id),
+      }
+      const quote = await new Promise<any>((resolve) => {
+         const res: any = { set: () => res, status: () => res, json: resolve }
+         quoteTransfer({ body: transfer } as any, res, resolve)
+      })
+      assert.deepStrictEqual(quote.quotes[0].processingFee, { CDF: 3_000, USD: 106, EUR: 97 })
+      assert.deepStrictEqual(presentPublicCategory(category).processingFee, { CDF: 3_000, USD: 106, EUR: 97 })
+      const { doc } = await checkout([{ vertical: 'TRANSFER', quantity: 1, transfer }])
+      assert.strictEqual(doc.items[0].lineTotal, 90_000)
+      assert.strictEqual(doc.processingFee, 3_000)
+      assert.strictEqual(doc.total, 93_000)
+   })
+
+   check('the public catalogue sends the fee as it sends sellPrice, absent when 0, and never a cost', () => {
+      const fee = { CDF: 5_700, USD: 200, EUR: 184 }
+      const listing: any = plain(presentListing(flight(5_700)))
+      assert.deepStrictEqual(listing.processingFee, fee)
+      assert.ok(!('processingFee' in (plain(presentListing(flight(0))) as any)))
+      const hotel: any = plain(presentHotel({ ...Hotel.hydrate({ _id: new Types.ObjectId(), name: { fr: 'H' }, slug: 'h', city: 'K', processingFee: { CDF: 5_700 } }).toObject(), roomTypes: [] } as any))
+      assert.deepStrictEqual(hotel.processingFee, fee)
+      const restaurant: any = plain(presentRestaurant(Restaurant.hydrate({ _id: new Types.ObjectId(), name: { fr: 'R' }, slug: 'r', city: 'K', processingFee: { CDF: 5_700 } }).toObject() as any))
+      assert.deepStrictEqual(restaurant.processingFee, fee)
+      const [vehicle]: any[] = plain(presentVehicleCards([{ _id: new Types.ObjectId(), make: 'Toyota', model: 'Hilux', sellPrice: { CDF: 1_000_000 }, costPrice: { CDF: 800_000 }, processingFee: { CDF: 5_700 } }]))
+      assert.deepStrictEqual(vehicle.processingFee, fee)
+      const ride: any = plain(presentPublicCategory({ _id: new Types.ObjectId(), name: { fr: 'B' }, seats: 4, costPerKm: { CDF: 1 }, costPerHour: { CDF: 1 }, processingFee: { CDF: 0 } }))
+      assert.ok(!('processingFee' in ride))
+      for (const out of [listing, hotel, restaurant, vehicle, ride]) assert.ok(!/cost/i.test(JSON.stringify(out)), JSON.stringify(out))
    })
 
    console.log(

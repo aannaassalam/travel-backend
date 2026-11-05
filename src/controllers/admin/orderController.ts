@@ -25,6 +25,8 @@ import { forReader } from '../../middleware/adminAuth'
 import { recordAudit } from '../../services/auditLog.service'
 import { storage } from '../../services/storage'
 import { cancelRideOfOrder } from '../../services/transfers/rideLifecycle'
+import { releaseVehiclesOf, sellVehiclesOf } from '../../services/vehicleSale.service'
+import { Parking } from '../../model/vehicleSaleModel'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -118,6 +120,8 @@ export const listOrders = catchAsync(
          const search = {
             $or: [
                { reference: rx },
+               // A vehicle for sale by its stock reference ("VS-000012").
+               { 'items.stockRef': rx },
                { customer: { $in: customers.map((c) => c._id) } },
             ],
          }
@@ -201,12 +205,13 @@ export const getOrder = catchAsync(
  */
 const suppliersOf = async (items: { listingId?: unknown }[]) => {
    const ids = items.map((i) => i.listingId).filter(Boolean)
-   const [hotels, listings] = await Promise.all([
+   const [hotels, listings, parkings] = await Promise.all([
       Hotel.find({ _id: { $in: ids } }).select('supplier').populate('supplier').lean(),
       Listing.find({ _id: { $in: ids } }).select('supplier').populate('supplier').lean(),
+      Parking.find({ _id: { $in: ids } }).select('supplier').populate('supplier').lean(),
    ])
    const out = new Map<string, SupplierContact>()
-   for (const r of [...hotels, ...listings] as any[]) {
+   for (const r of [...hotels, ...listings, ...parkings] as any[]) {
       const s = r.supplier
       if (!s?._id) continue
       out.set(String(r._id), {
@@ -330,6 +335,11 @@ export const transitionOrder = catchAsync(
       order.status = to
       addTimeline(order, req, `STATUS_${to}`, undefined, reason)
       await order.save()
+
+      // A vehicle for sale: back on sale when its order is cancelled, sold
+      // when it is handed over — only the one this order reserved.
+      if (to === ORDER_STATUS.CANCELLED) await releaseVehiclesOf(order)
+      if (to === ORDER_STATUS.COMPLETED) await sellVehiclesOf(order)
 
       // App users are told by push. Cancellations are not texted (2026-10-26):
       // for anyone else the delivery log records SKIPPED.

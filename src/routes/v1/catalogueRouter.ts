@@ -14,6 +14,13 @@ import {
    searchRestaurants,
 } from '../../controllers/public/restaurantController'
 import {
+   getParking,
+   getVehicle,
+   listParkings,
+   searchVehicles,
+   vehicleFacets,
+} from '../../controllers/public/vehicleSaleController'
+import {
    getSiteContact,
    getSiteContentPublic,
    getSiteCurrencies,
@@ -115,6 +122,24 @@ router.get('/hotels/:slug', priced, getHotel)
 // kitchen can 86 an item on at any moment.
 router.get('/restaurants', searchLimiter, priced, searchRestaurants)
 router.get('/restaurants/:slug', priced, getRestaurant)
+
+// Vehicles for sale: prices and promotions, and a vehicle that can be
+// reserved at any moment — the same cache as the rest of what is priced.
+// The facets are declared before :stockRef so "facets" is never read as one.
+router.get('/vehicles', searchLimiter, priced, searchVehicles)
+router.get('/vehicles/facets', priced, vehicleFacets)
+/**
+ * One vehicle is one unit, reserved the moment someone orders it: its page is
+ * asked for again every time (an unchanged one is a 304), so nobody is shown
+ * "Order this vehicle" for a car another customer has just taken.
+ */
+const live: express.RequestHandler = (_req, res, next) => {
+   res.set('Cache-Control', 'no-cache')
+   next()
+}
+router.get('/vehicles/:stockRef', live, getVehicle)
+router.get('/parkings', cacheable(300), listParkings)
+router.get('/parkings/:slug', cacheable(300), getParking)
 
 /**
  * Legal text, authored in the admin's content section. Cached hard: it changes

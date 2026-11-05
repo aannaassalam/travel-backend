@@ -142,7 +142,7 @@ export const changePassword = catchAsync(async (req: Request, res: Response, nex
 const ordersOf = async (rides: { order?: unknown }[]) => {
    const ids = rides.map((r) => r.order).filter(Boolean)
    const orders = ids.length
-      ? await Order.find({ _id: { $in: ids } }).select('paymentMethod paymentStatus status').lean()
+      ? await Order.find({ _id: { $in: ids } }).select('paymentMethod paymentStatus status processingFee').lean()
       : []
    return new Map(orders.map((o: any) => [String(o._id), o]))
 }

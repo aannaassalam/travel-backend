@@ -123,6 +123,9 @@ const orderDetailFields = (suppliers?: Map<string, SupplierContact>): FieldMap<I
          baggage: i.baggage ?? undefined,
          // A transfer line names its ride, so the booking page can link to it.
          rideId: i.vertical === 'TRANSFER' ? i.listingId?.toString() : undefined,
+         // A vehicle for sale: the vehicle (listingId is its parking) and its stock reference.
+         vehicleId: i.vertical === 'VEHICLE_SALE' ? i.roomTypeId?.toString() : undefined,
+         stockRef: i.stockRef ?? undefined,
          supplier: suppliers?.get(String(i.listingId)),
          unitSellPrice: i.unitSellPrice,
          // Admin surface only — §2.1's exact example of what must never leak.
@@ -147,6 +150,24 @@ const orderDetailFields = (suppliers?: Map<string, SupplierContact>): FieldMap<I
     * which the public DTO deliberately omits.
     */
    delivery: (o) => (o as any).delivery ?? undefined,
+   /** Processing fees, in the total: francs, and in `chargedCurrency`. Absent when none. */
+   processingFee: (o) => o.processingFee || undefined,
+   processingFeeCharged: (o) => (o.processingFee ? o.processingFeeCharged : undefined),
+   /** Vehicle-for-sale orders only: the parking it is collected at, as the customer was told. */
+   pickup: (o) => {
+      const p = (o as any).pickup
+      return p
+         ? {
+              parkingId: p.parkingId?.toString(),
+              name: p.name,
+              city: p.city,
+              address: p.address,
+              phone: p.phone,
+              openingHours: p.openingHours,
+              geo: p.geo?.lat !== undefined ? { lat: p.geo.lat, lng: p.geo.lng } : undefined,
+           }
+         : undefined
+   },
    consent: (o) =>
       o.consent
          ? {

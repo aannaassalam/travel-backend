@@ -26,6 +26,8 @@ export interface IVehicleCategory extends Document {
    minimumFare: Money
    costPerKm: Money
    costPerHour: Money
+   /** Charged once per ride, whatever the km or hours; 0 when it is in the fare (2026-11-05). */
+   processingFee?: Money
    sortOrder: number
    isActive: boolean
    createdAt: Date
@@ -44,6 +46,7 @@ const vehicleCategorySchema = new Schema<IVehicleCategory>(
       minimumFare: moneyField(),
       costPerKm: moneyField(),
       costPerHour: moneyField(),
+      processingFee: moneyField(),
       sortOrder: { type: Number, default: 0 },
       isActive: { type: Boolean, default: true, index: true },
    },

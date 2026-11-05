@@ -3,7 +3,9 @@ import { CURRENCIES, BASE_CURRENCY, Currency, VERTICALS } from '../../constants/
 import { isScheduledRoute, Listing } from '../../model/listingModel'
 import { Hotel, RoomType } from '../../model/hotelModel'
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
-import { baseAmount, Money } from '../../model/shared.schema'
+import { baseAmount, geoPoint, Money, toLocalized } from '../../model/shared.schema'
+import { Parking, SaleVehicle, VEHICLE_AVAILABILITY } from '../../model/vehicleSaleModel'
+import { vehicleLabel } from '../vehicleSale.service'
 import { currentRates, inAllCurrencies } from '../fx.service'
 import { nightsBetween } from './inventory.service'
 import { carRates, parseRental, planBlocks } from './rental.service'
@@ -73,7 +75,19 @@ export interface PricedItem {
    rentalHours?: number
    /** A transfer: what its Ride is created from, under `listingId`, once the order exists. */
    transfer?: RideDraft
+   /** A vehicle for sale: its stock reference, and the parking it is collected at (the order's `pickup`). */
+   stockRef?: string
+   pickup?: Record<string, unknown>
+   /** The item's processing fee, whole francs, and which item it is: paid once per order (`priceProcessingFee`). */
+   processingFee?: number
+   feeItem?: string
 }
+
+/** An item's processing fee and the item it belongs to, so two lines of one item pay it once. */
+const feeOf = (item: { _id: unknown; processingFee?: Money }) => ({
+   processingFee: baseAmount(item.processingFee),
+   feeItem: String(item._id),
+})
 
 const label = (value: any): string =>
    typeof value === 'string' ? value : value?.fr || value?.en || 'Article'
@@ -181,6 +195,7 @@ const priceRouteItem = (listing: any, item: RequestedItem): PricedItem => {
       baggage,
       origin: listing.city,
       destination: attrs.destination,
+      ...feeOf(listing),
    }
 }
 
@@ -215,6 +230,7 @@ const priceCarItem = (listing: any, item: RequestedItem): PricedItem => {
       lineCost: cost * item.quantity,
       lineTotalByCurrency: added(...blocks.map((b) => scaled(b.rate.sell, b.count * item.quantity))),
       rentalHours: rental.timed ? rental.hours : undefined,
+      ...feeOf(listing),
    }
 }
 
@@ -259,6 +275,7 @@ export const priceListingItem = async (item: RequestedItem): Promise<PricedItem>
       lineTotal: sell * item.quantity * units,
       lineCost: cost * item.quantity * units,
       lineTotalByCurrency: scaled(sell, item.quantity * units),
+      ...feeOf(listing),
    }
 }
 
@@ -278,7 +295,7 @@ export const priceStayItem = async (item: RequestedItem): Promise<PricedItem> =>
    // left the catalogue but stayed bookable by anyone still holding a room id.
    const roomType = await RoomType.findOne({ _id: item.roomTypeId, status: 'PUBLISHED' })
    if (!roomType) throw new Error('ITEM_UNAVAILABLE')
-   const hotel = await Hotel.exists({ _id: roomType.hotel, status: 'PUBLISHED' })
+   const hotel = await Hotel.findOne({ _id: roomType.hotel, status: 'PUBLISHED' }).select('processingFee')
    if (!hotel) throw new Error('ITEM_UNAVAILABLE')
 
    const nights = nightsBetween(new Date(item.startDate), new Date(item.endDate)).length
@@ -303,6 +320,8 @@ export const priceStayItem = async (item: RequestedItem): Promise<PricedItem> =>
       lineTotal: sell * nights * qty,
       lineCost: cost * nights * qty,
       lineTotalByCurrency: scaled(sell, nights * qty),
+      // The hotel's, not the room's: once per stay.
+      ...feeOf(hotel),
    }
 }
 
@@ -342,12 +361,58 @@ export const priceMenuItem = async (item: RequestedItem): Promise<PricedItem> =>
       lineTotal: sell * item.quantity,
       lineCost: cost * item.quantity,
       lineTotalByCurrency: scaled(sell, item.quantity),
+      // The restaurant's, not the dish's: once per delivery order.
+      ...feeOf(restaurant),
+   }
+}
+
+/**
+ * A vehicle for sale: on the website, at a parking on the website, and not
+ * reserved or sold — the sell price, as a dish's (a promotion is display only).
+ * Its parking is snapshotted as the order's `pickup`, as a meal's delivery is.
+ */
+export const priceSaleVehicle = async (item: RequestedItem): Promise<PricedItem> => {
+   const vehicle = await SaleVehicle.findOne({
+      _id: item.listingId,
+      status: 'PUBLISHED',
+      availability: VEHICLE_AVAILABILITY.AVAILABLE,
+   })
+   if (!vehicle) throw new Error('ITEM_UNAVAILABLE')
+   const parking = await Parking.findOne({ _id: vehicle.parking, status: 'PUBLISHED' })
+   if (!parking) throw new Error('ITEM_UNAVAILABLE')
+
+   const sell = baseAmount(vehicle.sellPrice)
+   const cost = baseAmount(vehicle.costPrice)
+   return {
+      vertical: VERTICALS.VEHICLE_SALE,
+      // The parking, as a dish line names its restaurant; the vehicle in the dish's slot.
+      listingId: parking._id,
+      listingLabel: vehicleLabel(vehicle),
+      roomTypeId: vehicle._id,
+      stockRef: vehicle.stockRef,
+      quantity: 1,
+      unitSellPrice: sell,
+      unitCostPrice: cost,
+      lineTotal: sell,
+      lineCost: cost,
+      lineTotalByCurrency: scaled(sell, 1),
+      ...feeOf(vehicle),
+      pickup: {
+         parkingId: parking._id,
+         name: toLocalized(parking.name),
+         city: parking.city,
+         address: parking.address,
+         phone: parking.phone,
+         openingHours: toLocalized(parking.openingHours),
+         geo: geoPoint(parking.geo),
+      },
    }
 }
 
 export const priceItem = (item: RequestedItem) => {
    if (item.vertical === VERTICALS.HOTEL) return priceStayItem(item)
    if (item.vertical === VERTICALS.RESTAURANT) return priceMenuItem(item)
+   if (item.vertical === VERTICALS.VEHICLE_SALE) return priceSaleVehicle(item)
    if (item.vertical === VERTICALS.TRANSFER) return priceTransferItem(item)
    return priceListingItem(item)
 }
@@ -368,6 +433,31 @@ export const priceDelivery = (zone: any, restaurantLabel: string): PricedItem =>
       lineTotal: fee,
       lineCost: 0,
       lineTotalByCurrency: scaled(fee, 1),
+   }
+}
+
+/**
+ * The processing fees (2026-11-05), shaped like a line so `settle` adds them,
+ * as the delivery fee is: each distinct item's fee once, whatever the
+ * quantity, nights or dishes, each converted on its own and added up. Cost 0
+ * (it is margin), never discounted. Null when no item carries one. Not an
+ * order item: the order keeps it as `processingFee` / `processingFeeCharged`.
+ */
+export const priceProcessingFee = (lines: PricedItem[]): PricedItem | null => {
+   const fees = new Map<string, number>()
+   for (const l of lines) if (l.feeItem && (l.processingFee ?? 0) > 0) fees.set(l.feeItem, l.processingFee!)
+   if (!fees.size) return null
+   const fee = [...fees.values()].reduce((s, f) => s + f, 0)
+   return {
+      vertical: lines[0].vertical,
+      listingId: lines[0].listingId,
+      listingLabel: 'Frais de dossier',
+      quantity: 1,
+      unitSellPrice: fee,
+      unitCostPrice: 0,
+      lineTotal: fee,
+      lineCost: 0,
+      lineTotalByCurrency: added(...[...fees.values()].map((f) => scaled(f, 1))),
    }
 }
 

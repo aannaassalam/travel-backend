@@ -23,6 +23,7 @@ import {
 import { MenuItem, Restaurant } from '../../model/restaurantModel'
 import { timesOn, weekdayOf } from '../../services/orders/schedule.service'
 import { cardPricesFor, promotedDish } from '../../services/restaurantCards.service'
+import { vehicleCities } from '../../services/vehicleSale.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
 import { sendResponse } from '../../utils/response'
@@ -492,7 +493,7 @@ export const getHotel = catchAsync(async (req: Request, res: Response) => {
  * airline we no longer sell is worse than no sidebar.
  */
 export const getFacets = catchAsync(async (_req: Request, res: Response) => {
-   const [cities, carriers, operators, categories, vehicleClasses, hotelAmenities, ranges, makes, hotelStars] =
+   const [cities, carriers, operators, categories, vehicleClasses, hotelAmenities, ranges, makes, hotelStars, saleCities] =
       await Promise.all([
          Listing.distinct('city', { status: { $in: PUBLIC_STATUSES } }),
          // On sale only: an inactive route's agency is not a choice anyone can book.
@@ -514,6 +515,8 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
          Listing.distinct('attributes.make', { vertical: VERTICALS.CAR, status: { $in: PUBLIC_STATUSES } }),
          // The ratings the office actually gave, so a 1- or 2-star hotel can be filtered for too.
          Hotel.distinct('stars', { status: { $in: PUBLIC_STATUSES } }),
+         // Towns with a vehicle for sale; the deep search's own choices are /vehicles/facets.
+         vehicleCities(),
       ])
 
    const priceBounds: Record<string, [number, number]> = {}
@@ -553,6 +556,7 @@ export const getFacets = catchAsync(async (_req: Request, res: Response) => {
          ).values(),
       ].sort(),
       priceBounds,
+      vehicleCities: saleCities,
    })
 })
 
