@@ -13,7 +13,7 @@ export interface ICustomer extends Document {
    fullName: string
    email?: string
    phone: string
-   /** Their language, as the site or app last said. Unset: unknown — written to in English. */
+   /** Their language, as the site or app last said. Unset: unknown — written to in French. */
    locale?: string
    city?: string
    isBlocked: boolean

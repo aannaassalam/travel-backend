@@ -2,7 +2,6 @@ import { NextFunction, Request, Response } from 'express'
 
 import {
    BASE_CURRENCY,
-   FULFILMENT_STATUS,
    LISTING_STATUS,
    ORDER_STATUS,
    PAYMENT_METHOD,
@@ -16,6 +15,7 @@ import { Customer } from '../../model/customerModel.admin'
 import { Order } from '../../model/orderModel'
 import { Restaurant } from '../../model/restaurantModel'
 import { getSettings } from '../../model/settingsModel'
+import { pendingCompletionFilter, pendingDocumentFilter } from '../../services/orders/orderStage'
 import { currentRates } from '../../services/fx.service'
 import AppError from '../../utils/appError'
 import catchAsync from '../../utils/catchAsync'
@@ -155,7 +155,7 @@ export const getDashboard = catchAsync(
          [outstanding],
          expiring24h,
          [collected],
-         awaitingConfirmation,
+         awaitingCompletion,
          awaitingDocuments,
          departingSoon,
          enquiriesOverdue,
@@ -184,13 +184,9 @@ export const getDashboard = catchAsync(
             },
             { $group: { _id: null, amount: { $sum: '$total' } } },
          ]),
-         Order.countDocuments({ status: ORDER_STATUS.SUBMITTED }),
-         Order.countDocuments({
-            paymentStatus: PAYMENT_STATUS.PAID,
-            fulfilmentStatus: {
-               $in: [FULFILMENT_STATUS.NOT_STARTED, FULFILMENT_STATUS.DOCUMENTS_PENDING],
-            },
-         }),
+         // The workflow's two stages after the payment (as the bookings queues).
+         Order.countDocuments(pendingCompletionFilter()),
+         Order.countDocuments(pendingDocumentFilter()),
          Order.countDocuments({
             status: ORDER_STATUS.CONFIRMED,
             travelDate: { $gte: now, $lte: new Date(now.getTime() + 2 * DAY) },
@@ -246,7 +242,7 @@ export const getDashboard = catchAsync(
          byVertical: Object.values(byVertical),
          topListings: [...listings.values()].sort((a, b) => b.units - a.units).slice(0, 5),
          actions: {
-            awaitingConfirmation,
+            awaitingCompletion,
             cashExpiring24h: expiring24h,
             awaitingDocuments,
             departingSoon,

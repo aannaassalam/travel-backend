@@ -223,7 +223,7 @@ const applyStage = (enquiry: any, stage: string, detail: string | null | undefin
                recipient: enquiry.phone,
                customer: account?._id,
                sms: false,
-               // The language on their record, else English.
+               // The language on their record, else French.
                locale: customerLocale(account?.locale),
                vars: {
                   customer_name: enquiry.customerName,

@@ -62,7 +62,7 @@ export interface NotifyInput {
    /**
     * The language to send in: the template's text in it, else English, else
     * French (resolveLocalized). Unsaid: French — what drivers and the office read.
-    * A customer's message always says it (customerLocale: English when unknown).
+    * A customer's message always says it (customerLocale: French when unknown).
     */
    locale?: string
 }
@@ -327,7 +327,7 @@ export const notifyOrder = async (
          customer: customer._id,
          sms: text,
          // The language the customer booked in (the site's, at checkout), else
-         // the one on their record, else English.
+         // the one on their record, else French.
          locale: customerLocale(order.consent?.locale, customer.locale),
          vars: {
             customer_name: [customer.firstName, customer.lastName].filter(Boolean).join(' '),

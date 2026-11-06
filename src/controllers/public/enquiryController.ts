@@ -156,7 +156,7 @@ export const createEnquiry = catchAsync(async (req: Request, res: Response) => {
             recipient: enquiry.phone,
             customer: account?._id,
             sms: false,
-            // The language on their record, else English.
+            // The language on their record, else French.
             locale: customerLocale(account?.locale),
             vars: {
                customer_name: enquiry.customerName,

@@ -1,5 +1,6 @@
 import { ICustomer } from '../../model/customerModel.admin'
 import { IOrder } from '../../model/orderModel'
+import { orderStage } from '../../services/orders/orderStage'
 import { lineCost } from '../../utils/orderMath'
 import {
    FieldMap,
@@ -47,6 +48,8 @@ const orderListFields: FieldMap<IOrder> = {
    id: (o) => o._id.toString(),
    reference: (o) => o.reference,
    status: (o) => o.status,
+   // Where it is in the office's workflow: what the panel shows and acts on.
+   stage: (o) => orderStage(o),
    paymentStatus: (o) => o.paymentStatus,
    fulfilmentStatus: (o) => o.fulfilmentStatus,
    total: (o) => o.total,

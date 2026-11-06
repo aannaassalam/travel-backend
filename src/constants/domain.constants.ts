@@ -160,7 +160,8 @@ export const onlinePaymentsEnabled = () => process.env.ONLINE_PAYMENTS_ENABLED =
  */
 export const ALLOWED_ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
    DRAFT: ['SUBMITTED', 'CANCELLED'],
-   SUBMITTED: ['CONFIRMED', 'CANCELLED'],
+   // No manual "confirm" (2026-11-06): confirming the payment confirms the booking.
+   SUBMITTED: ['CANCELLED'],
    CONFIRMED: ['COMPLETED', 'CANCELLED'],
    CANCELLED: [],
    COMPLETED: [],
@@ -194,13 +195,13 @@ export const LOCALES = ['fr', 'en', 'pt', 'es', 'zh', 'ar', 'ru'] as const
  * before languages is in (what the office typed) — not a customer's language.
  */
 export const DEFAULT_LOCALE = 'fr'
-/** A customer whose language is unknown is written to in English (2026-10-31). */
-export const UNKNOWN_CUSTOMER_LOCALE = 'en'
+/** A customer whose language is unknown is written to in French (2026-11-06; English before). */
+export const UNKNOWN_CUSTOMER_LOCALE = 'fr'
 
 /** One of the seven languages, or undefined: anything else a client sends is ignored. */
 export const knownLocale = (value: unknown) =>
    (LOCALES as readonly unknown[]).includes(value) ? (value as (typeof LOCALES)[number]) : undefined
 
-/** The language to write to a customer in: the first known of these, else English. */
+/** The language to write to a customer in: the first known of these, else French. */
 export const customerLocale = (...candidates: unknown[]) =>
    candidates.map(knownLocale).find(Boolean) ?? UNKNOWN_CUSTOMER_LOCALE

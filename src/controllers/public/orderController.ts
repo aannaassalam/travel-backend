@@ -300,7 +300,7 @@ export const createOrder = catchAsync(
       // the consent snapshot and a new customer record, and the language their
       // messages go in (notify.service; English, then French, where the office
       // has not written one). None said: nothing is stored, so the messages
-      // fall to the customer's own language, then English (2026-10-31);
+      // fall to the customer's own language, then French (2026-11-06);
       // `wanted` only picks the terms shown.
       const served = knownLocale(locale)
       const wanted = customerLocale(served)

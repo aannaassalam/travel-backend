@@ -203,7 +203,7 @@ export const startPayment = catchAsync(
          currency,
          phone: c?.phone,
          email: c?.email,
-         // The page the customer is on, else the language they booked in, else theirs, else English.
+         // The page the customer is on, else the language they booked in, else theirs, else French.
          locale: customerLocale(req.body?.locale, order.consent?.locale, c?.locale),
          tokens,
       })

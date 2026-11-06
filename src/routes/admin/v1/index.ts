@@ -212,6 +212,7 @@ router.get('/orders/queue-counts', requirePermission('orders:read'), orders.queu
 router.get('/orders/:id', requirePermission('orders:read'), orders.getOrder)
 router.post('/orders/:id/transition', requirePermission('orders:write'), orders.transitionOrder)
 router.post('/orders/:id/cash-received', requirePermission('orders:write'), orders.markCashReceived)
+router.post('/orders/:id/documents-delivered', requirePermission('orders:write'), orders.markDocumentsDelivered)
 router.post('/orders/:id/notes', requirePermission('orders:write'), orders.addInternalNote)
 // The file rides with the request. Permission first, so nobody without
 // orders:write can make the server buffer an upload.

@@ -40,7 +40,8 @@ import { francRateProblem, refreshRates } from '../services/fx.service'
 import { applyPromotion } from '../services/promotion.service'
 import { asClient } from '../utils/clientContent'
 import { createOrder } from '../controllers/public/orderController'
-import { transitionOrder } from '../controllers/admin/orderController'
+import { markCashReceived, markDocumentsDelivered, transitionOrder } from '../controllers/admin/orderController'
+import { orderStage } from '../services/orders/orderStage'
 import AuditLog from '../model/auditLogModel'
 import { Ride } from '../model/rideModel'
 import * as settingsModel from '../model/settingsModel'
@@ -647,9 +648,9 @@ const main = async () => {
       assert.deepStrictEqual(texts, ['Booking FA-1'])
    })
 
-   check("a customer's language: the first of the seven given, else English; a legacy text stays French", () => {
-      assert.strictEqual(customerLocale(undefined, null, ''), 'en')
-      assert.strictEqual(customerLocale('de', 'EN', 7), 'en')
+   check("a customer's language: the first of the seven given, else French; a legacy text stays French", () => {
+      assert.strictEqual(customerLocale(undefined, null, ''), 'fr')
+      assert.strictEqual(customerLocale('de', 'EN', 7), 'fr')
       assert.strictEqual(customerLocale(undefined, 'fr'), 'fr')
       assert.strictEqual(customerLocale('zh', 'fr'), 'zh')
       assert.strictEqual(knownLocale('xx'), undefined)
@@ -658,7 +659,7 @@ const main = async () => {
       assert.strictEqual(resolveLocalized({ fr: 'F', en: 'E' }), 'F', 'the office and legacy default is French')
    })
 
-   await checkAsync('an order message: the booking language, then the record, then English', async () => {
+   await checkAsync('an order message: the booking language, then the record, then French', async () => {
       const texts: string[] = []
       ;(NotificationTemplate as any).find = async () => [
          { channel: 'SMS', body: { fr: 'Réservation {{order_ref}}', en: 'Booking {{order_ref}}', zh: '预订 {{order_ref}}' } },
@@ -676,7 +677,7 @@ const main = async () => {
       await orderOf({}, 'zh')
       await orderOf({ locale: 'fr' }, 'zh')
       await orderOf(undefined, 'xx')
-      assert.deepStrictEqual(texts, ['Booking FA-2', '预订 FA-2', 'Réservation FA-2', 'Booking FA-2'])
+      assert.deepStrictEqual(texts, ['Réservation FA-2', '预订 FA-2', 'Réservation FA-2', 'Réservation FA-2'])
    })
 
    await checkAsync('signing up, signing in and the profile record the language in use; anything else is ignored', async () => {
@@ -801,7 +802,7 @@ const main = async () => {
    })
 
    await checkAsync('the office completing a paid order marks its vehicle sold, and only that one', async () => {
-      const out = await office(orderDoc(ordB, carB, { status: 'CONFIRMED', paymentStatus: 'PAID' }), { to: 'COMPLETED', reason: 'handed over' })
+      const out = await office(orderDoc(ordB, carB, { status: 'CONFIRMED', paymentStatus: 'PAID', fulfilmentStatus: 'DOCUMENTS_ISSUED' }), { to: 'COMPLETED', reason: 'handed over' })
       assert.ok(!out?.statusCode, out?.message)
       assert.strictEqual(carB.availability, 'SOLD')
       assert.ok(carB.soldAt instanceof Date, 'no soldAt')
@@ -823,6 +824,79 @@ const main = async () => {
       assert.strictEqual(carB.availability, 'SOLD', 'a sold vehicle came back on sale')
    })
 
+
+   console.log('\nThe office workflow (2026-11-06): payment → documents → completion')
+   const act = (handler: any, order: any, body: Record<string, unknown> = {}) =>
+      new Promise<any>((resolve) => {
+         ;(Order as any).findById = async () => order
+         const req: any = { params: { id: String(order._id) }, body, admin: { email: 'office@test' }, get: () => '', ip: '' }
+         const res: any = { set: () => res, status: () => res, json: resolve }
+         handler(req, res, resolve)
+      })
+   const booking = (over: Record<string, unknown> = {}) => {
+      const o: any = {
+         _id: new Types.ObjectId(),
+         reference: 'FA-WF',
+         status: 'SUBMITTED',
+         paymentStatus: 'UNPAID',
+         paymentMethod: 'CASH',
+         fulfilmentStatus: 'NOT_STARTED',
+         items: [{ vertical: 'HOTEL', listingId: new Types.ObjectId(), quantity: 1 }],
+         documents: [],
+         timeline: [],
+         save: async () => o,
+         toObject: () => ({ ...o }),
+         ...over,
+      }
+      return o
+   }
+   ;(Order as any).updateOne = async () => ({ modifiedCount: 0 })
+
+   await checkAsync('a cash booking walks cash pending → paid, pending document → document delivered → completed', async () => {
+      const o = booking()
+      assert.strictEqual(orderStage(o), 'CASH_PENDING')
+      // Completing or handing documents over before the money is refused.
+      assert.strictEqual((await act(markDocumentsDelivered, o))?.statusCode, 409)
+      const paid = await act(markCashReceived, o, { reason: '' })
+      assert.ok(!paid?.statusCode, paid?.message)
+      assert.strictEqual(orderStage(o), 'CASH_PAID_PENDING_DOCUMENT')
+      // No completing before the documents.
+      const early = await act(transitionOrder, o, { to: 'COMPLETED' })
+      assert.strictEqual(early?.statusCode, 409, 'completed before the documents were handed over')
+      const docs = await act(markDocumentsDelivered, o)
+      assert.ok(!docs?.statusCode, docs?.message)
+      assert.strictEqual(orderStage(o), 'DOCUMENT_DELIVERED_PENDING_COMPLETION')
+      assert.strictEqual((await act(markDocumentsDelivered, o))?.statusCode, 409, 'confirmed twice')
+      // Moving on along the workflow needs no typed reason.
+      const done = await act(transitionOrder, o, { to: 'COMPLETED' })
+      assert.ok(!done?.statusCode, done?.message)
+      assert.strictEqual(orderStage(o), 'COMPLETED')
+   })
+
+   await checkAsync('no separate "confirm"; a booking confirmed that way before can still have its cash recorded', async () => {
+      const refused = await act(transitionOrder, booking(), { to: 'CONFIRMED', reason: 'ok' })
+      assert.strictEqual(refused?.statusCode, 400)
+      const legacy = booking({ status: 'CONFIRMED' })
+      assert.strictEqual(orderStage(legacy), 'CASH_PENDING')
+      const paid = await act(markCashReceived, legacy, { reason: 'Collected at office' })
+      assert.ok(!paid?.statusCode, paid?.message)
+      assert.strictEqual(legacy.paymentStatus, 'PAID')
+      assert.strictEqual((await act(markCashReceived, legacy))?.statusCode, 409, 'paid twice')
+   })
+
+   await checkAsync('cancelling still needs a reason', async () => {
+      const out = await act(transitionOrder, booking(), { to: 'CANCELLED', cancellationReason: 'OTHER' })
+      assert.strictEqual(out?.statusCode, 400)
+   })
+
+   check('a meal or a ride, once paid, waits only for completion; an online one reads "payment"', () => {
+      const meal = booking({ paymentStatus: 'PAID', status: 'CONFIRMED', delivery: { address: 'Gombe' } })
+      assert.strictEqual(orderStage(meal), 'PAID_PENDING_COMPLETION')
+      const ride = booking({ paymentStatus: 'PAID', status: 'CONFIRMED', items: [{ vertical: 'TRANSFER' }] })
+      assert.strictEqual(orderStage(ride), 'PAID_PENDING_COMPLETION')
+      assert.strictEqual(orderStage(booking({ paymentMethod: 'ONLINE', paymentStatus: 'PENDING' })), 'PAYMENT_PENDING')
+      assert.strictEqual(orderStage(booking({ status: 'CANCELLED', paymentStatus: 'PAID' })), 'CANCELLED')
+   })
 
    console.log('\nProcessing fees (2026-11-05)')
    check('a fee box is whole francs; blank is 0 (no fee), absent leaves it, below 0 is a 400', () => {

@@ -20,6 +20,13 @@ import {
    releaseStay,
 } from '../../services/orders/inventory.service'
 import { Order } from '../../model/orderModel'
+import {
+   documentsDelivered,
+   needsDocuments,
+   orderStage,
+   pendingCompletionFilter,
+   pendingDocumentFilter,
+} from '../../services/orders/orderStage'
 import { byWords, customerNameSort, paginate, sortBy } from '../../services/adminCrud.service'
 import { forReader } from '../../middleware/adminAuth'
 import { recordAudit } from '../../services/auditLog.service'
@@ -53,13 +60,9 @@ const searchRx = (value: string) =>
 const QUEUE_FILTERS: Record<string, () => Record<string, any>> = {
    'needs-action': () => ({
       $or: [
-         // Paid but no documents issued.
-         {
-            paymentStatus: PAYMENT_STATUS.PAID,
-            fulfilmentStatus: {
-               $in: [FULFILMENT_STATUS.NOT_STARTED, FULFILMENT_STATUS.DOCUMENTS_PENDING],
-            },
-         },
+         // Paid but no documents issued — a cancelled one too: money came in for
+         // it, so the office rebooks or refunds. A meal or a ride has none to issue.
+         { ...pendingDocumentFilter(), status: { $ne: ORDER_STATUS.COMPLETED } },
          { paymentStatus: PAYMENT_STATUS.FAILED },
          { paymentStatus: PAYMENT_STATUS.REVERSED },
          // A payment that may have been made and is not confirmed (the same
@@ -78,7 +81,10 @@ const QUEUE_FILTERS: Record<string, () => Record<string, any>> = {
       paymentStatus: { $in: [PAYMENT_STATUS.UNPAID, PAYMENT_STATUS.PENDING] },
       status: { $ne: ORDER_STATUS.CANCELLED },
    }),
-   'awaiting-confirmation': () => ({ status: ORDER_STATUS.SUBMITTED }),
+   // The workflow (2026-11-06): payment confirmed → documents → completion.
+   // There is no separate "confirm" step: confirming the payment confirms the booking.
+   'pending-document': pendingDocumentFilter,
+   'pending-completion': pendingCompletionFilter,
    'departing-soon': () => ({
       status: ORDER_STATUS.CONFIRMED,
       travelDate: {
@@ -255,8 +261,9 @@ export const transitionOrder = catchAsync(
             )
          )
       }
-      if (!reason) {
-         return next(new AppError('A reason is required for this change', 400))
+      // A cancellation is explained; moving a booking on along the workflow is not.
+      if (to === ORDER_STATUS.CANCELLED && !String(reason ?? '').trim()) {
+         return next(new AppError('A reason is required to cancel', 400))
       }
 
       const before = order.toObject()
@@ -329,11 +336,21 @@ export const transitionOrder = catchAsync(
                new AppError('An unpaid order cannot be completed', 409, 'ORDER_UNPAID')
             )
          }
+         // Then the documents: confirmed handed over before the booking closes.
+         if (needsDocuments(order) && !documentsDelivered(order)) {
+            return next(
+               new AppError(
+                  'Confirm the documents were handed over before completing the booking',
+                  409,
+                  'DOCUMENTS_PENDING'
+               )
+            )
+         }
          order.fulfilmentStatus = FULFILMENT_STATUS.DELIVERED
       }
 
       order.status = to
-      addTimeline(order, req, `STATUS_${to}`, undefined, reason)
+      addTimeline(order, req, `STATUS_${to}`, undefined, reason || undefined)
       await order.save()
 
       // A vehicle for sale: back on sale when its order is cancelled, sold
@@ -363,7 +380,7 @@ export const transitionOrder = catchAsync(
          entityId: order._id.toString(),
          before,
          after: order.toObject(),
-         reason,
+         reason: reason || undefined,
       })
 
       return sendResponse(res, 200, `Order ${to.toLowerCase()}`, {
@@ -470,8 +487,12 @@ export const attachDocument = catchAsync(
          })
          issued.push(`${kind} v${previous + 1}`)
       }
-      // Never step back from DELIVERED.
-      if (order.fulfilmentStatus !== FULFILMENT_STATUS.DELIVERED) {
+      // A ticket or voucher attached is the documents handed over: the booking
+      // moves on to completion. An invoice alone does not. Never step back from DELIVERED.
+      if (
+         kinds.some((k) => k !== 'INVOICE') &&
+         order.fulfilmentStatus !== FULFILMENT_STATUS.DELIVERED
+      ) {
          order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_ISSUED
       }
       addTimeline(order, req, 'DOCUMENTS_ISSUED', issued.join(', '))
@@ -515,8 +536,13 @@ export const removeDocument = catchAsync(
       const { storageKey, kind, version, fileName } = doc
 
       ;(order.documents as any).pull(doc._id)
-      // Nothing left to hand over: back to "paid, documents pending".
-      if (!order.documents.length && order.fulfilmentStatus === FULFILMENT_STATUS.DOCUMENTS_ISSUED) {
+      // No ticket or voucher left, and none confirmed handed over another way:
+      // back to "paid, documents pending".
+      if (
+         !order.documents.some((d: any) => d.kind !== 'INVOICE') &&
+         !order.timeline.some((t: any) => t.event === 'DOCUMENTS_DELIVERED') &&
+         order.fulfilmentStatus === FULFILMENT_STATUS.DOCUMENTS_ISSUED
+      ) {
          order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_PENDING
       }
       addTimeline(order, req, 'DOCUMENT_REMOVED', `${kind} v${version} — ${fileName}`, req.body?.reason)
@@ -554,27 +580,21 @@ export const markCashReceived = catchAsync(
       if (!order) return next(new AppError('Order not found', 404))
       const cash = order.paymentMethod === 'CASH'
       /**
-       * §BUG-001: idempotent, and only from the one state that means "owed at the
-       * counter". Without this guard a second click double-fires the hold→sold
+       * §BUG-001: idempotent, and only while the order is open and unpaid.
+       * Without this guard a second click double-fires the hold→sold
        * conversion, and a CANCELLED (inventory already released) order could be
-       * revived straight to PAID.
+       * revived straight to PAID. Open includes CONFIRMED: an order the office
+       * confirmed before the money came, when there was still a separate
+       * "confirm" button, is still owed (it used to be refused here).
        */
       if (
-         cash &&
-         (order.status !== ORDER_STATUS.SUBMITTED ||
-            order.paymentStatus !== PAYMENT_STATUS.UNPAID)
+         ![ORDER_STATUS.SUBMITTED, ORDER_STATUS.CONFIRMED].includes(order.status as any) ||
+         order.paymentStatus === PAYMENT_STATUS.PAID ||
+         order.paymentStatus === PAYMENT_STATUS.REVERSED
       ) {
-         return next(new AppError('Order is not awaiting cash payment', 409))
-      }
-      // Online: any order still open and not paid — started, declined, or
-      // awaiting MaxiCash's word; and one the office has already confirmed.
-      if (
-         !cash &&
-         (![ORDER_STATUS.SUBMITTED, ORDER_STATUS.CONFIRMED].includes(order.status as any) ||
-            order.paymentStatus === PAYMENT_STATUS.PAID ||
-            order.paymentStatus === PAYMENT_STATUS.REVERSED)
-      ) {
-         return next(new AppError('Order is not awaiting payment', 409))
+         return next(
+            new AppError(cash ? 'Order is not awaiting cash payment' : 'Order is not awaiting payment', 409)
+         )
       }
       if (!cash && !String(req.body?.reason ?? '').trim()) {
          return next(
@@ -625,6 +645,48 @@ export const markCashReceived = catchAsync(
          reason: req.body.reason,
       })
       return sendResponse(res, 200, cash ? 'Cash recorded as received' : 'Payment recorded as received', {
+         order: orderFor(req, order),
+      })
+   }
+)
+
+/**
+ * "Confirm document submission": the tickets, vouchers or vehicle papers
+ * reached the customer another way than a file attached here (attaching one
+ * already does this) — at the counter, by WhatsApp, by e-mail. The booking then
+ * waits only to be completed. The customer is not messaged: nothing new is
+ * there for them to open.
+ */
+export const markDocumentsDelivered = catchAsync(
+   async (req: Request, res: Response, next: NextFunction) => {
+      const order = await Order.findById(req.params.id)
+      if (!order) return next(new AppError('Order not found', 404))
+      if (!orderStage(order).endsWith('PENDING_DOCUMENT')) {
+         return next(new AppError('This booking is not waiting for its documents', 409))
+      }
+      const before = order.toObject()
+      order.fulfilmentStatus = FULFILMENT_STATUS.DOCUMENTS_ISSUED
+      const note = String(req.body?.reason ?? '').trim() || undefined
+      addTimeline(
+         order,
+         req,
+         'DOCUMENTS_DELIVERED',
+         order.documents.some((d: any) => d.kind !== 'INVOICE')
+            ? undefined
+            : 'Handed over outside the site',
+         note
+      )
+      await order.save()
+
+      await recordAudit(req, {
+         action: AUDIT_ACTIONS.UPDATE,
+         entityType: 'Order',
+         entityId: order._id.toString(),
+         before,
+         after: order.toObject(),
+         reason: note,
+      })
+      return sendResponse(res, 200, 'Documents recorded as handed over', {
          order: orderFor(req, order),
       })
    }
